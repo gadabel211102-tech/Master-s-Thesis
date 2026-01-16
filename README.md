@@ -80,9 +80,9 @@ The pipeline employs the following strict criteria for diagnostic-grade analysis
 
 | Metric | Threshold |
 | --- | --- |
-| **Total Reads** |  |
-| **Mapped Percentage** |  |
-| **On-Target Percentage** |  |
-| **Mean Coverage** |  |
-| **Uniformity ()** |  |
-| **Amplicon Floor** |  |
+| **Total Reads** |  120k |
+| **Mapped Percentage** | 90% |
+| **On-Target Percentage** | 75% |
+| **Mean Coverage** | 200x |
+| **Uniformity ()** | 95% |
+| **Amplicon Floor** | 50% |
