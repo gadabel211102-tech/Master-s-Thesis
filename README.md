@@ -85,4 +85,4 @@ The pipeline employs the following strict criteria for diagnostic-grade analysis
 | **On-Target Percentage** | 75% |
 | **Mean Coverage** | 200x |
 | **Uniformity ()** | 95% |
-| **Amplicon Floor** | 50% |
+| **Amplicon Floor** | 50x |
