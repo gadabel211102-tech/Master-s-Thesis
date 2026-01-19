@@ -1,20 +1,16 @@
-
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-import pandas as pd
-import glob
 import os
+import glob
+import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import seaborn as sns
+import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 
 # ==============================================================================
-# 1. VALIDATED QC THRESHOLDS & CONFIGURATION
+# 1. CONFIGURATION
 # ==============================================================================
-
 QC_LIMITS = {
     'total_reads': 120000,
     'mapped_pct': 90.0,
@@ -43,439 +39,864 @@ PALETTE = {
     'Endometrium Control': '#2ecc71'
 }
 
-STATUS_PALETTE = {'Pass': '#2ecc71', 'Fail': '#e74c3c'}
+STATUS_PALETTE = {
+    'Pass': '#2ecc71',
+    'Fail': '#e74c3c'
+}
 
-# Fail loudly if a sample looks empty
 STRICT_MOSDEPTH = True
-MIN_NUMERIC_FRACTION = 0.50   # warn if <50% of rows are numeric for a sample
+MIN_NUMERIC_FRACTION = 0.50
+
 
 # ==============================================================================
-# Utilities
+# 2. UTILITIES
 # ==============================================================================
-
 def normalise_sample(s: str) -> str:
     s = str(s).strip()
-    s = s.replace(" ", "_")
-    s = s.replace(".regions", "").replace(".bed", "").replace(".gz", "")
-    return s
+    return (
+        s.replace(" ", "_")
+        .replace(".regions", "")
+        .replace(".bed", "")
+        .replace(".gz", "")
+    )
+
 
 def normalise_chr(c: str) -> str:
-    """Normalise chromosome labels to 'chr*'. Assumes hg-style naming."""
     c = str(c)
     if c.startswith("chr"):
         return c
-    # Common numerics or single letters
     if c in {"X", "Y", "M", "MT"}:
         return "chrM" if c in {"M", "MT"} else f"chr{c}"
-    # Numeric contigs
     try:
-        _n = int(c)
-        return f"chr{_n}"
-    except ValueError:
-        # Leave as-is for alt contigs, but ensure it starts with 'chr'
+        return f"chr{int(c)}"
+    except Exception:
         return c if c.startswith("chr") else f"chr{c}"
 
+
 def pick_depth_column(df: pd.DataFrame) -> int:
-    """
-    Determine which column is the depth column.
-    Heuristic:
-      - If 4 columns, the 4th is depth (mosdepth regions standard).
-      - If >4, try last column first; fall back to any column that is mostly numeric.
-      - If 3 columns, there is no depth -> return -1.
-    """
     ncols = df.shape[1]
     if ncols == 4:
         return 3
     if ncols < 4:
         return -1
-    # Try last col
     last = df.columns[-1]
-    frac_numeric = pd.to_numeric(df[last], errors='coerce').notna().mean()
-    if frac_numeric > 0.8:
+    frac = pd.to_numeric(df[last], errors='coerce').notna().mean()
+    if frac > 0.8:
         return ncols - 1
-    # Otherwise, search all columns after the first three
-    candidates = range(3, ncols)
-    best_col = -1
-    best_frac = -1.0
-    for i in candidates:
-        frac = pd.to_numeric(df.iloc[:, i], errors='coerce').notna().mean()
-        if frac > best_frac:
-            best_frac = frac
-            best_col = i
-    return best_col if best_frac >= 0.5 else -1
+    best, best_frac = -1, -1
+    for i in range(3, ncols):
+        f = pd.to_numeric(df.iloc[:, i], errors='coerce').notna().mean()
+        if f > best_frac:
+            best, best_frac = i, f
+    return best if best_frac >= 0.5 else -1
 
-def load_one_regions(file_path: str, sample_name: str) -> pd.DataFrame:
+
+# ==============================================================================
+# 3. LOADING
+# ==============================================================================
+def load_annotation_for_cohort(root_path: str) -> pd.DataFrame:
     """
-    Load a mosdepth .regions.bed.gz robustly and return a dataframe:
-        index = id (chr:start-end)
-        columns = ['chr', 'start', 'end', sample_name]  (depth numeric)
-    Raises a clear error if depth looks invalid and STRICT_MOSDEPTH is True.
+    YOUR BED FORMAT:
+    track ...
+    chr start end annotationID (e.g. 557315\nrs294150)
+    So we load 4 columns only.
     """
-    raw = pd.read_csv(file_path, sep='\t', header=None, compression='gzip', dtype=str)
+    annot_file = os.path.join(root_path, "dna_qc", "targets.annotated.bed")
+    if not os.path.exists(annot_file):
+        raise FileNotFoundError(f"Annotation file not found: {annot_file}")
+    ann = pd.read_csv(
+        annot_file,
+        sep="\t",
+        header=None,
+        comment='t',  # skip "track" line
+        names=["chr", "start", "end", "annotation"]
+    )
+    ann["chr"] = ann["chr"].astype(str)
+    ann["annot_id"] = ann["annotation"]
+    ann = ann.drop_duplicates(["chr", "start", "end"])
+    return ann
+
+
+def load_coverage_for_file(path: str, sample_name: str) -> pd.DataFrame:
+    raw = pd.read_csv(path, sep="\t", header=None, compression="gzip", dtype=str)
     if raw.empty:
-        msg = f"[ERROR] {file_path} is empty."
-        if STRICT_MOSDEPTH: raise ValueError(msg)
-        print(msg)
-        return pd.DataFrame(columns=['chr', 'start', 'end', sample_name]).set_index([])
-
-    # Ensure we have at least 3 coordinate columns
-    if raw.shape[1] < 3:
-        raise ValueError(f"[ERROR] {file_path} has <3 columns; cannot parse coordinates.")
-
-    # Coerce coord columns
+        if STRICT_MOSDEPTH:
+            raise ValueError(f"{path} is empty")
+        return pd.DataFrame(columns=["chr", "start", "end", sample_name]).set_index([])
     raw.iloc[:, 0] = raw.iloc[:, 0].map(normalise_chr)
-    # Start/end as integers where possible
     raw.iloc[:, 1] = pd.to_numeric(raw.iloc[:, 1], errors='coerce')
     raw.iloc[:, 2] = pd.to_numeric(raw.iloc[:, 2], errors='coerce')
 
-    # Find depth column
     depth_col = pick_depth_column(raw)
-    if depth_col == -1:
-        msg = (f"[ERROR] {file_path} has no usable depth column; "
-               f"detected {raw.shape[1]} columns. First rows:\n{raw.head(3)}")
-        if STRICT_MOSDEPTH: raise ValueError(msg)
-        print(msg)
-        depth = pd.Series(np.nan, index=raw.index)
-    else:
-        depth = pd.to_numeric(raw.iloc[:, depth_col], errors='coerce')
+    depth = (
+        pd.to_numeric(raw.iloc[:, depth_col], errors='coerce')
+        if depth_col != -1 else pd.Series(np.nan, index=raw.index)
+    )
 
     df = pd.DataFrame({
-        'chr': raw.iloc[:, 0].astype(str),
-        'start': raw.iloc[:, 1].astype('Int64'),
-        'end': raw.iloc[:, 2].astype('Int64'),
+        "chr": raw.iloc[:, 0].astype(str),
+        "start": raw.iloc[:, 1].astype("Int64"),
+        "end": raw.iloc[:, 2].astype("Int64"),
         sample_name: depth
     })
+    df["id"] = df["chr"] + ":" + df["start"].astype(str) + "-" + df["end"].astype(str)
+    df = df.drop_duplicates("id").set_index("id")
 
-    # Build robust ID
-    df['id'] = df['chr'] + ':' + df['start'].astype(str) + '-' + df['end'].astype(str)
-    df = df.drop_duplicates('id').set_index('id')
-
-    # Quick per-sample audit
-    frac_numeric = df[sample_name].notna().mean()
-    if frac_numeric < MIN_NUMERIC_FRACTION:
-        msg = (f"[WARN] {sample_name}: only {frac_numeric:.1%} of amplicons have numeric depth "
-               f"(file {os.path.basename(file_path)}). "
-               f"This will appear blank or nearly blank in heatmaps.")
-        print(msg)
-        if STRICT_MOSDEPTH:
-            # Make it a hard error so you catch it immediately
-            raise ValueError(msg)
-
+    frac = df[sample_name].notna().mean()
+    if frac < MIN_NUMERIC_FRACTION and STRICT_MOSDEPTH:
+        raise ValueError(f"{sample_name}: only {frac:.1%} numeric")
     return df
 
-def join_by_id(sample_frames: list) -> pd.DataFrame:
-    """
-    Outer-join all per-sample frames on 'id' and keep coord columns from the first.
-    """
-    base = None
-    for one in sample_frames:
-        # 'one' is indexed by 'id'; last col is the sample depth
-        if base is None:
-            base = one.copy()
-        else:
-            # Identify the sample column to join in
-            sample_col = [c for c in one.columns if c not in ['chr', 'start', 'end']]
-            base = base.join(one[sample_col], how='outer')
-    return base
+
+def load_coverage_for_cohort(cohort_name: str, root_path: str) -> pd.DataFrame:
+    pattern = os.path.join(root_path, "**", "*.regions.bed.gz")
+    files = [
+        f for f in glob.glob(pattern, recursive=True)
+        if f.endswith(".regions.bed.gz") and ".bai" not in f.lower()
+    ]
+    if not files:
+        return pd.DataFrame()
+
+    frames = []
+    for f in files:
+        name = normalise_sample(os.path.basename(f).replace(".regions.bed.gz", ""))
+        try:
+            frames.append(load_coverage_for_file(f, name))
+        except Exception as e:
+            print(f"[ERROR] {cohort_name}: {f}: {e}")
+            dummy = pd.DataFrame(columns=["chr", "start", "end", name])
+            frames.append(dummy.set_index([]))
+
+    combined = frames[0].copy()
+    for frame in frames[1:]:
+        cols = [c for c in frame.columns if c not in ["chr", "start", "end"]]
+        combined = combined.join(frame[cols], how="outer")
+    return combined.reset_index()
+
+
+def load_qc_for_cohort(cohort_name: str, root_path: str) -> pd.DataFrame:
+    qc_file = os.path.join(root_path, "dna_qc", "qc_summary.tsv")
+    if not os.path.exists(qc_file):
+        return pd.DataFrame()
+    df = pd.read_csv(qc_file, sep="\t")
+    df["cohort"] = cohort_name
+    df["status"] = df["status"].str.capitalize()
+    df["sample_norm"] = df["sample"].apply(normalise_sample)
+    return df
+
 
 # ==============================================================================
-# 2. PIPELINE
+# 4. PIPELINE ASSEMBLY
 # ==============================================================================
-
-def run_validated_pipeline():
-
-    # Create directories
+def build_pipeline():
     for p in PATHS.values():
         os.makedirs(p, exist_ok=True)
 
-    print("[*] Phase 1: Consolidating Panel Data and Harmonising Coordinates...")
-
-    master_qc_list = []
+    qc_frames = []
     cohort_dfs = {}
+    annotation_frames = []
 
-    # Load QC + coverage per cohort
-    for cohort, subpath in COHORT_MAP.items():
-        full_subpath = os.path.join(PATHS['raw_root'], subpath)
-        if not os.path.exists(full_subpath):
+    print("[*] Loading...")
+    for cohort, relpath in COHORT_MAP.items():
+        root = os.path.join(PATHS["raw_root"], relpath)
+        if not os.path.exists(root):
+            print(f"[WARN] Missing path {root}")
             continue
 
-        # QC summaries
-        qc_file = os.path.join(full_subpath, "dna_qc/qc_summary.tsv")
-        if os.path.exists(qc_file):
-            temp_df = pd.read_csv(qc_file, sep="\t").assign(cohort=cohort)
-            temp_df["status"] = temp_df["status"].str.capitalize()
-            temp_df["sample_norm"] = temp_df["sample"].apply(normalise_sample)
-            master_qc_list.append(temp_df)
+        qc = load_qc_for_cohort(cohort, root)
+        if not qc.empty:
+            qc_frames.append(qc)
 
-        # Coverage files
-        bed_pattern = os.path.join(full_subpath, "**/*.regions.bed.gz")
-        files = [
-            f for f in glob.glob(bed_pattern, recursive=True)
-            if f.endswith(".regions.bed.gz") and ".bai" not in f.lower()
-        ]
-        if not files:
+        cov = load_coverage_for_cohort(cohort, root)
+        if cov.empty:
+            print(f"[WARN] No coverage for {cohort}")
             continue
 
-        sample_frames = []
-        debug_rows = []
-        for f in files:
-            s_name = normalise_sample(os.path.basename(f).replace(".regions.bed.gz", ""))
-            try:
-                one = load_one_regions(f, s_name)
-                sample_frames.append(one)
-                total = one.shape[0]
-                numeric = one[s_name].notna().sum()
-                zeros = (one[s_name] == 0).sum() if numeric > 0 else 0
-                debug_rows.append({
-                    'sample': s_name,
-                    'file': os.path.basename(f),
-                    'amplicons_total': int(total),
-                    'numeric_depth': int(numeric),
-                    'zeros': int(zeros),
-                    'numeric_fraction': float(numeric / total) if total else 0.0
-                })
-            except Exception as e:
-                print(f"[ERROR] Failed to load {f}: {e}")
-                # Create a fully-NaN column for visibility, but mark it
-                dummy = pd.DataFrame(columns=['chr','start','end', s_name])
-                sample_frames.append(dummy.set_index([]))
+        ann = load_annotation_for_cohort(root)
+        annotation_frames.append(ann)
 
-        if not sample_frames:
-            print(f"[!] No usable coverage frames for {cohort}")
-            continue
+        # *** FIXED MERGE ***
+        cov = cov.merge(
+            ann[["chr", "start", "end", "annotation", "annot_id"]],
+            on=["chr", "start", "end"],
+            how="left"
+        )
+        cohort_dfs[cohort] = cov
 
-        combined = join_by_id(sample_frames).reset_index()
-        cohort_dfs[cohort] = combined
+        out_full = os.path.join(
+            PATHS["out_dir"], f"GSDMB_{cohort.replace(' ', '_')}_FullPanel.csv"
+        )
+        cov.to_csv(out_full, index=False)
 
-        # Persist cohort CSV and debug audit
-        csv_name = f"GSDMB_{cohort.replace(' ', '_')}_Full_Panel.csv"
-        combined.to_csv(os.path.join(PATHS['out_dir'], csv_name), index=False)
+        # Audit
+        s_cols = [c for c in cov.columns
+                  if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
+        rows = []
+        for s in s_cols:
+            depth = cov[s]
+            tot = len(depth)
+            num = depth.notna().sum()
+            zeros = (depth == 0).sum()
+            rows.append({
+                "sample": s,
+                "amplicons_total": tot,
+                "numeric_depth": num,
+                "zeros": zeros,
+                "numeric_fraction": num / tot if tot else 0
+            })
+        audit = pd.DataFrame(rows)
+        audit.to_csv(
+            os.path.join(PATHS["out_dir"], f"CoverageAudit_{cohort.replace(' ', '_')}.csv"),
+            index=False
+        )
 
-        dbg = pd.DataFrame(debug_rows)
-        dbg_name = f"DEBUG_cohort_coverage_audit_{cohort.replace(' ', '_')}.csv"
-        dbg.to_csv(os.path.join(PATHS['out_dir'], dbg_name), index=False)
-
-    if not cohort_dfs:
-        print("[!] ERROR: No data found in directories.")
-        return
-
-    full_qc_df = pd.concat(master_qc_list) if master_qc_list else pd.DataFrame()
-
-    # Global matrix: union of amplicons; keep NaN (missing) so they’re masked in heatmaps
-    all_cov = pd.concat(
-        [
-            df.set_index("id").drop(columns=['chr', 'start', 'end'], errors='ignore')
-            for df in cohort_dfs.values()
-        ],
-        axis=1
+    full_qc = (pd.concat(qc_frames, ignore_index=True) if qc_frames else pd.DataFrame())
+    annotation_df = (
+        pd.concat(annotation_frames, ignore_index=True)
+        .drop_duplicates(["chr", "start", "end"])
+        if annotation_frames
+        else pd.DataFrame(columns=["chr", "start", "end", "annotation", "annot_id"])
     )
 
-    failing_samples = full_qc_df[full_qc_df["status"] == "Fail"]["sample_norm"].tolist()
+    print("[*] Building global coverage...")
+    all_cov_frames = []
+    for cohort, df in cohort_dfs.items():
+        tmp = df.set_index("id").drop(columns=["chr", "start", "end", "annotation", "annot_id"],
+                                      errors="ignore")
+        all_cov_frames.append(tmp)
+    all_cov = pd.concat(all_cov_frames, axis=1) if all_cov_frames else pd.DataFrame()
 
-    # ==============================================================================
-    # 3. PLOTTING (unchanged, but with masks where appropriate)
-    # ==============================================================================
+    failing_samples = (
+        full_qc[full_qc["status"] == "Fail"]["sample_norm"].tolist()
+        if not full_qc.empty else []
+    )
 
-    print("[*] Phase 2: Generating Harmonised TFM Visualisations (16 Figures)...")
+    print("[*] Done loading.")
+    return full_qc, cohort_dfs, annotation_df, all_cov, failing_samples
 
+
+# ==============================================================================
+# 5. PLOTTING
+# ==============================================================================
+def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
     sns.set_context("paper", font_scale=1.2)
     plt.rcParams["figure.dpi"] = 300
 
+    # ======================================================================
     # 01. PCA
+    # ======================================================================
     if not full_qc_df.empty:
         feats = ['mean_cov', 'on_target_pct', 'total_reads', 'mapped_pct']
-        x_scaled = StandardScaler().fit_transform(full_qc_df[feats].fillna(0))
-        pca_res = PCA(n_components=2).fit_transform(x_scaled)
+        X = StandardScaler().fit_transform(full_qc_df[feats].fillna(0))
 
-        full_qc_df["PC1"], full_qc_df["PC2"] = pca_res[:, 0], pca_res[:, 1]
+        pca = PCA(n_components=2)
+        pcs = pca.fit_transform(X)
+        var1 = pca.explained_variance_ratio_[0] * 100
+        var2 = pca.explained_variance_ratio_[1] * 100
+
+        full_qc_df["PC1"], full_qc_df["PC2"] = pcs[:, 0], pcs[:, 1]
 
         plt.figure(figsize=(8, 6))
         ax = sns.scatterplot(
-            data=full_qc_df,
-            x="PC1", y="PC2",
+            data=full_qc_df, x="PC1", y="PC2",
             hue="cohort", style="status",
             palette=PALETTE, s=100
         )
-        plt.xlabel("Principal Component 1")
-        plt.ylabel("Principal Component 2")
-        plt.title("Technical Map (PCA)")
-        ax.legend(title="Cohort and Status", bbox_to_anchor=(1.05, 1), loc='upper left')
+        ax.set_xlabel(f"PC1 ({var1:.1f}% variance)")
+        ax.set_ylabel(f"PC2 ({var2:.1f}% variance)")
+        plt.title("PCA of QC Metrics")
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         plt.tight_layout()
         plt.savefig(f"{PATHS['plots_dir']}/01_pca.png")
+        plt.close()
 
-    # 02–04. Cohort heatmaps (mask NaN)
+        # 01b. Pass-only PCA
+        pass_only = full_qc_df[full_qc_df["status"] == "Pass"].copy()
+        if len(pass_only) >= 3:
+            X = StandardScaler().fit_transform(pass_only[feats].fillna(0))
+
+            pca = PCA(n_components=2)
+            pcs = pca.fit_transform(X)
+            var1 = pca.explained_variance_ratio_[0] * 100
+            var2 = pca.explained_variance_ratio_[1] * 100
+
+            pass_only["PC1"], pass_only["PC2"] = pcs[:, 0], pcs[:, 1]
+
+            plt.figure(figsize=(8, 6))
+            ax = sns.scatterplot(
+                data=pass_only, x="PC1", y="PC2",
+                hue="cohort", palette=PALETTE, s=100
+            )
+            ax.set_xlabel(f"PC1 ({var1:.1f}% variance)")
+            ax.set_ylabel(f"PC2 ({var2:.1f}% variance)")
+            plt.title("PCA (Pass-Only Samples)")
+            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            plt.tight_layout()
+            plt.savefig(f"{PATHS['plots_dir']}/01b_pca_pass_only.png")
+            plt.close()
+
+    # ======================================================================
+    # 02. Cohort heatmaps
+    # ======================================================================
     for cohort, df in cohort_dfs.items():
-        s_cols = [c for c in df.columns if c not in ['chr', 'start', 'end', 'id']]
+        s_cols = [c for c in df.columns
+                  if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
         dmat = df.set_index("id")[s_cols]
         logmat = np.log10(dmat + 1)
         mask = dmat.isna()
 
         plt.figure(figsize=(12, 8))
-        sns.heatmap(logmat, cmap="magma", mask=mask, xticklabels=True, vmin=0, vmax=4)
-        plt.xlabel("Sample Identifier")
-        plt.ylabel("Amplicon Genomic Position")
-        plt.title(f"Heatmap – {cohort} Depth Intensity")
-
+        sns.heatmap(logmat, cmap="magma", mask=mask, vmin=0, vmax=4)
         ax = plt.gca()
         plt.xticks(rotation=45, ha='right', fontsize=8)
         for label in ax.get_xticklabels():
             if normalise_sample(label.get_text()) in failing_samples:
-                label.set_color('red'); label.set_weight('bold')
-
+                label.set_color("red")
+                label.set_weight("bold")
+        plt.title(f"Coverage Heatmap — {cohort}")
         plt.tight_layout()
         plt.savefig(f"{PATHS['plots_dir']}/02_heatmap_{cohort.replace(' ', '_')}.png")
+        plt.close()
 
-    # 05. Global heatmap (mask NaN)
-    plt.figure(figsize=(16, 10))
-    sns.heatmap(np.log10(all_cov + 1), cmap="magma", mask=all_cov.isna(),
-                xticklabels=True, vmin=0, vmax=4)
-    plt.xlabel("Global Sample Set")
-    plt.ylabel("Amplicon Genomic Position")
-    plt.title("Global Overall Coverage Intensity")
+    # ======================================================================
+    # 03. Global Heatmap
+    # ======================================================================
+    if not all_cov.empty:
+        plt.figure(figsize=(16, 10))
+        sns.heatmap(np.log10(all_cov + 1), cmap="magma",
+                    mask=all_cov.isna(), vmin=0, vmax=4)
+        ax = plt.gca()
+        plt.xticks(rotation=45, ha='right', fontsize=6)
+        for label in ax.get_xticklabels():
+            if normalise_sample(label.get_text()) in failing_samples:
+                label.set_color("red")
+                label.set_weight("bold")
+        plt.title("Global Coverage Heatmap")
+        plt.tight_layout()
+        plt.savefig(f"{PATHS['plots_dir']}/03_heatmap_global.png")
+        plt.close()
 
-    ax = plt.gca()
-    plt.xticks(rotation=45, ha='right', fontsize=6)
-    for label in ax.get_xticklabels():
-        if normalise_sample(label.get_text()) in failing_samples:
-            label.set_color('red'); label.set_weight('bold')
-    plt.tight_layout()
-    plt.savefig(f"{PATHS['plots_dir']}/03_heatmap_global_all.png")
-
-    # 06–16 unchanged except NaN-safe logic
-    if not full_qc_df.empty:
-        plt.figure(figsize=(10, 6))
-        sns.barplot(data=full_qc_df, x='cohort', y='mapped_pct', hue='cohort',
-                    palette=PALETTE, errorbar='sd', legend=False)
-        plt.axhline(QC_LIMITS['mapped_pct'], color='red', ls='--')
-        plt.xlabel("Patient Cohort"); plt.ylabel("Mapped Reads (%)")
-        plt.title("Mean Mapping Rate per Cohort")
-        plt.savefig(f"{PATHS['plots_dir']}/06_mapped_reads_bar.png")
-
-    plt.figure(figsize=(15, 6))
+    # ======================================================================
+    # 04. Scatter Coverage
+    # ======================================================================
     for cohort, df in cohort_dfs.items():
-        s_cols = [c for c in df.columns if c not in ['chr', 'start', 'end', 'id']]
+        s_cols = [c for c in df.columns
+                  if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
+
+        def chrkey(c):
+            c = str(c).replace("chr", "")
+            mapping = {"X": 23, "Y": 24, "M": 25, "MT": 25}
+            try:
+                return int(c)
+            except Exception:
+                return mapping.get(c, 1000)
+
+        od = df[["chr", "start", "end", "id"]].drop_duplicates()
+        od["key"] = od["chr"].apply(chrkey)
+        od = od.sort_values(["key", "start", "end"])
+        ordered = od["id"].tolist()
+
+        long = df.melt(
+            id_vars=["chr", "start", "end", "id", "annotation", "annot_id"],
+            value_vars=s_cols,
+            var_name="sample",
+            value_name="depth"
+        )
+        long["id"] = pd.Categorical(long["id"], categories=ordered, ordered=True)
+        long["log_depth"] = np.log10(long["depth"] + 1)
+
+        plt.figure(figsize=(12, 16))
+        ax = sns.scatterplot(data=long, x="sample", y="id",
+                             hue="log_depth", palette="magma", s=20)
+
+        # Proper tick fix
+        ticks = ax.get_xticks()
+        labels = [lbl.get_text() for lbl in ax.get_xticklabels()]
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(labels, rotation=45, ha='right')
+
+        for lbl in ax.get_xticklabels():
+            if normalise_sample(lbl.get_text()) in failing_samples:
+                lbl.set_color("red")
+                lbl.set_weight("bold")
+
+        plt.title(f"Per-Amplicon Depth Scatter — {cohort}")
+        plt.tight_layout()
+        plt.savefig(f"{PATHS['plots_dir']}/04_scatter_{cohort.replace(' ', '_')}.png")
+        plt.close()
+
+    # ======================================================================
+    # 05. Panel Landscape (index order)
+    # ======================================================================
+    plt.figure(figsize=(15, 6))
+    ax = plt.gca()
+    cohort_handles = []
+    for cohort, df in cohort_dfs.items():
+        s_cols = [c for c in df.columns
+                  if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
         med = df[s_cols].median(axis=1)
-        plt.plot(range(len(df)), med, label=cohort, color=PALETTE[cohort], lw=2)
-    plt.axhline(QC_LIMITS['worst_amplicon_floor'], color='red', ls='--')
-    plt.axhline(QC_LIMITS['mean_cov'], color='gold', ls=':')
-    plt.yscale('log'); plt.xlabel("Amplicon Position (Index)"); plt.ylabel("Median Depth (X)")
-    plt.title("Panel Landscape vs. Validated Thresholds")
-    plt.legend(title="Cohort", bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout(); plt.savefig(f"{PATHS['plots_dir']}/07_panel_landscape.png")
+        line, = ax.plot(
+            range(len(med)),
+            med,
+            lw=2,
+            label=cohort,
+            color=PALETTE[cohort]
+        )
+        cohort_handles.append(line)
 
-    if not full_qc_df.empty:
-        plt.figure(figsize=(9, 6))
-        sns.violinplot(data=full_qc_df, x='cohort', y='on_target_pct',
-                       hue='cohort', palette=PALETTE, inner="quart", legend=False)
-        plt.axhline(QC_LIMITS['on_target_pct'], color='darkred', ls='--')
-        plt.xlabel("Patient Cohort"); plt.ylabel("On-Target Reads (%)")
-        plt.title("Sequencing Specificity Distribution")
-        plt.savefig(f"{PATHS['plots_dir']}/08_specificity_violin.png")
+    mean_line = QC_LIMITS['mean_cov']
+    floor_line = QC_LIMITS['worst_amplicon_floor']
+    h_mean = ax.axhline(mean_line, color="gold", ls=":", lw=2, label=f"Mean ≥ {mean_line}×")
+    h_floor = ax.axhline(floor_line, color="red", ls="--", lw=2, label=f"Floor {floor_line}×")
 
-    # 09. Gaps audit (ignore NaN)
+    ax.set_yscale("log")
+    ax.set_xlabel("Amplicon Index")
+    ax.set_ylabel("Median Depth (×)")
+    ax.set_title("Panel Landscape vs Thresholds")
+
+    # Fixed legend
+    handles = cohort_handles + [h_mean, h_floor]
+    labels = [h.get_label() for h in handles]
+    ax.legend(handles, labels, bbox_to_anchor=(1.02, 1), loc='upper left')
+
+    plt.tight_layout()
+    plt.savefig(f"{PATHS['plots_dir']}/05_landscape_index.png")
+    plt.close()
+
+    # ======================================================================
+    # 06. Panel landscape ordered by genomic coordinate
+    # ======================================================================
+    def _chr_order(c):
+        c = str(c).replace("chr", "")
+        mapping = {"X": 23, "Y": 24, "M": 25, "MT": 25}
+        try:
+            return int(c)
+        except Exception:
+            return mapping.get(c, 1000)
+
+    coord_frames = []
+    for cohort, df in cohort_dfs.items():
+        coord_frames.append(df[["chr", "start", "end", "id"]].drop_duplicates())
+    kdf = pd.concat(coord_frames).drop_duplicates()
+    kdf["key"] = kdf["chr"].apply(_chr_order)
+    kdf = kdf.sort_values(["key", "start", "end"])
+    ordered_ids = kdf["id"].tolist()
+
+    plt.figure(figsize=(18, 6))
+    ax = plt.gca()
+    cohort_handles = []
+    for cohort, df in cohort_dfs.items():
+        s_cols = [c for c in df.columns
+                  if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
+        med = df[s_cols].median(axis=1)
+        t = (
+            pd.DataFrame({"id": df["id"], "med": med})
+            .drop_duplicates("id")
+            .set_index("id")
+            .reindex(ordered_ids)
+        )
+        xvals = np.arange(len(ordered_ids))
+        line, = ax.plot(
+            xvals,
+            t["med"].values,
+            lw=2,
+            label=cohort,
+            color=PALETTE[cohort]
+        )
+        cohort_handles.append(line)
+
+    h_mean = ax.axhline(mean_line, color="gold", ls=":", lw=2, label=f"Mean ≥ {mean_line}×")
+    h_floor = ax.axhline(floor_line, color="red", ls="--", lw=2, label=f"Floor {floor_line}×")
+
+    if ordered_ids:
+        n = len(ordered_ids)
+        step = max(1, n // 40)
+        sel = list(range(0, n, step))
+        ax.set_xticks(sel)
+        ax.set_xticklabels(
+            [ordered_ids[i] for i in sel],
+            rotation=45,
+            ha='right',
+            fontsize=7
+        )
+
+    ax.set_yscale("log")
+    ax.set_xlabel("Amplicon ID (Genomic Coordinates)")
+    ax.set_ylabel("Median Depth (×)")
+    ax.set_title("Panel Landscape (Genomic Coordinates)")
+
+    handles = cohort_handles + [h_mean, h_floor]
+    labels = [h.get_label() for h in handles]
+    ax.legend(handles, labels, bbox_to_anchor=(1.02, 1), loc='upper left')
+
+    plt.tight_layout()
+    plt.savefig(f"{PATHS['plots_dir']}/06_landscape_genomic_ids.png")
+    plt.close()
+
+    # ======================================================================
+    # 07. Panel landscape by gene
+    # ======================================================================
+    def parse_gene_or_annotation(a):
+        if pd.isna(a):
+            return None
+        t = str(a)
+        if "\n" in t:
+            return t.split("\n")[1]
+        return t.strip()
+
+    gene_frames = []
+    for cohort, df in cohort_dfs.items():
+        if "annotation" not in df.columns:
+            continue
+        tmp = df[["annotation", "chr", "start", "end"]].dropna(subset=["annotation"]).copy()
+        if tmp.empty:
+            continue
+        tmp["gene"] = tmp["annotation"].apply(parse_gene_or_annotation)
+        tmp = tmp.dropna(subset=["gene"])
+        grp = (
+            tmp.groupby("gene", as_index=False)
+               .agg({"chr": "first", "start": "min", "end": "max"})
+        )
+        grp["key"] = grp["chr"].apply(_chr_order)
+        gene_frames.append(grp)
+
+    if not gene_frames:
+        print("[INFO] 07 (genes) skipped: no gene annotations found.")
+    else:
+        gdf = pd.concat(gene_frames, ignore_index=True).drop_duplicates("gene")
+        gdf = gdf.sort_values(["key", "start", "end"])
+        gene_order = gdf["gene"].tolist()
+
+        plt.figure(figsize=(18, 6))
+        ax = plt.gca()
+        cohort_handles = []
+        for cohort, df in cohort_dfs.items():
+            s_cols = [c for c in df.columns
+                      if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
+            med_amp = df[s_cols].median(axis=1)
+            tmp = pd.DataFrame({"annotation": df["annotation"], "med": med_amp}).copy()
+            tmp["gene"] = tmp["annotation"].apply(parse_gene_or_annotation)
+            tmp = tmp.dropna(subset=["gene"])
+            gmed = tmp.groupby("gene")["med"].median().reindex(gene_order)
+            xvals = np.arange(len(gene_order))
+            line, = ax.plot(
+                xvals,
+                gmed.values,
+                lw=2,
+                label=cohort,
+                color=PALETTE[cohort]
+            )
+            cohort_handles.append(line)
+
+        h_mean = ax.axhline(mean_line, color="gold", ls=":", lw=2)
+        h_floor = ax.axhline(floor_line, color="red", ls="--", lw=2)
+
+        n = len(gene_order)
+        step = max(1, n // 40)
+        sel = list(range(0, n, step))
+        ax.set_xticks(sel)
+        ax.set_xticklabels(
+            [gene_order[i] for i in sel],
+            rotation=45,
+            ha='right',
+            fontsize=7
+        )
+
+        ax.set_yscale("log")
+        ax.set_xlabel("Annotated Region (Genomic Order)")
+        ax.set_ylabel("Median Depth (×)")
+        ax.set_title("Panel Landscape (Region)")
+
+        handles = cohort_handles + [h_mean, h_floor]
+        labels = [h.get_label() for h in handles]
+        ax.legend(handles, labels, bbox_to_anchor=(1.02, 1), loc='upper left')
+
+        plt.tight_layout()
+        plt.savefig(f"{PATHS['plots_dir']}/07_landscape_genes.png")
+        plt.close()
+
+	
+    # ======================================================================
+    # 08. Coverage Gaps (<50×)
+    # ======================================================================
     gap_stats = []
     for cohort, df in cohort_dfs.items():
-        s_cols = [c for c in df.columns if c not in ['chr', 'start', 'end', 'id']]
+        s_cols = [
+            c for c in df.columns
+            if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]
+        ]
         for s in s_cols:
             vals = df[s]
             gaps = (vals < QC_LIMITS['worst_amplicon_floor']) & (~vals.isna())
-            gap_stats.append({'cohort': cohort, 'sample': s, 'gaps': int(gaps.sum())})
-    plt.figure(figsize=(9, 6))
-    sns.boxplot(data=pd.DataFrame(gap_stats), x='cohort', y='gaps',
-                hue='cohort', palette=PALETTE, legend=False)
-    plt.xlabel("Patient Cohort"); plt.ylabel("Failed Amplicons (<50x)")
-    plt.title("Coverage Gaps")
-    plt.savefig(f"{PATHS['plots_dir']}/09_gaps_audit.png")
+            gap_stats.append({
+                "cohort": cohort,
+                "sample": s,
+                "gaps": int(gaps.sum())
+            })
 
-    if not full_qc_df.empty:
-        plt.figure(figsize=(10, 7))
-        sns.scatterplot(data=full_qc_df, x='mean_cov', y='on_target_pct',
-                        hue='status', style='cohort', palette=STATUS_PALETTE, s=120)
-        plt.axvline(QC_LIMITS['mean_cov'], color='gold', ls=':')
-        plt.axhline(QC_LIMITS['on_target_pct'], color='red', ls='--')
-        plt.xlabel("Mean Coverage Depth (X)"); plt.ylabel("On-Target Reads (%)")
-        plt.title("Mean Coverage vs. Specificity")
-        plt.legend(title="Status", bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.tight_layout(); plt.savefig(f"{PATHS['plots_dir']}/10_correlation.png")
+    gap_df = pd.DataFrame(gap_stats)
 
-    if not full_qc_df.empty:
-        plt.figure(figsize=(10, 7))
-        full_qc_df.groupby(['cohort', 'status']).size().unstack().fillna(0).plot(
-            kind='bar', stacked=True, color=STATUS_PALETTE, ax=plt.gca()
+    plt.figure(figsize=(10, 7))
+    ax = sns.boxplot(
+        data=gap_df,
+        x="cohort",
+        y="gaps",
+        hue="cohort",
+        palette=PALETTE,
+        legend=False
+    )
+
+    cohort_levels = list(gap_df["cohort"].unique())
+    n_cohorts = len(cohort_levels)
+    structural_lines = n_cohorts * 6
+
+    for line in ax.lines[structural_lines:]:
+        if line.get_marker() not in ["o", "s", "D", "^", "v"]:
+            continue
+        xs = line.get_xdata()
+        ys = line.get_ydata()
+        if len(xs) != 1:
+            continue
+        x, y = float(xs[0]), float(ys[0])
+        nearest_x = int(round(x))
+        if nearest_x < 0 or nearest_x >= n_cohorts:
+            continue
+        cohort = cohort_levels[nearest_x]
+        matches = gap_df[(gap_df["cohort"] == cohort) & (gap_df["gaps"] == int(y))]
+        is_fail = any(
+            normalise_sample(row["sample"]) in failing_samples
+            for _, row in matches.iterrows()
         )
-        plt.xlabel("Patient Cohort"); plt.ylabel("Sample Count")
+        if is_fail:
+            line.set_color("red")
+            line.set_markeredgecolor("black")
+            line.set_markersize(7)
+
+    plt.title("Coverage Gaps (<50×)")
+    plt.xlabel("Cohort")
+    plt.ylabel("Amplicons <50×")
+    plt.tight_layout()
+    plt.savefig(f"{PATHS['plots_dir']}/08_coverage_gaps.png")
+    plt.close()
+
+
+    # ======================================================================
+    # 09. Retention Rate
+    # ======================================================================
+    if not full_qc_df.empty:
+        plt.figure(figsize=(10, 7))
+        ax = full_qc_df.groupby(["cohort", "status"]).size().unstack().fillna(0).plot(
+            kind="bar",
+            stacked=True,
+            color=STATUS_PALETTE,
+            ax=plt.gca()
+        )
         plt.title("Retention Rate")
-        plt.legend(title="Status"); plt.tight_layout()
-        plt.savefig(f"{PATHS['plots_dir']}/11_yield_bar.png")
+        plt.xlabel("Cohort")
+        plt.ylabel("Sample Count")
+        plt.tight_layout()
+        plt.savefig(f"{PATHS['plots_dir']}/09_retention.png")
+        plt.close()
 
-    plt.figure(figsize=(15, 5))
-    cv = all_cov.std(axis=1) / all_cov.mean(axis=1)
-    plt.bar(range(len(cv)), cv, color='dimgray', alpha=0.7)
-    plt.xlabel("Amplicon Position (Index)"); plt.ylabel("Coefficient of Variation (CV)")
-    plt.title("Systemic Amplicon Instability (CV)")
-    plt.savefig(f"{PATHS['plots_dir']}/12_variance.png")
+    # ======================================================================
+    # 09b. Failure reasons by cohort
+    # ======================================================================
+    if not full_qc_df.empty:
+        df_rr = full_qc_df.copy()
+        df_rr["fail_reasons"] = df_rr["fail_reasons"].fillna("")
+        df_rr["fail_list"] = df_rr["fail_reasons"].apply(
+            lambda s: [x.strip() for x in str(s).split(",") if x.strip()]
+        )
+        failed = df_rr[df_rr["status"] == "Fail"].explode("fail_list")
+        failed["fail_list"] = failed["fail_list"].replace("", np.nan).fillna("unspecified")
 
+        if not failed.empty:
+            counts = (
+                failed.groupby(["cohort", "fail_list"])
+                      .size()
+                      .reset_index(name="n")
+                      .pivot(index="cohort", columns="fail_list", values="n")
+                      .fillna(0)
+            )
+            counts = counts[counts.sum(axis=0).sort_values(ascending=False).index]
+
+            plt.figure(figsize=(12, 7))
+            counts.plot(kind="bar", stacked=True, ax=plt.gca(), cmap="tab20")
+            plt.title("Failure Reasons by Cohort")
+            plt.xlabel("Cohort")
+            plt.ylabel("Failed Samples")
+            plt.tight_layout()
+            plt.savefig(f"{PATHS['plots_dir']}/09b_fail_reasons.png")
+            plt.close()
+
+    # ======================================================================
+    # 10. Mapping efficiency audit
+    # ======================================================================
     if not full_qc_df.empty:
         plt.figure(figsize=(8, 6))
-        sns.stripplot(data=full_qc_df, x='cohort', y='mapped_pct',
-                      hue='status', palette=STATUS_PALETTE,
-                      size=8, alpha=0.7, jitter=True)
-        plt.axhline(QC_LIMITS['mapped_pct'], color='red', ls='--')
-        plt.xlabel("Patient Cohort"); plt.ylabel("Mapped Reads (%)")
+        sns.stripplot(
+            data=full_qc_df,
+            x="cohort",
+            y="mapped_pct",
+            hue="status",
+            palette=STATUS_PALETTE,
+            jitter=True
+        )
+        plt.axhline(QC_LIMITS["mapped_pct"], color="red", ls="--")
         plt.title("Mapping Efficiency Audit")
-        plt.legend(title="Status", bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.tight_layout(); plt.savefig(f"{PATHS['plots_dir']}/13_mapping_audit.png")
+        plt.tight_layout()
+        plt.savefig(f"{PATHS['plots_dir']}/10_mapping_audit.png")
+        plt.close()
 
+    # ======================================================================
+    # 11. Specificity jitter
+    # ======================================================================
     if not full_qc_df.empty:
-        plt.figure(figsize=(10, 6))
-        sns.stripplot(data=full_qc_df, x='cohort', y='on_target_pct',
-                      hue='status', palette=STATUS_PALETTE,
-                      jitter=True, size=7)
-        plt.axhline(QC_LIMITS['on_target_pct'], color='firebrick', ls='--')
-        plt.xlabel("Patient Cohort"); plt.ylabel("On-Target Reads (%)")
-        plt.title("Sequencing Specificity Jitter")
-        plt.legend(title="Status", bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.tight_layout(); plt.savefig(f"{PATHS['plots_dir']}/14_specificity_jitter.png")
+        plt.figure(figsize=(8, 6))
+        sns.stripplot(
+            data=full_qc_df,
+            x="cohort",
+            y="on_target_pct",
+            hue="status",
+            palette=STATUS_PALETTE,
+            jitter=True
+        )
+        plt.axhline(QC_LIMITS["on_target_pct"], color="firebrick", ls="--")
+        plt.title("Specificity Jitter")
+        plt.tight_layout()
+        plt.savefig(f"{PATHS['plots_dir']}/11_specificity_jitter.png")
+        plt.close()
 
-    worst_data = []
+    # ======================================================================
+    # 12. Lowest coverage per sample
+    # ======================================================================
+    worst = []
     for cohort, df in cohort_dfs.items():
-        s_cols = [c for c in df.columns if c not in ['chr', 'start', 'end', 'id']]
+        s_cols = [c for c in df.columns
+                  if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
         for s in s_cols:
-            if s in df:
-                md = df[s].min()
-                if pd.notna(md):
-                    worst_data.append({'cohort': cohort, 'min_depth': md})
-    worst_df = pd.DataFrame(worst_data)
+            md = df[s].min()
+            if pd.notna(md):
+                worst.append({"cohort": cohort, "min_depth": md})
+
+    worst_df = pd.DataFrame(worst)
     plt.figure(figsize=(10, 6))
-    if not worst_df.empty:
-        sns.swarmplot(data=worst_df, x='cohort', y='min_depth',
-                      hue='cohort', palette=PALETTE, size=6)
-    plt.axhline(QC_LIMITS['worst_amplicon_floor'], color='red', ls='--')
-    plt.yscale('symlog', linthresh=10); plt.xlabel("Patient Cohort")
-    plt.ylabel("Lowest Amplicon Depth (X)")
+    sns.swarmplot(
+        data=worst_df,
+        x="cohort",
+        y="min_depth",
+        hue="cohort",
+        palette=PALETTE,
+        size=6
+    )
+    plt.axhline(QC_LIMITS["worst_amplicon_floor"], color="red", ls="--")
+    plt.yscale("symlog", linthresh=10)
     plt.title("Lowest Coverage per Sample")
-    h, l = plt.gca().get_legend_handles_labels()
-    if h: plt.legend(h, l, title="Cohort", bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout(); plt.savefig(f"{PATHS['plots_dir']}/15_worst_amplicon_depth.png")
+    plt.tight_layout()
+    plt.savefig(f"{PATHS['plots_dir']}/12_worst_amplicon.png")
+    plt.close()
 
-    fail_mask = (all_cov < QC_LIMITS['worst_amplicon_floor']) & (~all_cov.isna())
-    fail_counts = fail_mask.sum(axis=1).reset_index()
-    fail_counts.columns = ['id', 'fail_count']
-    if not fail_counts.empty:
-        plt.figure(figsize=(12, 10))
-        top_fails = fail_counts.sort_values('fail_count', ascending=False).head(30)
-        top_fails = top_fails[top_fails['fail_count'] > 0]
-        if not top_fails.empty:
-            sns.barplot(data=top_fails, x='fail_count', y='id', palette="Reds_r")
-            plt.title("Systematic Amplicon Failure Audit (<50x Depth)")
-            plt.xlabel("Number of Samples Failed"); plt.ylabel("Amplicon Coordinate (ID)")
-            plt.tight_layout(); plt.savefig(f"{PATHS['plots_dir']}/16_systematic_amplicon_failures.png")
+	
+    # ======================================================================
+    # 13. Systemic Amplicon Failures — by cohort
+    # ======================================================================
+    if cohort_dfs:
+        cohorts = list(cohort_dfs.keys())
+        nrows = len(cohorts)
+        height_per = 4.0
+        
+        # Patch 3: Enlarged first cohort
+        heights = [6] + [height_per] * (nrows - 1)
+        fig, axes = plt.subplots(
+            nrows=nrows, ncols=1,
+            figsize=(16, sum(heights)),
+            gridspec_kw={'height_ratios': heights},
+            sharex=True
+        )
+        
+        if nrows == 1:
+            axes = [axes]
 
-    plt.close('all')
-    print("\n[SUCCESS] Harmonised CSVs, diagnostics, and 16 visualisations finalised.")
+        max_x = 0
+        for ax, cohort in zip(axes, cohorts):
+            df = cohort_dfs[cohort]
+            s_cols = [c for c in df.columns
+                      if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
+
+            if len(s_cols) == 0:
+                ax.set_axis_off()
+                ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×)")
+                continue
+
+            floor = QC_LIMITS['worst_amplicon_floor']
+            fail_mask = (df[s_cols] < floor) & (~df[s_cols].isna())
+
+            tmp = pd.DataFrame({
+                "annotation": df["annotation"].values,
+                "fail_count": fail_mask.sum(axis=1).values
+            }).dropna(subset=["annotation"])
+
+            agg = (
+                tmp.groupby("annotation", as_index=False)["fail_count"]
+                   .sum()
+                   .sort_values("fail_count", ascending=False)
+            )
+
+            agg = agg[agg["fail_count"] > 0]
+            top_n = 30
+            agg = agg.head(top_n)
+
+            if agg.empty:
+                ax.text(0.5, 0.5, "No amplicons below 50×", ha="center", va="center")
+                ax.set_axis_off()
+                ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×)")
+                continue
+
+            colours = sns.color_palette("Reds", n_colors=len(agg))
+            plot_df = agg.iloc[::-1]
+            ax.barh(
+                plot_df["annotation"],
+                plot_df["fail_count"],
+                color=colours[::-1],
+                edgecolor="none"
+            )
+
+            ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×)")
+            ax.set_ylabel("Amplicon")
+            ax.grid(axis="x", linestyle=":", alpha=0.4)
+            max_x = max(max_x, int(plot_df["fail_count"].max()))
+
+        axes[-1].set_xlabel("Failed Samples")
+        for ax in axes:
+            ax.set_xlim(0, max_x + 1)
+
+        plt.tight_layout()
+        plt.savefig(f"{PATHS['plots_dir']}/13_failures_global.png")
+        plt.close()
+
+    return
+
 
 # ==============================================================================
-# MAIN
+# 6. MAIN EXECUTION
 # ==============================================================================
+def run_pipeline():
+    full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples = build_pipeline()
+
+    for cohort, df in cohort_dfs.items():
+        s_cols = [c for c in df.columns
+                  if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
+        coords = df[["id", "chr", "start", "end"]].drop_duplicates().set_index("id")
+        cohort_dir = os.path.join(PATHS["samples_dir"], cohort.replace(" ", "_"))
+        os.makedirs(cohort_dir, exist_ok=True)
+        for s in s_cols:
+            out = coords.join(df.set_index("id")[s].rename("depth"))
+            out_path = os.path.join(cohort_dir, f"{s}.coverage.tsv.gz")
+            out.to_csv(out_path, sep="\t", compression="gzip")
+
+    plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples)
+    print("\n[SUCCESS] Harmonised CSVs, diagnostics, and visualisations completed.")
+
+
 if __name__ == "__main__":
-    run_validated_pipeline()
+    run_pipeline()
