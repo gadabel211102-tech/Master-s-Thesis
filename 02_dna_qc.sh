@@ -41,7 +41,7 @@ done
 mkdir -p "${OUT_DIR}/pass_bams" "${OUT_DIR}/fail_bams" "${OUT_DIR}/stats"
 
 # ---------------------------------------------------------------------------
-# Step 1: BED Preparation (FORCING HARMONISATION)
+# Step 1: BED Preparation 
 # ---------------------------------------------------------------------------
 # We ensure the chromosome column is ALWAYS "chr17" to avoid 17 vs chr17 mismatches
 BED_ANNOTATED="${OUT_DIR}/targets.annotated.bed"
@@ -118,17 +118,47 @@ for ((i=0; i<NUM_BAMS; i++)); do
   cp -p "${BAM}" "${DEST}/" && [[ -f "${BAM}.bai" ]] && cp -p "${BAM}.bai" "${DEST}/"
 done
 
-# ---------------------------------------------------------------------------
-# Step 3: Global Failure Report
-# ---------------------------------------------------------------------------
-GLOBAL_REPORT="${OUT_DIR}/cohort_amplicon_failure_report.txt"
-echo -e "REGION_INFO_RSID\tFAIL_COUNT\tFAIL_PERCENTAGE" > "${GLOBAL_REPORT}"
 
-if [[ -s "${COHORT_TEMP}" ]]; then
-    sort "${COHORT_TEMP}" | uniq -c | sort -rn | awk -v n="$NUM_BAMS" \
-    'BEGIN{OFS="\t"} {print $2, $1, sprintf("%.2f", ($1/n)*100)"%"}' >> "${GLOBAL_REPORT}"
+# Step 3: Global Failure Report (Old behaviour + coordinates + percentage)
+echo "[*] Generating Global Failure Report using ${LOW_DEPTH_ALERT}x threshold..."
+
+GLOBAL_REPORT="${OUT_DIR}/cohort_amplicon_failure_report.txt"
+TEMP_IDS=$(mktemp)
+
+# Total number of samples in cohort (already defined earlier)
+TOTAL_SAMPLES="${NUM_BAMS}"
+
+# 1. Extract amplicon IDs with depth < LOW_DEPTH_ALERT
+find "${OUT_DIR}/stats/" -name "*.regions.bed.gz" -print0 \
+| xargs -0 zcat \
+| awk -v thr="${LOW_DEPTH_ALERT}" 'NR==FNR {id[$1":"$2":"$3]=$4; next}
+    {
+      key=$1":"$2":"$3;
+      if($4 < thr && key in id) print id[key];
+    }' "${BED_ANNOTATED}" - \
+| sort \
+| uniq -c \
+> "${TEMP_IDS}"
+
+# 2. If nothing failed, skip
+if [[ ! -s "${TEMP_IDS}" ]]; then
+    echo "No regions found below ${LOW_DEPTH_ALERT}x. Report not created."
+    rm -f "${TEMP_IDS}"
+    exit 0
 fi
 
-rm -f "${COHORT_TEMP}" "${BED_ANNOTATED}" "${BED_CALC}"
+# 3. Header
+echo -e "Chr\tStart\tEnd\tID\tFail_Count\tFail_Percent" > "${GLOBAL_REPORT}"
 
-echo -e "\n[*] Analysis Complete with coordinate harmonisation!"
+# 4. Match IDs back to BED_ANNOTATED, calculate percentage
+while read -r COUNT AMP_ID; do
+    awk -v id="${AMP_ID}" -v cnt="${COUNT}" -v total="${TOTAL_SAMPLES}" '
+        $4 == id {
+            perc = (cnt / total) * 100;
+            printf "%s\t%s\t%s\t%s\t%s\t%.2f\n", $1, $2, $3, id, cnt, perc;
+        }
+    ' "${BED_ANNOTATED}" >> "${GLOBAL_REPORT}"
+done < "${TEMP_IDS}"
+
+echo "[SUCCESS] Global failure report saved to: ${GLOBAL_REPORT}"
+rm -f "${TEMP_IDS}"
