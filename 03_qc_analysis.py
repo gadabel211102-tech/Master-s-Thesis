@@ -340,8 +340,8 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
 
   
     # 1. First, ensure your failure list is "cleaned" once at the start
-# This ensures it matches the format the labels will use
-clean_failing_samples = {normalise_sample(s) for s in failing_samples}
+    # This ensures it matches the format the labels will use
+    clean_failing_samples = {normalise_sample(s) for s in failing_samples}
 
     # ======================================================================
     # 02. Cohort heatmaps
@@ -873,7 +873,7 @@ clean_failing_samples = {normalise_sample(s) for s in failing_samples}
         plt.savefig(f"{PATHS['plots_dir']}/13_failures_global.png")
         plt.close()
 
-# ======================================================================
+    # ======================================================================
     # 13b. Systemic Amplicon Failures — by cohort (Genomic Coordinates)
     # ======================================================================
     if cohort_dfs:
