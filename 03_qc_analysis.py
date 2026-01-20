@@ -335,104 +335,67 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
             plt.savefig(f"{PATHS['plots_dir']}/01b_pca_pass_only.png")
             plt.close()
 
-   # 1. First, ensure your failure list is "cleaned" once at the start
-# This ensures it matches the format the labels will use
-clean_failing_samples = {normalise_sample(s) for s in failing_samples}
-
-# ======================================================================
-# 02. Cohort heatmaps
-# ======================================================================
-for cohort, df in cohort_dfs.items():
-    s_cols = [c for c in df.columns
-              if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
-    dmat = df.set_index("id")[s_cols]
-    logmat = np.log10(dmat + 1)
-    mask = dmat.isna()
-
-    plt.figure(figsize=(12, 8))
-    sns.heatmap(logmat, cmap="magma", mask=mask, vmin=0, vmax=4)
-    ax = plt.gca()
-    plt.xticks(rotation=45, ha='right', fontsize=8)
-    
-    # HIGHLIGHT LOGIC
-    for label in ax.get_xticklabels():
-        # Normalise the label text before checking the list
-        sample_on_plot = normalise_sample(label.get_text())
-        if sample_on_plot in clean_failing_samples:
-            label.set_color("red")
-            label.set_weight("bold")
-        else:
-            # UNCOMMENT THE LINE BELOW TO DEBUG IN THE TERMINAL:
-            # print(f"DEBUG: '{sample_on_plot}' not found in {clean_failing_samples}")
-            pass
-
-    plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
-    plt.ylabel("Genomic Coordinates", fontsize=10, fontweight='bold') # Fixed the extra bracket here
-    plt.title(f"Coverage Heatmap: {cohort}")
-    plt.tight_layout()
-    plt.savefig(f"{PATHS['plots_dir']}/02_heatmap_{cohort.replace(' ', '_')}.png")
-    plt.close()
-
+  
 	# 1. First, ensure your failure list is "cleaned" once at the start
 # This ensures it matches the format the labels will use
 clean_failing_samples = {normalise_sample(s) for s in failing_samples}
 
-# ======================================================================
-# 02. Cohort heatmaps
-# ======================================================================
-for cohort, df in cohort_dfs.items():
-    s_cols = [c for c in df.columns
-              if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
-    dmat = df.set_index("id")[s_cols]
-    logmat = np.log10(dmat + 1)
-    mask = dmat.isna()
-
-    plt.figure(figsize=(12, 8))
-    sns.heatmap(logmat, cmap="magma", mask=mask, vmin=0, vmax=4)
-    ax = plt.gca()
-    plt.xticks(rotation=45, ha='right', fontsize=8)
-    
-    # HIGHLIGHT LOGIC
-    for label in ax.get_xticklabels():
-        # Normalise the label text before checking the list
-        sample_on_plot = normalise_sample(label.get_text())
-        if sample_on_plot in clean_failing_samples:
-            label.set_color("red")
-            label.set_weight("bold")
-        else:
-            # UNCOMMENT THE LINE BELOW TO DEBUG IN THE TERMINAL:
-            # print(f"DEBUG: '{sample_on_plot}' not found in {clean_failing_samples}")
-            pass
-
-    plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
-    plt.ylabel("Genomic Coordinates", fontsize=10, fontweight='bold') # Fixed the extra bracket here
-    plt.title(f"Coverage Heatmap: {cohort}")
-    plt.tight_layout()
-    plt.savefig(f"{PATHS['plots_dir']}/02_heatmap_{cohort.replace(' ', '_')}.png")
-    plt.close()
-
-# ======================================================================
-# 03. Global Heatmap
-# ======================================================================
-if not all_cov.empty:
-    plt.figure(figsize=(16, 10))
-    sns.heatmap(np.log10(all_cov + 1), cmap="magma",
-                mask=all_cov.isna(), vmin=0, vmax=4)
-    ax = plt.gca()
-    plt.xticks(rotation=45, ha='right', fontsize=6)
-    
-    for label in ax.get_xticklabels():
-        sample_on_plot = normalise_sample(label.get_text())
-        if sample_on_plot in clean_failing_samples:
-            label.set_color("red")
-            label.set_weight("bold")
-
-    plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
-    plt.ylabel("Genomic Coordinates", fontsize=10, fontweight='bold') # Fixed the extra bracket here
-    plt.title("Global Coverage Heatmap")
-    plt.tight_layout()
-    plt.savefig(f"{PATHS['plots_dir']}/03_heatmap_global.png")
-    plt.close()
+	# ======================================================================
+	# 02. Cohort heatmaps
+	# ======================================================================
+	for cohort, df in cohort_dfs.items():
+	    s_cols = [c for c in df.columns
+	              if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
+	    dmat = df.set_index("id")[s_cols]
+	    logmat = np.log10(dmat + 1)
+	    mask = dmat.isna()
+	
+	    plt.figure(figsize=(12, 8))
+	    sns.heatmap(logmat, cmap="magma", mask=mask, vmin=0, vmax=4)
+	    ax = plt.gca()
+	    plt.xticks(rotation=45, ha='right', fontsize=8)
+	    
+	    # HIGHLIGHT LOGIC
+	    for label in ax.get_xticklabels():
+	        # Normalise the label text before checking the list
+	        sample_on_plot = normalise_sample(label.get_text())
+	        if sample_on_plot in clean_failing_samples:
+	            label.set_color("red")
+	            label.set_weight("bold")
+	        else:
+	            # UNCOMMENT THE LINE BELOW TO DEBUG IN THE TERMINAL:
+	            # print(f"DEBUG: '{sample_on_plot}' not found in {clean_failing_samples}")
+	            pass
+	
+	    plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
+	    plt.ylabel("Genomic Coordinates", fontsize=10, fontweight='bold') # Fixed the extra bracket here
+	    plt.title(f"Coverage Heatmap: {cohort}")
+	    plt.tight_layout()
+	    plt.savefig(f"{PATHS['plots_dir']}/02_heatmap_{cohort.replace(' ', '_')}.png")
+	    plt.close()
+	
+	# ======================================================================
+	# 03. Global Heatmap
+	# ======================================================================
+	if not all_cov.empty:
+	    plt.figure(figsize=(16, 10))
+	    sns.heatmap(np.log10(all_cov + 1), cmap="magma",
+	                mask=all_cov.isna(), vmin=0, vmax=4)
+	    ax = plt.gca()
+	    plt.xticks(rotation=45, ha='right', fontsize=6)
+	    
+	    for label in ax.get_xticklabels():
+	        sample_on_plot = normalise_sample(label.get_text())
+	        if sample_on_plot in clean_failing_samples:
+	            label.set_color("red")
+	            label.set_weight("bold")
+	
+	    plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
+	    plt.ylabel("Genomic Coordinates", fontsize=10, fontweight='bold') # Fixed the extra bracket here
+	    plt.title("Global Coverage Heatmap")
+	    plt.tight_layout()
+	    plt.savefig(f"{PATHS['plots_dir']}/03_heatmap_global.png")
+	    plt.close()
     # ======================================================================
     # 05. Panel Landscape (index order)
     # ======================================================================
