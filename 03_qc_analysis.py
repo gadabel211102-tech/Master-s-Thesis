@@ -340,76 +340,76 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
             plt.close()
 
   
-	# 1. First, ensure your failure list is "cleaned" once at the start
+    # 1. First, ensure your failure list is "cleaned" once at the start
 # This ensures it matches the format the labels will use
 clean_failing_samples = {normalise_sample(s) for s in failing_samples}
 
-	# ======================================================================
-	# 02. Cohort heatmaps
-	# ======================================================================
-	for cohort, df in cohort_dfs.items():
-	    s_cols = [c for c in df.columns
-	              if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
-	   
-		dmat = df.set_index("id")[s_cols]
-		plotmat = np.log10(dmat.fillna(0) + 1)   # draw everything
-		# Optional: show true-missing as grey tiles instead of identical to 0-depth
-		cmap = sns.color_palette("magma", as_cmap=True)
-		cmap.set_bad(color="#B0B0B0")            # only used if you pass a mask
-		plt.figure(figsize=(12, 8))
-		# Option A (no grey, simplest):
-		# sns.heatmap(plotmat, cmap="magma", vmin=0, vmax=4)
-		# Option B (grey NaNs, still draws columns):
-		sns.heatmap(plotmat, cmap=cmap, mask=dmat.isna(), vmin=0, vmax=4)
+    # ======================================================================
+    # 02. Cohort heatmaps
+    # ======================================================================
+    for cohort, df in cohort_dfs.items():
+        s_cols = [c for c in df.columns
+                  if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
+       
+        dmat = df.set_index("id")[s_cols]
+        plotmat = np.log10(dmat.fillna(0) + 1)   # draw everything
+        # Optional: show true-missing as grey tiles instead of identical to 0-depth
+        cmap = sns.color_palette("magma", as_cmap=True)
+        cmap.set_bad(color="#B0B0B0")            # only used if you pass a mask
+        plt.figure(figsize=(12, 8))
+        # Option A (no grey, simplest):
+        # sns.heatmap(plotmat, cmap="magma", vmin=0, vmax=4)
+        # Option B (grey NaNs, still draws columns):
+        sns.heatmap(plotmat, cmap=cmap, mask=dmat.isna(), vmin=0, vmax=4)
 
-	    ax = plt.gca()
-	    plt.xticks(rotation=45, ha='right', fontsize=8)
-	    
-	    # HIGHLIGHT LOGIC
-	    for label in ax.get_xticklabels():
-	        # Normalise the label text before checking the list
-	        sample_on_plot = normalise_sample(label.get_text())
-	        if sample_on_plot in clean_failing_samples:
-	            label.set_color("red")
-	            label.set_weight("bold")
-	        else:
-	            # UNCOMMENT THE LINE BELOW TO DEBUG IN THE TERMINAL:
-	            # print(f"DEBUG: '{sample_on_plot}' not found in {clean_failing_samples}")
-	            pass
-	
-	    plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
-	    plt.ylabel("Genomic Coordinates", fontsize=10, fontweight='bold') # Fixed the extra bracket here
-	    plt.title(f"Coverage Heatmap: {cohort}")
-	    plt.tight_layout()
-	    plt.savefig(f"{PATHS['plots_dir']}/02_heatmap_{cohort.replace(' ', '_')}.png")
-	    plt.close()
-	
-	# ======================================================================
-	# 03. Global Heatmap
-	# ======================================================================
-	if not all_cov.empty:
-	    plt.figure(figsize=(16, 10))
-	   
-		cmap = sns.color_palette("magma", as_cmap=True)
-		cmap.set_bad(color="#B0B0B0")
-		sns.heatmap(np.log10(all_cov.fillna(0) + 1), cmap=cmap,
-		            mask=all_cov.isna(), vmin=0, vmax=4)
+        ax = plt.gca()
+        plt.xticks(rotation=45, ha='right', fontsize=8)
+        
+        # HIGHLIGHT LOGIC
+        for label in ax.get_xticklabels():
+            # Normalise the label text before checking the list
+            sample_on_plot = normalise_sample(label.get_text())
+            if sample_on_plot in clean_failing_samples:
+                label.set_color("red")
+                label.set_weight("bold")
+            else:
+                # UNCOMMENT THE LINE BELOW TO DEBUG IN THE TERMINAL:
+                # print(f"DEBUG: '{sample_on_plot}' not found in {clean_failing_samples}")
+                pass
+    
+        plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
+        plt.ylabel("Genomic Coordinates", fontsize=10, fontweight='bold') # Fixed the extra bracket here
+        plt.title(f"Coverage Heatmap: {cohort}")
+        plt.tight_layout()
+        plt.savefig(f"{PATHS['plots_dir']}/02_heatmap_{cohort.replace(' ', '_')}.png")
+        plt.close()
+    
+    # ======================================================================
+    # 03. Global Heatmap
+    # ======================================================================
+    if not all_cov.empty:
+        plt.figure(figsize=(16, 10))
+       
+        cmap = sns.color_palette("magma", as_cmap=True)
+        cmap.set_bad(color="#B0B0B0")
+        sns.heatmap(np.log10(all_cov.fillna(0) + 1), cmap=cmap,
+                    mask=all_cov.isna(), vmin=0, vmax=4)
 
-	    ax = plt.gca()
-	    plt.xticks(rotation=45, ha='right', fontsize=6)
-	    
-	    for label in ax.get_xticklabels():
-	        sample_on_plot = normalise_sample(label.get_text())
-	        if sample_on_plot in clean_failing_samples:
-	            label.set_color("red")
-	            label.set_weight("bold")
-	
-	    plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
-	    plt.ylabel("Genomic Coordinates", fontsize=10, fontweight='bold') # Fixed the extra bracket here
-	    plt.title("Global Coverage Heatmap")
-	    plt.tight_layout()
-	    plt.savefig(f"{PATHS['plots_dir']}/03_heatmap_global.png")
-	    plt.close()
+        ax = plt.gca()
+        plt.xticks(rotation=45, ha='right', fontsize=6)
+        
+        for label in ax.get_xticklabels():
+            sample_on_plot = normalise_sample(label.get_text())
+            if sample_on_plot in clean_failing_samples:
+                label.set_color("red")
+                label.set_weight("bold")
+    
+        plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
+        plt.ylabel("Genomic Coordinates", fontsize=10, fontweight='bold') # Fixed the extra bracket here
+        plt.title("Global Coverage Heatmap")
+        plt.tight_layout()
+        plt.savefig(f"{PATHS['plots_dir']}/03_heatmap_global.png")
+        plt.close()
     # ======================================================================
     # 05. Panel Landscape (index order)
     # ======================================================================
@@ -600,7 +600,7 @@ clean_failing_samples = {normalise_sample(s) for s in failing_samples}
         plt.savefig(f"{PATHS['plots_dir']}/07_landscape_genes.png")
         plt.close()
 
-	
+    
     # ======================================================================
     # 08. Coverage Gaps (<50×)
     # ======================================================================
@@ -683,7 +683,7 @@ clean_failing_samples = {normalise_sample(s) for s in failing_samples}
         plt.savefig(f"{PATHS['plots_dir']}/09_retention.png")
         plt.close()
 
-	# ======================================================================
+    # ======================================================================
     # 09b. Failure reasons by cohort
     # ======================================================================
     if not full_qc_df.empty:
@@ -796,7 +796,7 @@ clean_failing_samples = {normalise_sample(s) for s in failing_samples}
     plt.savefig(f"{PATHS['plots_dir']}/12_worst_amplicon.png")
     plt.close()
 
-	
+    
     # ======================================================================
     # 13. Systemic Amplicon Failures — by cohort
     # ======================================================================
@@ -874,7 +874,6 @@ clean_failing_samples = {normalise_sample(s) for s in failing_samples}
         plt.savefig(f"{PATHS['plots_dir']}/13_failures_global.png")
         plt.close()
 
-    return
 # ======================================================================
     # 13b. Systemic Amplicon Failures — by cohort (Genomic Coordinates)
     # ======================================================================
@@ -953,7 +952,7 @@ clean_failing_samples = {normalise_sample(s) for s in failing_samples}
         plt.tight_layout()
         plt.savefig(f"{PATHS['plots_dir']}/13_failures_coordinates.png") # Saved with a new name
         plt.close()
-
+    return
 # ==============================================================================
 # 6. MAIN EXECUTION
 # ==============================================================================
