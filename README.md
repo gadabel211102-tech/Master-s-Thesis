@@ -28,19 +28,18 @@ The repository provides a modular bioinformatics pipeline for Quality Control (Q
 * **Key Figures:** Generates **13 figures**, including PCA of technical variance, log10 coverage heatmaps (red-highlighted failing samples), and systemic failure reports using genomic coordinates.
 * **Standards:** Uses British spellings (*normalise*, *tumour*, *colour*) for all clinical labeling.
 
-### 4. Variant Calling (`04_variant_calling.sh`)
-
-* **Purpose:** Clinical-grade mutation identification.
-* **Engine:** Ion Torrent Variant Caller (TVC).
-* **Post-Processing:** Uses `bcftools` for normalisation (splitting multi-allelic sites) and hard-filtering variants based on Gema's validated thresholds.
-
-### 5. Final Technical Audit (`05_technical_audit.py`)
+### 4. Final Technical Audit (`04_technical_audit.py`)
 
 * **Purpose:** A "Last-Step QC" to identify systemic failures and annotate the final matrices.
 * **Logic:** Cross-references the `Full_Panel.csv` matrices with the original BED file to map coordinates to **RS IDs** and **Gene Names**.
 * **Audit:** Automatically flags the **Top 10 Worst Amplicons** for each cohort (based on median depth) to identify potential technical dropouts or "blind spots" in the panel.
 * **Output:** Consolidates all annotations and audit results into a multi-sheet Excel workbook (`GSDMB_Annotated_Report_Fixed.xlsx`).
 
+### 5. Variant Calling (`05_variant_calling.sh`)
+
+* **Purpose:** Clinical-grade mutation identification.
+* **Engine:** Ion Torrent Variant Caller (TVC).
+* **Post-Processing:** Uses `bcftools` for normalisation (splitting multi-allelic sites) and hard-filtering variants based on validated thresholds.
 ---
 
 ##  Validated Thresholds
@@ -95,11 +94,13 @@ pip install pandas seaborn matplotlib scikit-learn openpyxl
 # Step 3: Analysis & Plots
 python3 03_qc_analysis.py
 
-# Step 4: Call Variants
-./04_variant_calling.sh -m ./results/qc_pass_manifest.txt -r hg38.fa -b GSDMB_targets.bed -o ./variants
+# Step 4: Final Technical Audit
+python3 04_technical_audit.py
 
-# Step 5: Final Technical Audit
-python3 05_technical_audit.py
+# Step 5: Call Variants
+./05_variant_calling.sh -m ./results/qc_pass_manifest.txt -r hg38.fa -b GSDMB_targets.bed -o ./variants
+
+
 ```
 
 
