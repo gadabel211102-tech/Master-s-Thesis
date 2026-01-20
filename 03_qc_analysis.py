@@ -335,96 +335,104 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
             plt.savefig(f"{PATHS['plots_dir']}/01b_pca_pass_only.png")
             plt.close()
 
-    # ======================================================================
-    # 02. Cohort heatmaps
-    # ======================================================================
-    for cohort, df in cohort_dfs.items():
-        s_cols = [c for c in df.columns
-                  if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
-        dmat = df.set_index("id")[s_cols]
-        logmat = np.log10(dmat + 1)
-        mask = dmat.isna()
+   # 1. First, ensure your failure list is "cleaned" once at the start
+# This ensures it matches the format the labels will use
+clean_failing_samples = {normalise_sample(s) for s in failing_samples}
 
-        plt.figure(figsize=(12, 8))
-        sns.heatmap(logmat, cmap="magma", mask=mask, vmin=0, vmax=4)
-        ax = plt.gca()
-        plt.xticks(rotation=45, ha='right', fontsize=8)
-        for label in ax.get_xticklabels():
-            if normalise_sample(label.get_text()) in failing_samples:
-                label.set_color("red")
-                label.set_weight("bold")
-        plt.title(f"Coverage Heatmap — {cohort}")
-        plt.tight_layout()
-        plt.savefig(f"{PATHS['plots_dir']}/02_heatmap_{cohort.replace(' ', '_')}.png")
-        plt.close()
+# ======================================================================
+# 02. Cohort heatmaps
+# ======================================================================
+for cohort, df in cohort_dfs.items():
+    s_cols = [c for c in df.columns
+              if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
+    dmat = df.set_index("id")[s_cols]
+    logmat = np.log10(dmat + 1)
+    mask = dmat.isna()
 
-    # ======================================================================
-    # 03. Global Heatmap
-    # ======================================================================
-    if not all_cov.empty:
-        plt.figure(figsize=(16, 10))
-        sns.heatmap(np.log10(all_cov + 1), cmap="magma",
-                    mask=all_cov.isna(), vmin=0, vmax=4)
-        ax = plt.gca()
-        plt.xticks(rotation=45, ha='right', fontsize=6)
-        for label in ax.get_xticklabels():
-            if normalise_sample(label.get_text()) in failing_samples:
-                label.set_color("red")
-                label.set_weight("bold")
-        plt.title("Global Coverage Heatmap")
-        plt.tight_layout()
-        plt.savefig(f"{PATHS['plots_dir']}/03_heatmap_global.png")
-        plt.close()
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(logmat, cmap="magma", mask=mask, vmin=0, vmax=4)
+    ax = plt.gca()
+    plt.xticks(rotation=45, ha='right', fontsize=8)
+    
+    # HIGHLIGHT LOGIC
+    for label in ax.get_xticklabels():
+        # Normalise the label text before checking the list
+        sample_on_plot = normalise_sample(label.get_text())
+        if sample_on_plot in clean_failing_samples:
+            label.set_color("red")
+            label.set_weight("bold")
+        else:
+            # UNCOMMENT THE LINE BELOW TO DEBUG IN THE TERMINAL:
+            # print(f"DEBUG: '{sample_on_plot}' not found in {clean_failing_samples}")
+            pass
 
-    # ======================================================================
-    # 04. Scatter Coverage
-    # ======================================================================
-    for cohort, df in cohort_dfs.items():
-        s_cols = [c for c in df.columns
-                  if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
+    plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
+    plt.ylabel("Genomic Coordinates", fontsize=10, fontweight='bold') # Fixed the extra bracket here
+    plt.title(f"Coverage Heatmap: {cohort}")
+    plt.tight_layout()
+    plt.savefig(f"{PATHS['plots_dir']}/02_heatmap_{cohort.replace(' ', '_')}.png")
+    plt.close()
 
-        def chrkey(c):
-            c = str(c).replace("chr", "")
-            mapping = {"X": 23, "Y": 24, "M": 25, "MT": 25}
-            try:
-                return int(c)
-            except Exception:
-                return mapping.get(c, 1000)
+	# 1. First, ensure your failure list is "cleaned" once at the start
+# This ensures it matches the format the labels will use
+clean_failing_samples = {normalise_sample(s) for s in failing_samples}
 
-        od = df[["chr", "start", "end", "id"]].drop_duplicates()
-        od["key"] = od["chr"].apply(chrkey)
-        od = od.sort_values(["key", "start", "end"])
-        ordered = od["id"].tolist()
+# ======================================================================
+# 02. Cohort heatmaps
+# ======================================================================
+for cohort, df in cohort_dfs.items():
+    s_cols = [c for c in df.columns
+              if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
+    dmat = df.set_index("id")[s_cols]
+    logmat = np.log10(dmat + 1)
+    mask = dmat.isna()
 
-        long = df.melt(
-            id_vars=["chr", "start", "end", "id", "annotation", "annot_id"],
-            value_vars=s_cols,
-            var_name="sample",
-            value_name="depth"
-        )
-        long["id"] = pd.Categorical(long["id"], categories=ordered, ordered=True)
-        long["log_depth"] = np.log10(long["depth"] + 1)
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(logmat, cmap="magma", mask=mask, vmin=0, vmax=4)
+    ax = plt.gca()
+    plt.xticks(rotation=45, ha='right', fontsize=8)
+    
+    # HIGHLIGHT LOGIC
+    for label in ax.get_xticklabels():
+        # Normalise the label text before checking the list
+        sample_on_plot = normalise_sample(label.get_text())
+        if sample_on_plot in clean_failing_samples:
+            label.set_color("red")
+            label.set_weight("bold")
+        else:
+            # UNCOMMENT THE LINE BELOW TO DEBUG IN THE TERMINAL:
+            # print(f"DEBUG: '{sample_on_plot}' not found in {clean_failing_samples}")
+            pass
 
-        plt.figure(figsize=(12, 16))
-        ax = sns.scatterplot(data=long, x="sample", y="id",
-                             hue="log_depth", palette="magma", s=20)
+    plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
+    plt.ylabel("Genomic Coordinates", fontsize=10, fontweight='bold') # Fixed the extra bracket here
+    plt.title(f"Coverage Heatmap: {cohort}")
+    plt.tight_layout()
+    plt.savefig(f"{PATHS['plots_dir']}/02_heatmap_{cohort.replace(' ', '_')}.png")
+    plt.close()
 
-        # Proper tick fix
-        ticks = ax.get_xticks()
-        labels = [lbl.get_text() for lbl in ax.get_xticklabels()]
-        ax.set_xticks(ticks)
-        ax.set_xticklabels(labels, rotation=45, ha='right')
+# ======================================================================
+# 03. Global Heatmap
+# ======================================================================
+if not all_cov.empty:
+    plt.figure(figsize=(16, 10))
+    sns.heatmap(np.log10(all_cov + 1), cmap="magma",
+                mask=all_cov.isna(), vmin=0, vmax=4)
+    ax = plt.gca()
+    plt.xticks(rotation=45, ha='right', fontsize=6)
+    
+    for label in ax.get_xticklabels():
+        sample_on_plot = normalise_sample(label.get_text())
+        if sample_on_plot in clean_failing_samples:
+            label.set_color("red")
+            label.set_weight("bold")
 
-        for lbl in ax.get_xticklabels():
-            if normalise_sample(lbl.get_text()) in failing_samples:
-                lbl.set_color("red")
-                lbl.set_weight("bold")
-
-        plt.title(f"Per-Amplicon Depth Scatter — {cohort}")
-        plt.tight_layout()
-        plt.savefig(f"{PATHS['plots_dir']}/04_scatter_{cohort.replace(' ', '_')}.png")
-        plt.close()
-
+    plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
+    plt.ylabel("Genomic Coordinates", fontsize=10, fontweight='bold') # Fixed the extra bracket here
+    plt.title("Global Coverage Heatmap")
+    plt.tight_layout()
+    plt.savefig(f"{PATHS['plots_dir']}/03_heatmap_global.png")
+    plt.close()
     # ======================================================================
     # 05. Panel Landscape (index order)
     # ======================================================================
@@ -698,7 +706,7 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
         plt.savefig(f"{PATHS['plots_dir']}/09_retention.png")
         plt.close()
 
-    # ======================================================================
+	# ======================================================================
     # 09b. Failure reasons by cohort
     # ======================================================================
     if not full_qc_df.empty:
@@ -711,6 +719,17 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
         failed["fail_list"] = failed["fail_list"].replace("", np.nan).fillna("unspecified")
 
         if not failed.empty:
+            # --- DEFINE PROPER NAMES HERE ---
+            reason_map = {
+                "low_reads": "Low Read Count",
+                "low_uniformity": "Low Uniformity (<95% @ 100x)",
+                "low_on_target": "Low On-Target Rate",
+                "unspecified": "Unspecified Error"
+            }
+            # Apply the mapping to the column
+            failed["fail_list"] = failed["fail_list"].map(lambda x: reason_map.get(x, x))
+            # --------------------------------
+
             counts = (
                 failed.groupby(["cohort", "fail_list"])
                       .size()
@@ -722,9 +741,13 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
 
             plt.figure(figsize=(12, 7))
             counts.plot(kind="bar", stacked=True, ax=plt.gca(), cmap="tab20")
+            
+            # Additional Legend Formatting
+            plt.legend(title="Reason for Failure", bbox_to_anchor=(1.05, 1), loc='upper left')
+            
             plt.title("Failure Reasons by Cohort")
-            plt.xlabel("Cohort")
-            plt.ylabel("Failed Samples")
+            plt.xlabel("Cohort", fontsize=10, fontweight='bold')
+            plt.ylabel("Failed Samples", fontsize=10, fontweight='bold')
             plt.tight_layout()
             plt.savefig(f"{PATHS['plots_dir']}/09b_fail_reasons.png")
             plt.close()
@@ -875,7 +898,84 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
         plt.close()
 
     return
+# ======================================================================
+    # 13b. Systemic Amplicon Failures — by cohort (Genomic Coordinates)
+    # ======================================================================
+    if cohort_dfs:
+        cohorts = list(cohort_dfs.keys())
+        nrows = len(cohorts)
+        height_per = 4.0
+        
+        # Patch 3: Enlarged first cohort
+        heights = [6] + [height_per] * (nrows - 1)
+        fig, axes = plt.subplots(
+            nrows=nrows, ncols=1,
+            figsize=(16, sum(heights)),
+            gridspec_kw={'height_ratios': heights},
+            sharex=True
+        )
+        
+        if nrows == 1:
+            axes = [axes]
 
+        max_x = 0
+        for ax, cohort in zip(axes, cohorts):
+            df = cohort_dfs[cohort]
+            s_cols = [c for c in df.columns
+                      if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
+
+            if len(s_cols) == 0:
+                ax.set_axis_off()
+                ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×)")
+                continue
+
+            floor = QC_LIMITS['worst_amplicon_floor']
+            fail_mask = (df[s_cols] < floor) & (~df[s_cols].isna())
+
+            # --- CHANGE: Use 'id' (coordinates) instead of 'annotation' ---
+            tmp = pd.DataFrame({
+                "coord": df["id"].values, # Changed from annotation to id
+                "fail_count": fail_mask.sum(axis=1).values
+            }).dropna(subset=["coord"])
+
+            agg = (
+                tmp.groupby("coord", as_index=False)["fail_count"]
+                   .sum()
+                   .sort_values("fail_count", ascending=False)
+            )
+            # -------------------------------------------------------------
+
+            agg = agg[agg["fail_count"] > 0]
+            top_n = 30
+            agg = agg.head(top_n)
+
+            if agg.empty:
+                ax.text(0.5, 0.5, "No amplicons below 50×", ha="center", va="center")
+                ax.set_axis_off()
+                ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×)")
+                continue
+
+            colours = sns.color_palette("Reds", n_colors=len(agg))
+            plot_df = agg.iloc[::-1]
+            ax.barh(
+                plot_df["coord"], # Using coordinates here
+                plot_df["fail_count"],
+                color=colours[::-1],
+                edgecolor="none"
+            )
+
+            ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×)")
+            ax.set_ylabel("Genomic Coordinate (Chr17)", fontsize=10, fontweight='bold')
+            ax.grid(axis="x", linestyle=":", alpha=0.4)
+            max_x = max(max_x, int(plot_df["fail_count"].max()))
+
+        axes[-1].set_xlabel("Number of Failed Samples", fontsize=10, fontweight='bold')
+        for ax in axes:
+            ax.set_xlim(0, max_x + 1)
+
+        plt.tight_layout()
+        plt.savefig(f"{PATHS['plots_dir']}/13_failures_coordinates.png") # Saved with a new name
+        plt.close()
 
 # ==============================================================================
 # 6. MAIN EXECUTION
