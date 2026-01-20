@@ -44,21 +44,25 @@ STATUS_PALETTE = {
     'Fail': '#e74c3c'
 }
 
-STRICT_MOSDEPTH = True
-MIN_NUMERIC_FRACTION = 0.50
+
+STRICT_MOSDEPTH = False
+MIN_NUMERIC_FRACTION = 0.20
+
 
 
 # ==============================================================================
 # 2. UTILITIES
 # ==============================================================================
+
 def normalise_sample(s: str) -> str:
-    s = str(s).strip()
+    s = str(s).strip().lower()
     return (
         s.replace(" ", "_")
-        .replace(".regions", "")
-        .replace(".bed", "")
-        .replace(".gz", "")
+         .replace(".regions", "")
+         .replace(".bed", "")
+         .replace(".gz", "")
     )
+
 
 
 def normalise_chr(c: str) -> str:
@@ -346,12 +350,18 @@ clean_failing_samples = {normalise_sample(s) for s in failing_samples}
 	for cohort, df in cohort_dfs.items():
 	    s_cols = [c for c in df.columns
 	              if c not in ["chr", "start", "end", "id", "annotation", "annot_id"]]
-	    dmat = df.set_index("id")[s_cols]
-	    logmat = np.log10(dmat + 1)
-	    mask = dmat.isna()
-	
-	    plt.figure(figsize=(12, 8))
-	    sns.heatmap(logmat, cmap="magma", mask=mask, vmin=0, vmax=4)
+	   
+		dmat = df.set_index("id")[s_cols]
+		plotmat = np.log10(dmat.fillna(0) + 1)   # draw everything
+		# Optional: show true-missing as grey tiles instead of identical to 0-depth
+		cmap = sns.color_palette("magma", as_cmap=True)
+		cmap.set_bad(color="#B0B0B0")            # only used if you pass a mask
+		plt.figure(figsize=(12, 8))
+		# Option A (no grey, simplest):
+		# sns.heatmap(plotmat, cmap="magma", vmin=0, vmax=4)
+		# Option B (grey NaNs, still draws columns):
+		sns.heatmap(plotmat, cmap=cmap, mask=dmat.isna(), vmin=0, vmax=4)
+
 	    ax = plt.gca()
 	    plt.xticks(rotation=45, ha='right', fontsize=8)
 	    
@@ -379,8 +389,12 @@ clean_failing_samples = {normalise_sample(s) for s in failing_samples}
 	# ======================================================================
 	if not all_cov.empty:
 	    plt.figure(figsize=(16, 10))
-	    sns.heatmap(np.log10(all_cov + 1), cmap="magma",
-	                mask=all_cov.isna(), vmin=0, vmax=4)
+	   
+		cmap = sns.color_palette("magma", as_cmap=True)
+		cmap.set_bad(color="#B0B0B0")
+		sns.heatmap(np.log10(all_cov.fillna(0) + 1), cmap=cmap,
+		            mask=all_cov.isna(), vmin=0, vmax=4)
+
 	    ax = plt.gca()
 	    plt.xticks(rotation=45, ha='right', fontsize=6)
 	    
