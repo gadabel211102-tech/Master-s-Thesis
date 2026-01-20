@@ -45,8 +45,9 @@ STATUS_PALETTE = {
 }
 
 
-STRICT_MOSDEPTH = False
-MIN_NUMERIC_FRACTION = 0.20
+
+STRICT_MOSDEPTH = True
+MIN_NUMERIC_FRACTION = 0.90
 
 
 
@@ -167,9 +168,7 @@ def load_coverage_for_cohort(cohort_name: str, root_path: str) -> pd.DataFrame:
         try:
             frames.append(load_coverage_for_file(f, name))
         except Exception as e:
-            print(f"[ERROR] {cohort_name}: {f}: {e}")
-            dummy = pd.DataFrame(columns=["chr", "start", "end", name])
-            frames.append(dummy.set_index([]))
+            raise RuntimeError(f"[MOSDEPTH ERROR] {cohort} {name}: {e}")
 
     combined = frames[0].copy()
     for frame in frames[1:]:
