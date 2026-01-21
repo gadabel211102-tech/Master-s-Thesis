@@ -728,12 +728,37 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
     plt.close()
 
 
-    # ==========================================================================
-    # 13. Systemic Amplicon Failures — by cohort (Genomic Coordinates)
-    # ==========================================================================
+    # ==============================================================================
+# 13b. Systemic Amplicon Failures — by cohort (Annotation → extract rsID)
+# ==============================================================================
+
+    # Function to extract rsID from the annotation field
+    def extract_rs(a):
+        if pd.isna(a):
+            return None
+        a = str(a)
+
+        # tokenise annotation safely
+        tokens = (
+            a.replace(";", " ")
+            .replace(",", " ")
+            .replace("|", " ")
+            .replace("\n", " ")
+            .split()
+        )
+
+        # return first rsID encountered
+        for tok in tokens:
+            if tok.lower().startswith("rs"):
+                return tok
+
+        # fallback: return original annotation
+        return a
+
     if cohort_dfs:
         cohorts = list(cohort_dfs.keys())
         nrows = len(cohorts)
+
         heights = [6] + [4.0] * (nrows - 1)
 
         fig, axes = plt.subplots(
@@ -742,52 +767,69 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
             gridspec_kw={'height_ratios': heights},
             sharex=True
         )
+
         if nrows == 1:
             axes = [axes]
 
         max_x = 0
+
         for ax, cohort in zip(axes, cohorts):
+
             df = cohort_dfs[cohort]
             s_cols = [c for c in df.columns if c not in meta]
+
             if len(s_cols) == 0:
                 ax.set_axis_off()
-                ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×)")
+                ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×, Annotation)")
                 continue
 
             floor = QC_LIMITS['worst_amplicon_floor']
+
             fail_mask = (df[s_cols] < floor) & (~df[s_cols].isna())
 
             tmp = pd.DataFrame({
-                "coord": df["id"].values,
+                "annot": df["annotation"].apply(extract_rs).values,
                 "fail_count": fail_mask.sum(axis=1).values
-            }).dropna(subset=["coord"])
+            }).dropna(subset=["annot"])
 
-            agg = (tmp.groupby("coord", as_index=False)["fail_count"]
-                     .sum().sort_values("fail_count", ascending=False))
+            agg = (
+                tmp.groupby("annot", as_index=False)["fail_count"]
+                .sum()
+                .sort_values("fail_count", ascending=False)
+            )
+
             agg = agg[agg["fail_count"] > 0].head(30)
 
             if agg.empty:
-                ax.text(0.5, 0.5, "No amplicons below 50×", ha="center", va="center")
+                ax.text(0.5, 0.5, "No amplicons below 50×",
+                        ha="center", va="center")
                 ax.set_axis_off()
-                ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×)")
+                ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×, Annotation)")
                 continue
 
             colours = sns.color_palette("Reds", n_colors=len(agg))
             plot_df = agg.iloc[::-1]
-            ax.barh(plot_df["coord"], plot_df["fail_count"],
-                    color=colours[::-1], edgecolor="none")
 
-            ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×)")
-            ax.set_ylabel("Genomic Coordinate (Chr17)", fontsize=10, fontweight='bold')
+            ax.barh(
+                plot_df["annot"],
+                plot_df["fail_count"],
+                color=colours[::-1],
+                edgecolor="none"
+            )
+
+            ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×, Annotation)")
+            ax.set_ylabel("rsID / Annotation", fontsize=10, fontweight='bold')
             ax.grid(axis="x", linestyle=":", alpha=0.4)
+
             max_x = max(max_x, int(plot_df["fail_count"].max()))
 
         axes[-1].set_xlabel("Number of Failed Samples", fontsize=10, fontweight='bold')
+
         for ax in axes:
             ax.set_xlim(0, max_x + 1)
 
         plt.tight_layout()
-        plt.savefig(f"{PATHS['plots_dir']}/13_failures_coordinates.png")
+        plt.savefig(f"{PATHS['plots_dir']}/13b_failures_annotation.png")
         plt.close()
 
 # ==============================================================================
