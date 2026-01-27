@@ -103,8 +103,11 @@ pip install pandas seaborn matplotlib scikit-learn openpyxl
 # Step 2: Run QC
 ./02_dna_qc.sh -i ./raw_data/bams -o ./results -r hg38.fa -b GSDMB_targets.bed
 
-# Step 2.5: Make PASS manifests
+# Step 2.1: Make PASS manifests
  ./02.5_manifest.sh /path/to/cohort/dna_qc /path/to/output_manifest.txt
+
+# Step 2.2: Zero base coverage
+02.2_zero_base_coverage.sh <ROOT_DIR> <OUT_DIR>
 
 # Step 3: Analysis & Plots
 python3 03_qc_analysis.py
