@@ -22,6 +22,12 @@ The repository provides a modular bioinformatics pipeline for Quality Control (Q
 * **Tools:** Uses `mosdepth` for rapid depth calculation.
 * **Sorting:** Automatically segregates samples into `pass_bams` and `fail_bams` based on the thresholds below.
 
+### 2.5 Manifest Generation (02.5_manifest.sh)
+* **Purpose:** Automates the bridge between quality control and downstream analysis by filtering validated samples.
+* **Logic:** Parses the qc_summary.tsv generated in the previous step to identify samples with a PASS status. It cross-references these names against the physical files in the pass_bams directory to ensure data integrity.
+* **Validation:** Employs a robust awk-based header detection to handle column mapping dynamically, ensuring the script remains resilient even if the summary file structure changes.
+* **Output:** Generates a flat-file manifest containing absolute paths to high-quality BAM files, which serves as the definitive input list for cohort-level analysis or variant calling.
+
 ### 3. Cohort Analysis & Visualisation (`03_qc_analysis.py`)
 
 * **Purpose:** Consolidates all samples into a single research dashboard.
