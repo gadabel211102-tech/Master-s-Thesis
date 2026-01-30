@@ -86,6 +86,7 @@ The repository provides a modular bioinformatics pipeline for Quality Control (Q
 ```bash
 # 1. Bioinformatics (Micromamba)
 micromamba create -n bam-steps samtools bcftools mosdepth -c bioconda -c conda-forge
+micromamba activate bam-steps
 
 # 2. Visualisation (Python venv)
 python3 -m venv tfm_env
