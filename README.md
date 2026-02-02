@@ -53,7 +53,7 @@ The repository provides a modular bioinformatics pipeline for Quality Control (Q
 * **Engine:** Ion Torrent Variant Caller (TVC).
 * **Post-Processing:** Uses `bcftools` for normalisation (splitting multi-allelic sites) and hard-filtering variants based on validated thresholds.
 
-### 6. Variant Annotation ([`06_annotation.sh`](06_annotation.sh))
+### 6. Variant Annotation (`06_annotation.sh`)
 
 * **Purpose:** Adds biological and functional context to identified variants.
 * **Engine:** **Ensembl Variant Effect Predictor (VEP)** using the GRCh38 assembly.
@@ -61,7 +61,7 @@ The repository provides a modular bioinformatics pipeline for Quality Control (Q
     * Includes environment-specific "Secret Sauce" fixes for Perl library paths to ensure stability in WSL environments.
 * **Data Extraction:** Automatically parses complex VEP headers to extract Chromosome, Position, Gene Symbol, Consequence, and Protein Change (HGVSp).
 
-### 7. Clinical Report Integration ([`07_merge-annotations.py`](07_merge-annotations.py))
+### 7. Clinical Report Integration (`07_merge-annotations.py`)
 
 * **Purpose:** Consolidates technical QC data and biological variants into a single, researcher-friendly Excel report.
 * **Core Logic:**
