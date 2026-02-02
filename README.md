@@ -68,6 +68,34 @@ The repository provides a modular bioinformatics pipeline for Quality Control (Q
     * **Impact Prioritisation:** Automatically ranks variants by biological severity (High > Moderate > Low > Modifier).
     * **Robust Parsing:** Uses case-insensitive column matching and dynamic VCF header extraction to handle diverse annotation outputs.
 * **Final Deliverable:** Appends a `Biological_Annotations` sheet to the master project report (`GSDMB_Annotated_Report_Fixed.xlsx`).
+
+### 8. Multi-Gene Mutational Landscape (`08_mapping.py`)
+
+* **Purpose:** Generates a "clean" global map of all identified variants across the targeted genomic regions.
+* **Logic:** Visualises variant frequency across genomic positions (Chr17 Mb) for all four cohorts (Breast/Endometrium, Tumour/Normal) simultaneously.
+* **Key Features:** * **Impact Encoding:** Uses distinct markers (Circle for HIGH, Square for MODIFIER) and high-contrast colours to differentiate between gene symbols.
+    * **Cohort Faceting:** Automatically splits views to allow direct technical and biological comparison between tissue types.
+
+### 9. GSDMB-Exclusive Analysis (`09_gsdmb-only.py`)
+
+* **Purpose:** Provides a high-resolution, focused view of mutations specifically within the *GSDMB* gene boundaries.
+* **Logic:** Filters the master dataset for *GSDMB* symbols and switches the X-axis to base-pair (bp) precision for exact exon-level localisation.
+* **Key Features:** Utilises a "flare" colour palette to highlight high-impact areas, providing a cleaner visual for identifying specific *GSDMB* haplotypes.
+
+### 10. Variant Statistics & Distribution (`10_variant-stats.py`)
+
+* **Purpose:** Quantifies the mutational burden and classifies variants by type and impact for statistical and clinical reporting.
+* **Logic:** Generates both log-scaled and linear bar plots to compare "Total Records" (every occurrence) versus "Unique Variants" across tissue groups.
+* **Key Features:** * **Automated Categorisation:** Groups findings into four essential clinical plots (Total/Unique x Log/Linear).
+    * **Tabular Exports:** Produces raw CSV tables detailing precise counts for every **Impact** level (HIGH/MODERATE/LOW) and **Consequence** type (Missense/Synonymous).
+
+### 11. Global SNP Discovery & gnomAD Comparison (`11_SNPs.py`)
+
+* **Purpose:** Validates internal study findings against global population databases to identify rare vs. common variants.
+* **Logic:** Extracts rsIDs from the dataset and correlates observed Allele Frequencies (AF) in your cohort with **gnomAD** global population frequencies.
+* **Key Features:** * **1% Filter:** Automatically identifies common SNPs (>1% frequency) for population-level significance analysis.
+    * **Identity Correlation:** Generates scatter plots with an "Identity Line" to visualise how closely your cohort matches the global population.
+    * **GSDMB Targeting:** Specifically highlights *GSDMB* variants with black target rings to distinguish them from other panel targets.
 ---
 
 ##  Validated Thresholds
@@ -141,7 +169,17 @@ python3 04_technical_audit.py
 # Step 7: Final Report Consolidation
 python3 07_merge-annotations.py
 
+# Step 8: Generate global mutational landscape
+python3 08_mapping.py
 
+# Step 9: Generate GSDMB-specific mutation map
+python3 09_gsdmb-only.py
+
+# Step 10: Calculate variant statistics and generate clinical bar plots
+python3 10_variant-stats.py
+
+# Step 11: Compare study SNPs with global population data (gnomAD)
+python3 11_SNPs.py
 ```
 
 
