@@ -22,13 +22,13 @@ The repository provides a modular bioinformatics pipeline for Quality Control (Q
 * **Tools:** Uses `mosdepth` for rapid depth calculation.
 * **Sorting:** Automatically segregates samples into `pass_bams` and `fail_bams` based on the thresholds below.
 
-### 2.1 Manifest Generation (´02.1_manifest.sh´)
+### 2.1 Manifest Generation (`02.1_manifest.sh`)
 * **Purpose:** Automates the bridge between quality control and downstream analysis by filtering validated samples.
 * **Logic:** Parses the qc_summary.tsv generated in the previous step to identify samples with a PASS status. It cross-references these names against the physical files in the pass_bams directory to ensure data integrity.
 * **Validation:** Employs a robust awk-based header detection to handle column mapping dynamically, ensuring the script remains resilient even if the summary file structure changes.
 * **Output:** Generates a flat-file manifest containing absolute paths to high-quality BAM files, which serves as the definitive input list for cohort-level analysis or variant calling.
 
-### 2.2 Calculating how many bases had 0 coverage per amplicon (´02.2_zero_base-coverage.sh´)
+### 2.2 Calculating how many bases had 0 coverage per amplicon (`02.2_zero_base-coverage.sh`)
 * **Purpose:** Extends the DNA‑QC workflow by measuring fine‑grained coverage completeness across all amplicons. Whereas mean depth and uniformity reflect overall performance, this stage explicitly quantifies how many bases within each target region received zero sequencing coverage per sample, per cohort.
 * **Logic:** Iterates over the cleaned BED coordinates and re‑profiles each amplicon using temporary per‑base mosdepth output. This enables precise counting of uncovered bases, overcoming the limitation of region‑summary depth files. For each sample, the script constructs a coverage vector and computes the number of positions with depth 0 inside each amplicon.
 * **Robustness:** Works seamlessly on both PASS and FAIL samples, ensuring that low‑quality sequencing runs are accurately represented. Its design avoids rewriting any core QC scripts and leaves all existing outputs untouched.
