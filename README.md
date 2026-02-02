@@ -52,6 +52,22 @@ The repository provides a modular bioinformatics pipeline for Quality Control (Q
 * **Purpose:** Clinical-grade mutation identification.
 * **Engine:** Ion Torrent Variant Caller (TVC).
 * **Post-Processing:** Uses `bcftools` for normalisation (splitting multi-allelic sites) and hard-filtering variants based on validated thresholds.
+
+### 6. Variant Annotation ([`06_annotation.sh`](06_annotation.sh))
+
+* **Purpose:** Adds biological and functional context to identified variants.
+* **Engine:** **Ensembl Variant Effect Predictor (VEP)** using the GRCh38 assembly.
+* **Key Features:** * Configured for **offline high-speed processing** using local cache directories.
+    * Includes environment-specific "Secret Sauce" fixes for Perl library paths to ensure stability in WSL environments.
+* **Data Extraction:** Automatically parses complex VEP headers to extract Chromosome, Position, Gene Symbol, Consequence, and Protein Change (HGVSp).
+
+### 7. Clinical Report Integration ([`07_merge-annotations.py`](07_merge-annotations.py))
+
+* **Purpose:** Consolidates technical QC data and biological variants into a single, researcher-friendly Excel report.
+* **Core Logic:**
+    * **Impact Prioritisation:** Automatically ranks variants by biological severity (High > Moderate > Low > Modifier).
+    * **Robust Parsing:** Uses case-insensitive column matching and dynamic VCF header extraction to handle diverse annotation outputs.
+* **Final Deliverable:** Appends a `Biological_Annotations` sheet to the master project report (`GSDMB_Annotated_Report_Fixed.xlsx`).
 ---
 
 ##  Validated Thresholds
@@ -118,6 +134,12 @@ python3 04_technical_audit.py
 
 # Step 5: Call Variants
 ./05_variant_calling.sh -m ./results/qc_pass_manifest.txt -r hg38.fa -b GSDMB_targets.bed -o ./variants
+
+# Step 6: Annotate Variants
+./06_annotation.sh
+
+# Step 7: Final Report Consolidation
+python3 07_merge-annotations.py
 
 
 ```
