@@ -4,10 +4,10 @@ import os
 import glob
 import pandas as pd
 import numpy as np
-import seaborn as sns
+import seaborn as sns # type: ignore
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler # type: ignore
+from sklearn.decomposition import PCA # type: ignore
 import matplotlib.ticker as mticker
 
 # ==============================================================================
@@ -31,12 +31,14 @@ PATHS = {
 
 COHORT_MAP = {
     'Breast Tumour': 'breast/tumour',
+    'Breast Control': 'breast/normal',
     'Endometrium Tumour': 'endometrium/tumour',
-    'Endometrium Control': 'endometrium/normal'
+    'Endometrium Control': 'endometrium/normal',
 }
 
 PALETTE = {
     'Breast Tumour': '#3498db',
+    'Breast Control': "#d1d946",
     'Endometrium Tumour': '#9b59b6',
     'Endometrium Control': '#2ecc71'
 }
@@ -142,7 +144,7 @@ def load_coverage_for_file(path: str, sample_name: str) -> pd.DataFrame:
         "end": raw.iloc[:, 2].astype("Int64"),
         sample_name: depth
     })
-    df["id"] = df["chr"] + ":" + df["start"].astype(str) + "-" + df["end"].astype(str)
+    df["id"] = df["chr"] + ":" + df["start"].astype(str) + "-" + df["end"].astype(str) # type: ignore
     df = df.drop_duplicates("id").set_index("id")
 
     frac = df[sample_name].notna().mean()
@@ -307,7 +309,7 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
         )
         ax.set_xlabel(f"PC1 ({var1:.1f}% variance)")
         ax.set_ylabel(f"PC2 ({var2:.1f}% variance)")
-        plt.title("PCA of QC Metrics")
+        plt.title("PCA of QC Metrics", fontweight='bold')
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         plt.tight_layout()
         plt.savefig(f"{PATHS['plots_dir']}/01_pca.png")
@@ -331,7 +333,7 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
             )
             ax.set_xlabel(f"PC1 ({var1:.1f}% variance)")
             ax.set_ylabel(f"PC2 ({var2:.1f}% variance)")
-            plt.title("PCA (Pass-Only Samples)")
+            plt.title("PCA (Pass-Only Samples)", fontweight='bold')
             ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             plt.tight_layout()
             plt.savefig(f"{PATHS['plots_dir']}/01b_pca_pass_only.png")
@@ -386,7 +388,7 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
 
         plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
         plt.ylabel("Genomic Coordinates", fontsize=10, fontweight='bold')
-        plt.title(f"Coverage Heatmap: {cohort}")
+        plt.title(f"Coverage Heatmap: {cohort}", fontweight='bold')
         plt.tight_layout()
         plt.savefig(f"{PATHS['plots_dir']}/02_heatmap_{cohort.replace(' ', '_')}.png", dpi=300)
         plt.close()
@@ -413,7 +415,7 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
 
         plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
         plt.ylabel("Genomic Coordinates", fontsize=10, fontweight='bold')
-        plt.title("Global Coverage Heatmap")
+        plt.title("Global Coverage Heatmap", fontweight='bold')
         plt.tight_layout()
         plt.savefig(f"{PATHS['plots_dir']}/03_heatmap_global.png")
         plt.close()
@@ -436,9 +438,9 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
     h_floor = ax.axhline(floor_line, color="red", ls="--", lw=2, label=f"Floor {floor_line}×")
 
     ax.set_yscale("log")
-    ax.set_xlabel("Amplicon Index")
-    ax.set_ylabel("Median Depth (×)")
-    ax.set_title("Panel Landscape vs Thresholds")
+    ax.set_xlabel("Amplicon Index", fontweight='bold')
+    ax.set_ylabel("Median Depth (×)", fontweight='bold')
+    ax.set_title("Panel Landscape vs Thresholds", fontweight='bold')
 
     handles = cohort_handles + [h_mean, h_floor]
     labels = [h.get_label() for h in handles]
@@ -489,9 +491,9 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
         ax.set_xticklabels([ordered_ids[i] for i in sel], rotation=45, ha='right', fontsize=7)
 
     ax.set_yscale("log")
-    ax.set_xlabel("Amplicon ID (Genomic Coordinates)")
-    ax.set_ylabel("Median Depth (×)")
-    ax.set_title("Panel Landscape (Genomic Coordinates)")
+    ax.set_xlabel("Amplicon ID", fontweight='bold')
+    ax.set_ylabel("Median Depth (×)", fontweight='bold')
+    ax.set_title("Panel Landscape (Genomic Coordinates)", fontweight='bold')
 
     handles = cohort_handles + [h_mean, h_floor]
     labels = [h.get_label() for h in handles]
@@ -555,9 +557,9 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
         ax.set_xticklabels([gene_order[i] for i in sel], rotation=45, ha='right', fontsize=7)
 
         ax.set_yscale("log")
-        ax.set_xlabel("Annotated Region (Genomic Order)")
-        ax.set_ylabel("Median Depth (×)")
-        ax.set_title("Panel Landscape (Region)")
+        ax.set_xlabel("Annotated Region (Genomic Order)", fontweight='bold')
+        ax.set_ylabel("Median Depth (×)", fontweight='bold')
+        ax.set_title("Panel Landscape (Region)", fontweight='bold')
 
         handles = cohort_handles + [h_mean, h_floor]
         labels = [h.get_label() for h in handles]
@@ -612,9 +614,9 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
             line.set_markeredgecolor("black")
             line.set_markersize(7)
 
-    plt.title("Coverage Gaps (<50×)")
-    plt.xlabel("Cohort")
-    plt.ylabel("Amplicons <50×")
+    plt.title("Coverage Gaps (<50×)", fontweight='bold')
+    plt.xlabel("Cohort", fontweight='bold')
+    plt.ylabel("Amplicons <50×", fontweight='bold')
     plt.tight_layout()
     plt.savefig(f"{PATHS['plots_dir']}/08_coverage_gaps.png")
     plt.close()
@@ -627,9 +629,9 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
         full_qc_df.groupby(["cohort", "status"]).size().unstack().fillna(0).plot(
             kind="bar", stacked=True, color=STATUS_PALETTE, ax=plt.gca()
         )
-        plt.title("Retention Rate")
-        plt.xlabel("Cohort")
-        plt.ylabel("Sample Count")
+        plt.title("Retention Rate", fontweight='bold')
+        plt.xlabel("Cohort", fontweight='bold')
+        plt.ylabel("Sample Count", fontweight='bold')
         plt.tight_layout()
         plt.savefig(f"{PATHS['plots_dir']}/09_retention.png")
         plt.close()
@@ -666,7 +668,7 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
             plt.figure(figsize=(12, 7))
             counts.plot(kind="bar", stacked=True, ax=plt.gca(), cmap="tab20")
             plt.legend(title="Reason for Failure", bbox_to_anchor=(1.05, 1), loc='upper left')
-            plt.title("Failure Reasons by Cohort")
+            plt.title("Failure Reasons by Cohort", fontweight='bold')
             plt.xlabel("Cohort", fontsize=10, fontweight='bold')
             plt.ylabel("Failed Samples", fontsize=10, fontweight='bold')
             plt.tight_layout()
@@ -683,7 +685,9 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
             hue="status", palette=STATUS_PALETTE, jitter=True
         )
         plt.axhline(QC_LIMITS["mapped_pct"], color="red", ls="--")
-        plt.title("Mapping Efficiency Audit")
+        plt.title("Mapping Efficiency Audit", fontweight='bold')
+        plt.xlabel("Cohort", fontsize=10, fontweight='bold')
+        plt.ylabel("% mapped", fontsize=10, fontweight='bold')
         plt.tight_layout()
         plt.savefig(f"{PATHS['plots_dir']}/10_mapping_audit.png")
         plt.close()
@@ -698,7 +702,9 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
             hue="status", palette=STATUS_PALETTE, jitter=True
         )
         plt.axhline(QC_LIMITS["on_target_pct"], color="firebrick", ls="--")
-        plt.title("Specificity Jitter")
+        plt.title("Specificity Jitter", fontweight='bold')
+        plt.xlabel("Cohort", fontsize=10, fontweight='bold')
+        plt.ylabel("On target %", fontsize=10, fontweight='bold')
         plt.tight_layout()
         plt.savefig(f"{PATHS['plots_dir']}/11_specificity_jitter.png")
         plt.close()
@@ -722,13 +728,78 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
     )
     plt.axhline(QC_LIMITS["worst_amplicon_floor"], color="red", ls="--")
     plt.yscale("symlog", linthresh=10)
-    plt.title("Lowest Coverage per Sample")
+    plt.title("Lowest Coverage per Sample", fontweight='bold')
+    plt.xlabel("Cohort", fontsize=10, fontweight='bold')
+    plt.ylabel("Minimum amplicon depth per sample", fontsize=10, fontweight='bold')
     plt.tight_layout()
     plt.savefig(f"{PATHS['plots_dir']}/12_worst_amplicon.png")
     plt.close()
 
 
-    # ==============================================================================
+    # ==========================================================================
+    # 13. Systemic Amplicon Failures — by cohort (Genomic Coordinates)
+    # ==========================================================================
+    if cohort_dfs:
+        cohorts = list(cohort_dfs.keys())
+        nrows = len(cohorts)
+        heights = [6] + [4.0] * (nrows - 1)
+
+        fig, axes = plt.subplots(
+            nrows=nrows, ncols=1,
+            figsize=(16, sum(heights)),
+            gridspec_kw={'height_ratios': heights},
+            sharex=True
+        )
+        if nrows == 1:
+            axes = [axes]
+
+        max_x = 0
+        for ax, cohort in zip(axes, cohorts):
+            df = cohort_dfs[cohort]
+            s_cols = [c for c in df.columns if c not in meta]
+            if len(s_cols) == 0:
+                ax.set_axis_off()
+                ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×)")
+                continue
+
+            floor = QC_LIMITS['worst_amplicon_floor']
+            fail_mask = (df[s_cols] < floor) & (~df[s_cols].isna())
+
+            tmp = pd.DataFrame({
+                "coord": df["id"].values,
+                "fail_count": fail_mask.sum(axis=1).values
+            }).dropna(subset=["coord"])
+
+            agg = (tmp.groupby("coord", as_index=False)["fail_count"]
+                     .sum().sort_values("fail_count", ascending=False))
+            agg = agg[agg["fail_count"] > 0].head(30)
+
+            if agg.empty:
+                ax.text(0.5, 0.5, "No amplicons below 50×", ha="center", va="center")
+                ax.set_axis_off()
+                ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×)", fontweight='bold')
+                continue
+
+            colours = sns.color_palette("Reds", n_colors=len(agg))
+            plot_df = agg.iloc[::-1]
+            ax.barh(plot_df["coord"], plot_df["fail_count"],
+                    color=colours[::-1], edgecolor="none")
+
+            ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×)", fontweight='bold')
+            ax.set_ylabel("Genomic Coordinate (Chr17)", fontsize=10, fontweight='bold',)
+            ax.grid(axis="x", linestyle=":", alpha=0.4)
+            max_x = max(max_x, int(plot_df["fail_count"].max()))
+
+        axes[-1].set_xlabel("Number of Failed Samples", fontsize=10, fontweight='bold')
+        for ax in axes:
+            ax.set_xlim(0, max_x + 1) # type: ignore
+
+        plt.tight_layout()
+        plt.savefig(f"{PATHS['plots_dir']}/13_failures_coordinates.png")
+        plt.close()
+    
+    
+# ==============================================================================
 # 13b. Systemic Amplicon Failures — by cohort (Annotation → extract rsID)
 # ==============================================================================
 
@@ -804,7 +875,7 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
                 ax.text(0.5, 0.5, "No amplicons below 50×",
                         ha="center", va="center")
                 ax.set_axis_off()
-                ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×, Annotation)")
+                ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×)", fontweight='bold')
                 continue
 
             colours = sns.color_palette("Reds", n_colors=len(agg))
@@ -817,8 +888,8 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
                 edgecolor="none"
             )
 
-            ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×, Annotation)")
-            ax.set_ylabel("rsID / Annotation", fontsize=10, fontweight='bold')
+            ax.set_title(f"{cohort} — Systemic Amplicon Failure (<50×)", fontweight='bold')
+            ax.set_ylabel("rsID", fontsize=10, fontweight='bold')
             ax.grid(axis="x", linestyle=":", alpha=0.4)
 
             max_x = max(max_x, int(plot_df["fail_count"].max()))
@@ -826,11 +897,13 @@ def plot_all(full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples):
         axes[-1].set_xlabel("Number of Failed Samples", fontsize=10, fontweight='bold')
 
         for ax in axes:
-            ax.set_xlim(0, max_x + 1)
+            ax.set_xlim(0, max_x + 1) # type: ignore
 
         plt.tight_layout()
         plt.savefig(f"{PATHS['plots_dir']}/13b_failures_annotation.png")
         plt.close()
+
+
 
 # ==============================================================================
 # 6. MAIN EXECUTION
