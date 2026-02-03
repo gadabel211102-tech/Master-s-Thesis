@@ -4,15 +4,16 @@ import seaborn as sns
 import os
 
 # --- Configuration ---
+# Updated directory and file paths based on your environment
 input_dir = "/home/gadeaalonsoj/tfm/gsdmb_final_results/"
 input_file = os.path.join(input_dir, "GSDMB_Annotated_Report_Fixed.xlsx")
 
-# Manifest of the 4 essential bar plots
+# Manifest for the 4 essential bar plots (All variants)
 outputs = {
-    "total_log": "01_GSDMB_TOTAL_LOG.png",
-    "total_lin": "02_GSDMB_TOTAL_LINEAR.png",
-    "unique_log": "03_GSDMB_UNIQUE_LOG.png",
-    "unique_lin": "04_GSDMB_UNIQUE_LINEAR.png"
+    "total_log": "01_ALL_VARIANTS_TOTAL_LOG.png",
+    "total_lin": "02_ALL_VARIANTS_TOTAL_LINEAR.png",
+    "unique_log": "03_ALL_VARIANTS_UNIQUE_LOG.png",
+    "unique_lin": "04_ALL_VARIANTS_UNIQUE_LINEAR.png"
 }
 
 def find_col(df, target):
@@ -22,7 +23,7 @@ def find_col(df, target):
     return None
 
 def generate_and_save_tables(df, suffix, output_dir):
-    """Generates and exports CSV counts for Impact and Consequence."""
+    """Generates and exports CSV counts for Impact and Consequence for all variants."""
     imp_c = find_col(df, 'Impact')
     con_c = find_col(df, 'Consequence')
     
@@ -98,25 +99,27 @@ def main():
     pos_c = find_col(df, 'Pos')
     hgv_c = find_col(df, 'HGVSp')
 
-    # Subset GSDMB and Sanitize
-    df_gsdmb = df[df[sym_c].astype(str).str.contains('GSDMB', case=False, na=False)].copy()
-    df_gsdmb[tis_c] = df_gsdmb[tis_c].astype(str).str.strip()
-    df_gsdmb[coh_c] = df_gsdmb[coh_c].astype(str).str.strip()
-    df_gsdmb['Group'] = df_gsdmb[coh_c] + " - " + df_gsdmb[tis_c]
+    # Clean and Group data for ALL variants
+    df[tis_c] = df[tis_c].astype(str).str.strip()
+    df[coh_c] = df[coh_c].astype(str).str.strip()
+    df['Group'] = df[coh_c] + " - " + df[tis_c]
 
-    # --- 1. TOTALS ---
-    generate_and_save_tables(df_gsdmb, "total", input_dir)
-    create_stat_visuals(df_gsdmb, "All Records (Log)", outputs['total_log'], use_log=True)
-    create_stat_visuals(df_gsdmb, "All Records (Linear)", outputs['total_lin'], use_log=False)
+    # --- 1. TOTALS (Across all genes) ---
+    generate_and_save_tables(df, "all_total", input_dir)
+    create_stat_visuals(df, "All Variants (Log)", outputs['total_log'], use_log=True)
+    create_stat_visuals(df, "All Variants (Linear)", outputs['total_lin'], use_log=False)
 
-    # --- 2. UNIQUES (Removing duplicates within the same group) ---
-    df_u = df_gsdmb.drop_duplicates(subset=[pos_c, hgv_c, 'Group'])
-    generate_and_save_tables(df_u, "unique", input_dir)
+    # --- 2. UNIQUES (Unique variants across the whole panel) ---
+    # We include 'Symbol' in the subset to ensure variants in different genes 
+    # at similar positions are treated as distinct.
+    df_u = df.drop_duplicates(subset=[sym_c, pos_c, hgv_c, 'Group'])
+    
+    generate_and_save_tables(df_u, "all_unique", input_dir)
     create_stat_visuals(df_u, "Unique Variants (Log)", outputs['unique_log'], use_log=True)
     create_stat_visuals(df_u, "Unique Variants (Linear)", outputs['unique_lin'], use_log=False)
     
     print(f"\n{'='*60}")
-    print(f" SUCCESS: 4 Charts and 4 Tables generated in:\n {input_dir}")
+    print(f" SUCCESS: Results for ALL variants generated in:\n {input_dir}")
     print(f"{'='*60}")
 
 if __name__ == "__main__":
