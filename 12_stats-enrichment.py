@@ -1,113 +1,171 @@
 import pandas as pd
-import os
-import scipy.stats as stats
 import numpy as np
+import scipy.stats as stats
+import os
 import matplotlib.pyplot as plt
 import seaborn as sns
+from statsmodels.stats.multitest import multipletests
 
 # --- PATH CONFIGURATION ---
 base_path = "/home/gadeaalonsoj/tfm/gsdmb_final_results/"
-# Filtered SNP list from previous ancestry-matching step
-input_file = os.path.join(base_path, "13_MASTER_SNP_Catalogue_NFE_Corrected.xlsx")
-# Raw data used to calculate the denominators (total sample sizes)
-raw_data_for_denoms = os.path.join(base_path, "GSDMB_Annotated_Report_Fixed.xlsx")
-output_dir = base_path
+input_file = os.path.join(base_path, "GSDMB_Annotated_Report_Fixed.xlsx")
+output_xlsx = os.path.join(base_path, "18_Cancer_Specific_Association_Results.xlsx")
+output_plot = os.path.join(base_path, "18_Cancer_Specific_Volcano_Plots.png")
 
-def run_enrichment_analysis():
-    print(">>> Starting Statistical Enrichment (Population SNPs >1% and Novel)...")
+def find_col(df, target):
+    """Searches for columns regardless of capitalisation or hidden spaces."""
+    for col in df.columns:
+        if str(col).strip().upper() == target.upper():
+            return col
+    return None
+
+def run_multi_cohort_association():
+    print(">>> Starting Multi-Cohort Association Analysis (Global, Breast, Endometrium)...")
     
-    # 1. Load the "Shopping List" of variants to test
     if not os.path.exists(input_file):
-        print(f"ERROR: Filtered file not found at {input_file}.")
+        print(f"ERROR: Input file not found: {input_file}")
         return
-    df_snps = pd.read_excel(input_file, sheet_name='All_Genes_SNPs')
+
+    # 1. LOAD DATA
+    # We use the Biological_Annotations sheet as the source of truth for all variants
+    df = pd.read_excel(input_file, sheet_name='Biological_Annotations')
     
-    # 2. Load Raw Data for frequency counting
-    df_raw = pd.read_excel(raw_data_for_denoms, sheet_name='Biological_Annotations')
+    # 2. IDENTIFY AND STANDARDISE COLUMNS
+    # Dynamically find column names to prevent script crashes if names shift slightly
+    sym_c = find_col(df, 'SYMBOL')
+    imp_c = find_col(df, 'IMPACT')
+    con_c = find_col(df, 'CONSEQUENCE')
+    tis_c = find_col(df, 'TISSUE')
+    sam_c = find_col(df, 'SAMPLE')
+    var_c = find_col(df, 'Existing_variation')
+    hgv_c = find_col(df, 'HGVSp')
+    coh_c = find_col(df, 'COHORT')
+
+    # Standardise Tissue names to British spelling for the thesis
+    df[tis_c] = df[tis_c].astype(str).str.strip().replace({'Tumor': 'Tumour', 'Normal': 'Healthy', 'Control': 'Healthy'})
+    df[coh_c] = df[coh_c].astype(str).str.strip()
     
-    # Clean and standardise the raw data to match the SNP catalogue
-    df_raw['rsID'] = df_raw['Existing_variation'].astype(str).str.extract(r'(rs\d+)')
-    df_raw['Variant_ID'] = df_raw['rsID'].fillna(df_raw['SYMBOL'] + ":" + df_raw['HGVSp'].astype(str))
-    df_raw['Cohort'] = df_raw['Cohort'].astype(str).str.strip()
-    df_raw['Tissue'] = df_raw['Tissue'].astype(str).str.strip().replace('Tumor', 'Tumour')
+    # Create a unique Variant ID: Priority 1 = rsID; Priority 2 = Gene:Protein Change
+    df['rsID'] = df[var_c].astype(str).str.extract(r'(rs\d+)')
+    df['Variant_ID'] = df['rsID'].fillna(df[sym_c].astype(str) + ":" + df[hgv_c].astype(str))
+    
+    # NO-SKIP LOGIC: Generate a temporary ID for variants with zero metadata to ensure math remains accurate
+    replacement_series = pd.Series("Unknown_SNP_" + df.index.astype(str), index=df.index)
+    df['Variant_ID'] = df['Variant_ID'].replace('nan:nan', np.nan).fillna(replacement_series)
 
-    # 3. Denominators: Calculate total unique samples per Cohort and Tissue
-    # This is critical for the "No Variant" cells in the 2x2 contingency table
-    sample_counts = df_raw.groupby(['Cohort', 'Tissue'])['Sample'].nunique().to_dict()
+    # Define the three levels of analysis requested
+    cohort_list = ['Global', 'Breast', 'Endometrium']
+    all_results = []
 
-    results = []
-
-    # 4. Statistical Testing (Fisher's Exact Test)
-    # We iterate through each cohort (e.g., Breast, Endometrium)
-    for cohort in df_raw['Cohort'].unique():
-        n_tumour_total = sample_counts.get((cohort, 'Tumour'), 0)
-        n_normal_total = sample_counts.get((cohort, 'Normal'), 0)
+    # 3. PROCESS EACH LEVEL
+    for cohort_name in cohort_list:
+        print(f"   [PROCESS] Analyzing {cohort_name}...")
         
-        # We only perform the test if we have both groups to compare
-        if n_tumour_total == 0 or n_normal_total == 0:
+        # Filter data for specific tissue or keep all for 'Global'
+        if cohort_name == 'Global':
+            cohort_df = df.copy()
+        else:
+            cohort_df = df[df[coh_c].str.contains(cohort_name, case=False, na=False)].copy()
+            
+        if cohort_df.empty:
+            continue
+            
+        # Denominators: Total unique samples available in this specific cohort/tissue
+        n_tumour = cohort_df[cohort_df[tis_c] == 'Tumour'][sam_c].nunique()
+        n_healthy = cohort_df[cohort_df[tis_c] == 'Healthy'][sam_c].nunique()
+        
+        # Guard against division by zero errors
+        if n_tumour == 0 or n_healthy == 0:
+            print(f"      [SKIP] Missing groups for {cohort_name}")
             continue
 
-        print(f"Analysing {cohort} ({n_tumour_total} Tumour vs {n_normal_total} Normal)...")
-
-        for _, row in df_snps.iterrows():
-            var = row['Variant_ID']
-            symbol = row['SYMBOL']
+        unique_variants = cohort_df['Variant_ID'].unique()
+        
+        for var in unique_variants:
+            var_data = cohort_df[cohort_df['Variant_ID'] == var]
             
-            # Count how many unique samples in each group carry this specific variant
-            count_t = len(df_raw[(df_raw['Variant_ID'] == var) & 
-                                 (df_raw['Cohort'] == cohort) & 
-                                 (df_raw['Tissue'] == 'Tumour')]['Sample'].unique())
+            # Count how many unique samples carry this specific variant
+            count_tumour = var_data[var_data[tis_c] == 'Tumour'][sam_c].nunique()
+            count_healthy = var_data[var_data[tis_c] == 'Healthy'][sam_c].nunique()
             
-            count_n = len(df_raw[(df_raw['Variant_ID'] == var) & 
-                                 (df_raw['Cohort'] == cohort) & 
-                                 (df_raw['Tissue'] == 'Normal')]['Sample'].unique())
-
-            # Build the 2x2 Contingency Table
-            # [ [Variant_In_Tumour, No_Variant_In_Tumour], 
-            #   [Variant_In_Normal, No_Variant_In_Normal] ]
-            table = [[count_t, n_tumour_total - count_t],
-                     [count_n, n_normal_total - count_n]]
+            # FISHER'S EXACT TEST: Compare mutation frequency in Cases vs Controls
+            # Table Structure:
+            # [[Samples WITH in Cases, Samples WITHOUT in Cases],
+            #  [Samples WITH in Controls, Samples WITHOUT in Controls]]
+            table = [
+                [count_tumour, max(0, n_tumour - count_tumour)],
+                [count_healthy, max(0, n_healthy - count_healthy)]
+            ]
             
-            # Run the test: odds_ratio > 1 suggests enrichment in Tumour
+            # Odds Ratio (Risk magnitude) and P-Value (Statistical probability)
             odds_ratio, p_value = stats.fisher_exact(table)
             
-            results.append({
-                'Cohort': cohort,
+            # Helper to pull the first available metadata (Impact, Symbol, etc.) for this SNP
+            def get_metadata(col_name):
+                if col_name in var_data.columns and not var_data[col_name].empty:
+                    val = var_data[col_name].iloc[0]
+                    return val if pd.notna(val) else "N/A"
+                return "N/A"
+
+            all_results.append({
+                'Analysis_Group': cohort_name,
                 'Variant_ID': var,
-                'SYMBOL': symbol,
-                'Tumour_Count': count_t,
-                'Normal_Count': count_n,
-                'Tumour_Freq_%': (count_t / n_tumour_total) * 100,
-                'Normal_Freq_%': (count_n / n_normal_total) * 100,
+                'Symbol': get_metadata(sym_c),
+                'Impact': get_metadata(imp_c),
+                'Consequence': get_metadata(con_c),
+                'Tumour_Count': count_tumour,
+                'Healthy_Count': count_healthy,
+                'Tumour_Freq_%': (count_tumour / n_tumour) * 100,
+                'Healthy_Freq_%': (count_healthy / n_healthy) * 100,
                 'Odds_Ratio': odds_ratio,
-                'P_Value': p_value,
-                '-log10_p': -np.log10(max(p_value, 1e-50)) if p_value > 0 else 50
+                'P_Value': p_value
             })
 
-    # 5. Export Results
-    stats_df = pd.DataFrame(results)
-    stats_df = stats_df.sort_values(['P_Value', 'Odds_Ratio'], ascending=[True, False])
-    out_xlsx = os.path.join(output_dir, "16_Statistical_Enrichment_Results.xlsx")
-    stats_df.to_excel(out_xlsx, index=False)
+    # 4. MULTI-TESTING CORRECTION (FDR)
+    # We apply Benjamini-Hochberg (FDR) correction WITHIN each subgroup to control false discoveries
+    res_df = pd.DataFrame(all_results)
+    final_dfs = []
+    for group in res_df['Analysis_Group'].unique():
+        sub = res_df[res_df['Analysis_Group'] == group].copy()
+        # FDR_P_Value is the one you should cite as "Robust Significance"
+        _, sub['FDR_P_Value'], _, _ = multipletests(sub['P_Value'], method='fdr_bh')
+        final_dfs.append(sub)
     
-    # 6. Volcano Plot: Visualise significance vs. magnitude of effect
+    final_res = pd.concat(final_dfs).sort_values(['Analysis_Group', 'P_Value'])
     
-    plt.figure(figsize=(10, 7))
-    sns.scatterplot(data=stats_df, x='Odds_Ratio', y='-log10_p', hue='SYMBOL', alpha=0.7, s=100)
+    # Export to a Multi-Sheet Excel (One tab per cohort)
+    with pd.ExcelWriter(output_xlsx) as writer:
+        for group in cohort_list:
+            if group in final_res['Analysis_Group'].unique():
+                final_res[final_res['Analysis_Group'] == group].to_excel(writer, sheet_name=group, index=False)
     
-    # Add a horizontal line at p=0.05
-    plt.axhline(-np.log10(0.05), color='red', linestyle='--', label='p=0.05 (Sig.)')
-    plt.axvline(1, color='black', linestyle='-', alpha=0.3) # Neutral Odds Ratio line
+    print(f">>> Full report saved to: {output_xlsx}")
+
+    # 5. VISUALISATION: SIDE-BY-SIDE VOLCANO PLOTS
+    # Convert p-values to -log10 for standard volcano visualisation
+    final_res['-log10_p'] = -np.log10(final_res['P_Value'].replace(0, 1e-20))
     
-    plt.xscale('log') # Odds ratios viewed on a log scale
-    plt.title("Statistical Enrichment: Population SNPs & Novel Variants", fontsize=14, fontweight='bold')
-    plt.xlabel("Odds Ratio (Log Scale - >1 is Tumour Enriched)")
-    plt.ylabel("-log10(p-value)")
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    # Cap the Odds Ratio at 40 to prevent infinite/outlier values from ruining the plot scale
+    max_or_limit = min(final_res['Odds_Ratio'].replace(np.inf, np.nan).max(), 40)
+    
+    # Create a FacetGrid (one plot for each Analysis Group)
+    g = sns.FacetGrid(final_res, col="Analysis_Group", hue="Impact", palette="viridis", height=6, aspect=1)
+    g.map(sns.scatterplot, "Odds_Ratio", "-log10_p", s=100, edgecolor='black', alpha=0.7)
+    
+    # Add significance thresholds and axis labels
+    for ax in g.axes.flat:
+        ax.axhline(-np.log10(0.05), color='red', linestyle='--', label='Nominal p=0.05')
+        ax.set_xlim(-1, max_or_limit + 5)
+        ax.set_xlabel("Odds Ratio (Risk Factor)")
+        ax.set_ylabel("-log10(P-Value)")
+        ax.grid(True, alpha=0.2)
+
+    g.add_legend(title="VEP Impact")
+    g.set_titles("{col_name} Association Analysis", fontweight='bold')
+    
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "17_Volcano_Plot_Enrichment.png"), dpi=300)
-    
-    print(f"\n>>> Results saved to: {out_xlsx}")
+    plt.savefig(output_plot, dpi=300)
+    print(f">>> Multi-cohort Volcano Plots saved to: {output_plot}")
 
 if __name__ == "__main__":
-    run_enrichment_analysis()
+    run_multi_cohort_association()
