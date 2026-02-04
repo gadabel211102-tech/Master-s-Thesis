@@ -115,8 +115,8 @@ def main():
     df_u = df.drop_duplicates(subset=[sym_c, pos_c, hgv_c, 'Group'])
     
     generate_and_save_tables(df_u, "all_unique", input_dir)
-    create_stat_visuals(df_u, "Unique Variants (Log)", outputs['unique_log'], use_log=True)
-    create_stat_visuals(df_u, "Unique Variants (Linear)", outputs['unique_lin'], use_log=False)
+    create_stat_visuals(df_u, "Unique Variants ", outputs['unique_log'], use_log=True)
+    create_stat_visuals(df_u, "Unique Variants ", outputs['unique_lin'], use_log=False)
     
     print(f"\n{'='*60}")
     print(f" SUCCESS: Results for ALL variants generated in:\n {input_dir}")
