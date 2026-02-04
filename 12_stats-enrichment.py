@@ -81,7 +81,7 @@ def run_enrichment_analysis():
                 'Normal_Freq_%': (count_n / n_normal_total) * 100,
                 'Odds_Ratio': odds_ratio,
                 'P_Value': p_value,
-                '-log10_p': -np.log10(p_value) if p_value > 0 else 0
+                '-log10_p': -np.log10(max(p_value, 1e-50)) if p_value > 0 else 50
             })
 
     # 5. Export Results
