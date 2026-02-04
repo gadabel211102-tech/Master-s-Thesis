@@ -192,6 +192,9 @@ python3 10_variant-stats.py
 
 # Step 11: Compare study SNPs with global population data (gnomAD)
 python3 11_SNPs.py
+
+# Step 12: Statistical Enrichment and Tumour vs. Normal Comparison
+python3 12_stats-enrichment.py
 ```
 
 
