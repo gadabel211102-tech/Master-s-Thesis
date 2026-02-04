@@ -91,11 +91,23 @@ The repository provides a modular bioinformatics pipeline for Quality Control (Q
 
 ### 11. Global SNP Discovery & gnomAD Comparison (`11_SNPs.py`)
 
-* **Purpose:** Validates internal study findings against global population databases to identify rare vs. common variants.
-* **Logic:** Extracts rsIDs from the dataset and correlates observed Allele Frequencies (AF) in your cohort with **gnomAD** global population frequencies.
-* **Key Features:** * **1% Filter:** Automatically identifies common SNPs (>1% frequency) for population-level significance analysis.
-    * **Identity Correlation:** Generates scatter plots with an "Identity Line" to visualise how closely your cohort matches the global population.
+* **Purpose:** Benchmarks study variants against the **gnomAD Non-Finnish European (NFE)** population to distinguish common polymorphisms from rare or novel mutations.
+* **Logic:** Extracts rsIDs and correlates cohort Allele Frequencies (AF) with ancestry-matched population data, ensuring novel variants (missing from gnomAD) are preserved in the analysis.
+* **Key Features:**
+    * **Inclusive 1% Filter:** Automatically identifies common SNPs (>1% NFE frequency) while explicitly retaining novel/rare variants for further investigation.
+    * **Identity Correlation:** Generates scatter plots with an "Identity Line" to visualise deviations between study frequencies and global European averages.
     * **GSDMB Targeting:** Specifically highlights *GSDMB* variants with black target rings to distinguish them from other panel targets.
+    * **Automated Reporting:** Produces a comparative Excel catalogue partitioned by cohort, tissue type, and gene-specific subsets.
+ 
+### 12. Statistical Enrichment Analysis (`12_stats-enrichment.py`)
+
+* **Purpose:** Performs comparative statistical testing between tissue types to identify variants significantly enriched in tumour versus normal samples.
+* **Logic:** Utilises the filtered SNP list from Script 11 to construct 2x2 contingency tables and applies **Fisher’s Exact Test** to calculate the significance (p-value) and Odds Ratio for each variant.
+* **Key Features:**
+    * **Fisher's Exact Testing:** Robustly compares variant prevalence across cohort groups, even with small sample sizes.
+    * **Enrichment Visualisation:** Generates **Volcano Plots** mapping the Odds Ratio against $-log10(p-value)$ to highlight statistically significant outcomes.
+    * **Standardised Metrics:** Calculates Tumour vs. Normal frequencies (%) and log-scaled Odds Ratios to identify somatic-like enrichment patterns in germline-relevant SNPs.
+    * **Targeted Results:** Exports a detailed statistical report (Excel) sorted by significance, allowing for rapid identification of top-tier candidates for further functional studies.
 ---
 
 ##  Validated Thresholds
