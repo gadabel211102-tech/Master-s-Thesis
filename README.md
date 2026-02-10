@@ -39,12 +39,15 @@ The repository provides a modular bioinformatics pipeline for Quality Control (Q
 * **Key Figures:** Generates **13 figures**, including PCA of technical variance, log10 coverage heatmaps (red-highlighted failing samples), and systemic failure reports using genomic coordinates.
 * **Standards:** Uses British spellings (*normalise*, *tumour*, *colour*) for all clinical labeling.
 
-### 4. Final Technical Audit (`04_technical_audit.py`)
+### 4. Unified Amplicon Technical Audit (`04_technical_audit.py`)
 
-* **Purpose:** A "Last-Step QC" to identify systemic failures and annotate the final matrices.
-* **Logic:** Cross-references the `Full_Panel.csv` matrices with the original BED file to map coordinates to **RS IDs** and **Gene Names**.
-* **Audit:** Automatically flags the **Top 10 Worst Amplicons** for each cohort (based on median depth) to identify potential technical dropouts or "blind spots" in the panel.
-* **Output:** Consolidates all annotations and audit results into a multi-sheet Excel workbook (`GSDMB_Annotated_Report_Fixed.xlsx`).
+* **Purpose:** Acts as a dual-mode diagnostic tool that combines deep sequence analysis with cohort-level performance reporting.
+* **Operational Modes:**
+    * **Comprehensive Mode:** Performs a full technical audit by correlating sequence complexity (GC content, homopolymers) with actual coverage data.
+    * **Quick Mode:** Generates rapid Excel-based reports highlighting the "Top 10 Worst Amplicons" per cohort for immediate review.
+* **Sequence Complexity Profiling:** Calculates critical metrics for Ion Torrent chemistry, including GC skew, sliding-window GC extremes, and the identification of self-complementary sequences (hairpin risk).
+* **Technical "Red Flag" Detection:** Automatically scans for long homopolymer runs and Simple Sequence Repeats (SSRs) that often lead to signal droop or alignment errors.
+* **Automated Normalisation:** Internally handles chromosome naming inconsistencies (e.g., converting '17' to 'chr17') to ensure seamless data integration across different genomic builds.
 
 ### 5. Variant Calling (`05_variant_calling.sh`)
 
@@ -178,7 +181,7 @@ pip install pandas seaborn matplotlib scikit-learn openpyxl
 python3 03_qc_analysis.py
 
 # Step 4: Final Technical Audit
-python3 04_technical_audit.py
+python3 04_technical_audit.py both
 
 # Step 5: Call Variants
 ./05_variant_calling.sh -m ./results/qc_pass_manifest.txt -r hg38.fa -b GSDMB_targets.bed -o ./variants
@@ -204,8 +207,6 @@ python3 11_SNPs.py
 # Step 12: Statistical Enrichment and Tumour vs. Normal Comparison
 python3 12_stats-enrichment.py
 
-# Step 13: Perform a unified technical audit across all cohorts
-python 3 13_failure.py \
 
 ```
 
