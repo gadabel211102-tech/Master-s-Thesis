@@ -33,7 +33,7 @@ The repository provides a modular bioinformatics pipeline for Quality Control (Q
 * **Cohort-Level Comparison:** Compiles a master matrix (the "Zero-Cov" report) that aligns samples side-by-side, making it easy to spot systemic amplicon failures versus sample-specific issues.
 * **Optimisation:** Uses a "compute-once" strategy with temporary `mosdepth` files to ensure the per-base analysis is efficient even for large cohorts.
 
-### 3. Cohort Analysis & Visualisation (`03_qc_analysis.py`)
+### 3. Cohort Analysis & Visualisation (`03_qc_visualisation.py`)
 
 * **Purpose:** Consolidates all samples into a single research dashboard.
 * **Key Figures:** Generates **13 figures**, including PCA of technical variance, log10 coverage heatmaps (red-highlighted failing samples), and systemic failure reports using genomic coordinates.
@@ -172,7 +172,7 @@ pip install pandas seaborn matplotlib scikit-learn openpyxl
     -t 8
 
 # Step 3: Analysis & Plots
-python3 03_qc_analysis.py
+python3 03_qc_visualisation.py
 
 # Step 4: Final Technical Audit
 python3 04_technical_audit.py both
