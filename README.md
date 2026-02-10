@@ -153,6 +153,9 @@ python3 -m venv tfm_env
 source tfm_env/bin/activate
 pip install pandas seaborn matplotlib scikit-learn openpyxl
 
+# 3. VEP
+conda activate vep_env
+
 ```
 
 ### Full Execution Sequence
