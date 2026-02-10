@@ -111,13 +111,7 @@ The repository provides a modular bioinformatics pipeline for Quality Control (Q
     * **Standardised Metrics:** Calculates Tumour vs. Normal frequencies (%) and log-scaled Odds Ratios to identify somatic-like enrichment patterns in germline-relevant SNPs.
     * **Targeted Results:** Exports a detailed statistical report (Excel) sorted by significance, allowing for rapid identification of top-tier candidates for further functional studies.
  
-### 13. Technical Failure Audit (`13_failure.py`)
 
-* **Purpose:** Acts as a unified diagnostic tool to identify why certain amplicons fail to sequence correctly.
-* **Sequence Complexity Analysis:** Scans the reference genome to calculate GC content, GC skew, and identifies technical "red flags" for Ion Torrent chemistry, such as long homopolymer runs and SSRs (Simple Sequence Repeats).
-* **Secondary Structure Prediction:** Predicts hairpin risk by identifying self-complementary sequences that may interfere with primer binding or polymerase extension.
-* **Cohort-Scale Aggregation:** Merges coverage data and zero-coverage reports across multiple cohorts to calculate global failure rates and mean depths for every amplicon in the panel.
-* **Failure Attribution:** Automatically identifies and ranks the "Top 10 Worst Amplicons," allowing researchers to correlate low coverage with specific sequence motifs.
 ---
 
 ##  Validated Thresholds
