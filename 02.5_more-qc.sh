@@ -1,21 +1,17 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# Script: 02_post_qc_analysis.sh (UNIFIED & FULLY ANNOTATED)
-# ==============================================================================
 # Purpose:
 #   Post-QC analysis combining two tasks:
 #   1. Generate manifest files listing all samples that passed QC
 #   2. Perform zero-coverage analysis to identify poorly covered bases per amplicon
 #
 # This script should be run AFTER 02_dna_qc.sh completes
-#
-# Author: [Your name]
-# Date: February 2026
-# ==============================================================================
 
 # Exit immediately if any command fails, treat unset variables as errors,
 # and propagate errors through pipes
 set -euo pipefail
+
+# Add error trap to show where failures occur
+trap 'echo "[ERROR] Script failed at line $LINENO with exit code $?" >&2' ERR
 
 # ==============================================================================
 # CONFIGURATION & USAGE
@@ -97,9 +93,10 @@ if [[ ! -d "$PASS_DIR" ]]; then
     exit 1
 fi
 
+# FAIL_DIR is optional - warn if missing but don't exit
 if [[ ! -d "$FAIL_DIR" ]]; then
-    echo "ERROR: fail_bams/ directory not found: $FAIL_DIR"
-    exit 1
+    echo "WARNING: fail_bams/ directory not found: $FAIL_DIR"
+    echo "         Will analyze PASS samples only"
 fi
 
 if [[ ! -f "$BED_FILE" ]]; then
@@ -178,20 +175,44 @@ echo "[INFO] Output path: $MANIFEST_OUT"
 FOUND=0
 MISSING=0
 
+# Handle case where PASS_SAMPLES is empty
+if [[ -z "$PASS_SAMPLES" ]]; then
+    echo "[DEBUG] PASS_SAMPLES variable is empty"
+else
+    echo "[DEBUG] PASS_SAMPLES contains:"
+    echo "$PASS_SAMPLES" | head -5
+fi
+
+# Convert PASS_SAMPLES string to array for proper iteration
+mapfile -t PASS_SAMPLES_ARRAY <<< "$PASS_SAMPLES"
+
+echo "[DEBUG] Array has ${#PASS_SAMPLES_ARRAY[@]} elements"
+
 # For each PASS sample, verify BAM exists and add to manifest
-for sample in $PASS_SAMPLES; do
+for sample in "${PASS_SAMPLES_ARRAY[@]}"; do
+    # Skip empty lines
+    if [[ -z "$sample" ]]; then
+        echo "[DEBUG] Skipping empty sample entry"
+        continue
+    fi
+    
     bam="${PASS_DIR}/${sample}.bam"
+    
+    echo "[DEBUG] Checking BAM: $bam"
     
     if [[ -f "$bam" ]]; then
         # BAM file exists - add to manifest
         echo "$bam" >> "$MANIFEST_OUT"
-        ((FOUND++))
+        FOUND=$((FOUND + 1))
+        echo "[DEBUG] Found BAM $FOUND: $sample"
     else
         # BAM file missing - warn but continue
         echo "[WARN] Missing BAM for PASS sample: $sample (expected: $bam)" >&2
-        ((MISSING++))
+        MISSING=$((MISSING + 1))
     fi
 done
+
+echo "[DEBUG] Loop completed. FOUND=$FOUND, MISSING=$MISSING"
 
 echo ""
 echo "[SUCCESS] Manifest generation completed"
@@ -200,6 +221,11 @@ echo "  BAMs found:            $FOUND"
 echo "  BAMs missing:          $MISSING"
 echo "  Manifest file:         $MANIFEST_OUT"
 echo ""
+echo "[DEBUG] *** PART 1 COMPLETE - About to start Part 2 ***"
+echo "[DEBUG] set -e is: $(set +o | grep errexit)"
+echo "[DEBUG] set -u is: $(set +o | grep nounset)"
+echo "[DEBUG] set -o pipefail is: $(set +o | grep pipefail)"
+echo "[DEBUG] Part 1 completed successfully, proceeding to Part 2..."
 
 # ==============================================================================
 # PART 2: ZERO-COVERAGE ANALYSIS
@@ -209,36 +235,76 @@ echo "========================================"
 echo "PART 2: ZERO-COVERAGE ANALYSIS"
 echo "========================================"
 echo ""
+echo "[DEBUG] *** ENTERING PART 2 ***"
+echo "[DEBUG] Current directory: $(pwd)"
+echo "[DEBUG] Script still running with PID: $$"
+echo "[DEBUG] Starting Part 2 - zero coverage analysis"
 
-# --------------------------------------------------
-# Setup for zero-coverage analysis
-# --------------------------------------------------
-
-# Create temporary directory for per-base mosdepth outputs
-TMP_DIR="${ZERO_COV_OUT}/tmp_mosdepth"
-mkdir -p "$TMP_DIR"
-
-echo "[INFO] Collecting BAM files from PASS and FAIL directories..."
-
-# Collect all BAM files (both PASS and FAIL) for comprehensive analysis
-mapfile -t ALL_BAMS < <(find "$PASS_DIR" "$FAIL_DIR" -type f -name "*.bam" | sort)
-
-# Verify we found BAMs
-if [[ ${#ALL_BAMS[@]} -eq 0 ]]; then
-    echo "ERROR: No BAM files found in PASS or FAIL directories"
+# 1. Verify PASS directory exists
+if [[ ! -d "$PASS_DIR" ]]; then
+    echo "[ERROR] Pass directory missing: $PASS_DIR"
     exit 1
 fi
 
-echo "[INFO] Found ${#ALL_BAMS[@]} total samples (PASS + FAIL)"
+# 2. Collect BAMs from directories that exist
+echo "[INFO] Collecting BAM files from PASS directory..."
+echo "[DEBUG] PASS_DIR: $PASS_DIR"
+
+# First check what's in PASS directory
+echo "[DEBUG] Contents of PASS_DIR:"
+ls -la "$PASS_DIR" | head -20 || echo "[WARN] Could not list PASS_DIR"
+
+# Build list of directories to search
+SEARCH_DIRS=("$PASS_DIR")
+
+# Add FAIL_DIR if it exists
+if [[ -d "$FAIL_DIR" ]]; then
+    echo "[INFO] FAIL directory found, including it in analysis"
+    echo "[DEBUG] FAIL_DIR: $FAIL_DIR"
+    echo "[DEBUG] Contents of FAIL_DIR:"
+    ls -la "$FAIL_DIR" | head -20 || echo "[WARN] Could not list FAIL_DIR"
+    SEARCH_DIRS+=("$FAIL_DIR")
+else
+    echo "[WARN] FAIL directory not found (will analyze PASS samples only): $FAIL_DIR"
+fi
+
+# Collect BAMs from all search directories
+BAM_LIST=$(find "${SEARCH_DIRS[@]}" -type f -name "*.bam" 2>/dev/null | sort) || true
+
+echo "[DEBUG] Number of BAMs found by find: $(echo "$BAM_LIST" | grep -c . || echo 0)"
+
+if [[ -z "$BAM_LIST" ]]; then
+    echo "[ERROR] No BAM files found in search directories:"
+    for dir in "${SEARCH_DIRS[@]}"; do
+        echo "  - $dir"
+    done
+    exit 1
+fi
+
+echo "[DEBUG] BAM_LIST contents (first 5 lines):"
+echo "$BAM_LIST" | head -5
+
+# Filter out empty lines and create array
+mapfile -t ALL_BAMS < <(echo "$BAM_LIST" | grep -v '^$')
+
+echo "[DEBUG] Array size after mapfile: ${#ALL_BAMS[@]}"
+echo "[DEBUG] First BAM in array: ${ALL_BAMS[0]}"
+
+# 3. Create temporary directory
+TMP_DIR="${ZERO_COV_OUT}/tmp_mosdepth"
+mkdir -p "$TMP_DIR"
+
+echo "[INFO] Found ${#ALL_BAMS[@]} total samples for analysis"
 echo "[INFO] Using BED file: $BED_FILE"
 
-# --------------------------------------------------
-# Read BED file into array
-# --------------------------------------------------
-# Extract only chr, start, end, annotation (first 4 columns)
+# 4. Read BED file into array
 echo "[INFO] Reading target regions from BED file..."
+mapfile -t BED_ROWS < <(awk 'BEGIN{FS=OFS="\t"} {print $1, $2, $3, $4}' "$BED_FILE") || true
 
-mapfile -t BED_ROWS < <(awk 'BEGIN{FS=OFS="\t"} {print $1, $2, $3, $4}' "$BED_FILE")
+if [[ ${#BED_ROWS[@]} -eq 0 ]]; then
+    echo "[ERROR] BED file is empty or formatted incorrectly: $BED_FILE"
+    exit 1
+fi
 
 NUM_REGIONS=${#BED_ROWS[@]}
 echo "[INFO] Found $NUM_REGIONS target regions"
@@ -259,7 +325,14 @@ done
 # Determine cohort name from directory structure
 # Format: parent_directory_current_directory
 # Example: /data/breast/tumour/dna_qc → breast_tumour
-COHORT_NAME=$(basename "$(dirname "$QC_DIR")")_$(basename "$(dirname "$QC_DIR/dummy")")
+echo "[DEBUG] QC_DIR: $QC_DIR"
+echo "[DEBUG] dirname QC_DIR: $(dirname "$QC_DIR")"
+echo "[DEBUG] basename dirname QC_DIR: $(basename "$(dirname "$QC_DIR")")"
+
+PARENT_DIR=$(basename "$(dirname "$QC_DIR")")
+COHORT_NAME="${PARENT_DIR}"
+
+echo "[DEBUG] COHORT_NAME: $COHORT_NAME"
 
 # Create output file
 ZERO_COV_FILE="${ZERO_COV_OUT}/zero_cov_${COHORT_NAME}.tsv"
@@ -282,7 +355,7 @@ TOTAL_SAMPLES=${#ALL_BAMS[@]}
 CURRENT=0
 
 for BAM in "${ALL_BAMS[@]}"; do
-    ((CURRENT++))
+    CURRENT=$((CURRENT + 1))
     SAMPLE=$(basename "$BAM" .bam)
     PREFIX="${TMP_DIR}/${SAMPLE}"
     PERBASE_OUTPUT="${PREFIX}.per-base.bed.gz"
@@ -324,7 +397,7 @@ REGION_NUM=0
 
 # Iterate over each target region (amplicon)
 for ROW in "${BED_ROWS[@]}"; do
-    ((REGION_NUM++))
+    REGION_NUM=$((REGION_NUM + 1))
     
     # Parse BED row into variables
     IFS=$'\t' read -r chr start end annot <<< "$ROW"
