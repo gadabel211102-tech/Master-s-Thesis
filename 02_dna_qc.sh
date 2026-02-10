@@ -1,17 +1,10 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# Script: 02_dna_qc.sh (FULLY ANNOTATED VERSION)
-# ==============================================================================
 # Purpose:
 #   Quality control pipeline for targeted DNA sequencing (Ion Torrent)
 #   - Validates and indexes BAM files
 #   - Calculates coverage metrics using mosdepth
 #   - Identifies poorly performing amplicons
 #   - Filters samples into PASS/FAIL categories
-#
-# Author: [Your name]
-# Date: February 2026
-# ==============================================================================
 
 # Exit immediately if any command fails, treat unset variables as errors,
 # and propagate errors through pipes
@@ -86,7 +79,7 @@ fi
 # ==============================================================================
 # CREATE OUTPUT DIRECTORY STRUCTURE
 # ==============================================================================
-# Create subdirectories for organizing results:
+# Create subdirectories for organising results:
 #   - pass_bams/  : BAMs that passed QC
 #   - fail_bams/  : BAMs that failed QC
 #   - stats/      : Per-sample coverage statistics
@@ -95,7 +88,7 @@ mkdir -p "${OUT_DIR}/pass_bams" "${OUT_DIR}/fail_bams" "${OUT_DIR}/stats"
 # ==============================================================================
 # STEP 1: BED FILE CLEANING AND NORMALIZATION
 # ==============================================================================
-echo "[*] Step 1: Cleaning and normalizing BED file..."
+echo "[*] Step 1: Cleaning and normalising BED file..."
 
 # Output path for the cleaned BED file
 BED_CALC="${OUT_DIR}/targets.sorted.bed"
