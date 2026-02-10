@@ -17,22 +17,21 @@ The repository provides a modular bioinformatics pipeline for Quality Control (Q
 
 ### 2. Harmonised DNA QC (`02_dna_qc.sh`)
 
-* **Purpose:** The primary technical gatekeeper.
-* **Coordinate Harmonisation:** Automatically detects if the reference uses `17` or `chr17` and normalises the output.
-* **Tools:** Uses `mosdepth` for rapid depth calculation.
-* **Sorting:** Automatically segregates samples into `pass_bams` and `fail_bams` based on the thresholds below.
+* **Purpose:** Acts as the primary technical gatekeeper for the pipeline.
+* **Coordinate Harmonisation:** Automatically detects chromosome naming conventions and normalises BED coordinates (e.g., ensuring `17` vs `chr17` consistency) to ensure compatibility across genomic resources.
+* **Tools:** Utilises `mosdepth` for rapid depth calculation and `samtools` for alignment statistics.
+* **Automated Sorting:** Segregates samples into `pass_bams/` and `fail_bams/` directories based on customisable technical thresholds such as mean coverage, mapping rate, and uniformity.
+* **Detailed Reporting:** Generates a comprehensive `qc_summary.tsv` which identifies the "worst-performing amplicon" for every sample to assist with troubleshooting.
 
-### 2.1 Manifest Generation (`02.1_manifest.sh`)
-* **Purpose:** Automates the bridge between quality control and downstream analysis by filtering validated samples.
-* **Logic:** Parses the qc_summary.tsv generated in the previous step to identify samples with a PASS status. It cross-references these names against the physical files in the pass_bams directory to ensure data integrity.
-* **Validation:** Employs a robust awk-based header detection to handle column mapping dynamically, ensuring the script remains resilient even if the summary file structure changes.
-* **Output:** Generates a flat-file manifest containing absolute paths to high-quality BAM files, which serves as the definitive input list for cohort-level analysis or variant calling.
+---
 
-### 2.2 Calculating how many bases had 0 coverage per amplicon (`02.2_zero_base-coverage.sh`)
-* **Purpose:** Extends the DNA‑QC workflow by measuring fine‑grained coverage completeness across all amplicons. Whereas mean depth and uniformity reflect overall performance, this stage explicitly quantifies how many bases within each target region received zero sequencing coverage per sample, per cohort.
-* **Logic:** Iterates over the cleaned BED coordinates and re‑profiles each amplicon using temporary per‑base mosdepth output. This enables precise counting of uncovered bases, overcoming the limitation of region‑summary depth files. For each sample, the script constructs a coverage vector and computes the number of positions with depth 0 inside each amplicon.
-* **Robustness:** Works seamlessly on both PASS and FAIL samples, ensuring that low‑quality sequencing runs are accurately represented. Its design avoids rewriting any core QC scripts and leaves all existing outputs untouched.
-* **Output:** Produces a tabular report for each cohort where rows represent amplicons and columns represent samples. Each table entry indicates the number of uncovered bases for that amplicon in that sample, providing a granular measure of panel completeness suitable for downstream reporting or troubleshooting.
+### 3. Post-QC Analysis & Zero-Coverage Profiling (`02.5_more-qc.sh`)
+
+* **Purpose:** Provides a bridge between raw QC and downstream variant calling by streamlining sample management and identifying "blind spots" in the assay.
+* **Manifest Generation:** Automatically parses the QC summary to create a validated list of paths for only those samples that passed technical checks, preventing "failed" data from entering the analysis stream.
+* **Zero-Coverage Mapping:** Performs a high-resolution, per-base analysis across every target region to count exactly how many bases within an amplicon have zero coverage.
+* **Cohort-Level Comparison:** Compiles a master matrix (the "Zero-Cov" report) that aligns samples side-by-side, making it easy to spot systemic amplicon failures versus sample-specific issues.
+* **Optimisation:** Uses a "compute-once" strategy with temporary `mosdepth` files to ensure the per-base analysis is efficient even for large cohorts.
 
 ### 3. Cohort Analysis & Visualisation (`03_qc_analysis.py`)
 
@@ -157,14 +156,15 @@ pip install pandas seaborn matplotlib scikit-learn openpyxl
 # Step 1: Check Index
 ./01_check_and_index.sh -i ./raw_data/bams
 
-# Step 2: Run QC
-./02_dna_qc.sh -i ./raw_data/bams -o ./results -r hg38.fa -b GSDMB_targets.bed
+# Step 2: Run QC and sort samples
+./02_dna_qc.sh -i ./raw_data/bams -o ./results/dna_qc -r hg38.fa -b GSDMB_targets.bed -t 8
 
-# Step 2.1: Make PASS manifests
- ./02.5_manifest.sh /path/to/cohort/dna_qc /path/to/output_manifest.txt
-
-# Step 2.2: Zero base coverage
-02.2_zero_base_coverage.sh <ROOT_DIR> <OUT_DIR>
+# Step 2.5: Generate manifest of PASS samples and map zero-coverage bases
+./02.5_more-qc.sh \
+    -q ./results/dna_qc \
+    -m ./results/manifests/pass_samples.txt \
+    -z ./results/zero_coverage_analysis \
+    -t 8
 
 # Step 3: Analysis & Plots
 python3 03_qc_analysis.py
