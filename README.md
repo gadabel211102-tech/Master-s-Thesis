@@ -156,6 +156,8 @@ pip install pandas seaborn matplotlib scikit-learn openpyxl
 # 3. VEP
 conda activate vep_env
 
+Rscript 19b_haplo_stats.R
+
 ```
 
 ### Full Execution Sequence
