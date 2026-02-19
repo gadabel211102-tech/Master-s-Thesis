@@ -5,7 +5,6 @@ Script 07c: COSMIC Integration - Cancer Mutation Database Comparison
 Compares detected variants against COSMIC cancer mutation database.
 Identifies known cancer hotspots and novel cancer-associated variants.
 
-Author: Enhanced Genomics Analysis Pipeline
 Date: 2026-02-12
 
 NOTE ON STUDY DESIGN:
