@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script 14: Interactive Visualization Dashboard
+Script 14: Interactive Visualisation Dashboard
 ================================================
 Creates interactive HTML dashboard with Plotly for exploring variant data.
 Enables filtering, zooming, and detailed inspection of results.
