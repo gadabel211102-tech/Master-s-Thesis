@@ -1,965 +1,546 @@
 #!/usr/bin/env python3
 """
-Variant-Level Quality Control Script (Enhanced)
-================================================
-Performs comprehensive QC checks on called variants including:
-- Ti/Tv ratio (transition/transversion)
-- Allelic balance for heterozygous calls
-- Batch effects detection
-- Sequencing run date clustering
-- Color-coded threshold visualization for amplicon QC
+Variant-Level Quality Control (07b)
+=====================================
+Runs after script 07 (annotation merge) and before script 08 (mapping).
 
-Expected to run AFTER variant calling (script 05) and BEFORE annotation (script 06)
+Checks three things that are genuinely answerable from the annotated variant table:
 
+  1. Ti/Tv ratio        — is the SNV spectrum biologically plausible?
+  2. Allelic balance    — are heterozygous calls real or artefactual?
+  3. Batch effects      — do variant counts vary suspiciously across cohort/tissue groups?
+
+NOTE on amplicon QC: this script intentionally does NOT attempt per-amplicon
+coverage QC. Coverage QC requires the full depth track (mosdepth output), not
+just the rows where a variant was called. Amplicons with no variants are
+invisible here and would be silently omitted, giving a false picture of panel
+performance. Use scripts 02/03/04 for amplicon-level coverage assessment.
+
+Input:  GSDMB_Annotated_Report_Fixed.xlsx  (sheet: Biological_Annotations)
+Output: <output_dir>/
+          Variant_QC_Report.xlsx       — full table with AB flags appended
+          TiTv_Summary.csv             — transition / transversion counts and ratio
+          Batch_Effects_Summary.csv    — per-group variant count statistics
+          Variant_QC_Plots.png         — three-panel summary figure
+
+Usage:
+  python 07b_variant-qc.py --input /path/to/GSDMB_Annotated_Report_Fixed.xlsx
+  python 07b_variant-qc.py --input annotations.xlsx --output ./qc --ab-lower 0.2 --ab-upper 0.8
 """
 
-import pandas as pd
-import numpy as np
-import glob
-import os
-import sys
 import argparse
 import logging
-from pathlib import Path
-from datetime import datetime
+import os
+import sys
+
 import matplotlib.pyplot as plt
-import seaborn as sns
-from matplotlib.patches import Rectangle
+import numpy as np
+import pandas as pd
 
-# ============================================================================
-# QC THRESHOLDS CONFIGURATION
-# ============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# THRESHOLDS
+# ─────────────────────────────────────────────────────────────────────────────
 
-QC_THRESHOLDS = {
-    'titv': {
-        'optimal_min': 2.0,
-        'optimal_max': 2.1,
-        'acceptable_min': 1.5,
-        'acceptable_max': 3.0
+THRESHOLDS = {
+    "titv": {
+        "optimal_min": 2.0,
+        "optimal_max": 2.1,
+        "acceptable_min": 1.5,
+        "acceptable_max": 3.0,
     },
-    'allelic_balance': {
-        'lower': 0.25,
-        'upper': 0.75,
-        'optimal_lower': 0.4,
-        'optimal_upper': 0.6
+    "allelic_balance": {
+        "lower": 0.25,        # below this → flag as imbalanced
+        "upper": 0.75,        # above this → flag as imbalanced
+        "optimal_lower": 0.40,
+        "optimal_upper": 0.60,
     },
-    'batch_cv': {
-        'good': 15,
-        'acceptable': 30,
-        'poor': 50
+    "batch_cv": {
+        "excellent": 15,      # CV% below this is fine
+        "acceptable": 30,
+        "poor": 50,
     },
-    'depth': {
-        'min_acceptable': 20,
-        'min_good': 50,
-        'optimal': 100
-    },
-    'quality': {
-        'min_acceptable': 20,
-        'min_good': 30,
-        'optimal': 40
-    }
 }
 
-# ============================================================================
-# LOGGING SETUP
-# ============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# LOGGING
+# ─────────────────────────────────────────────────────────────────────────────
 
 def setup_logging(verbose: bool = False) -> logging.Logger:
-    """Configure logging with appropriate level."""
-    level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
-        level=level,
-        format='%(asctime)s [%(levelname)s] %(message)s',
-        datefmt='%H:%M:%S'
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
     )
     return logging.getLogger(__name__)
 
-# ============================================================================
-# TI/TV RATIO CALCULATION
-# ============================================================================
 
-def calculate_titv_ratio(vcf_df: pd.DataFrame, logger: logging.Logger) -> dict:
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def find_col(df: pd.DataFrame, name: str):
+    """Case-insensitive column lookup. Returns actual column name or None."""
+    for c in df.columns:
+        if c.upper() == name.upper():
+            return c
+    return None
+
+
+def deduplicate_to_variants(df: pd.DataFrame, logger: logging.Logger) -> pd.DataFrame:
     """
-    Calculate Transition/Transversion ratio from variants.
-    Expected value for WES/targeted panels: ~2.0-2.1
-    Lower values suggest poor quality calls.
-    
-    Args:
-        vcf_df: DataFrame with CHROM, POS, REF, ALT columns
-        logger: Logger instance
-        
-    Returns:
-        Dictionary with Ti/Tv metrics
+    Script 07 produces one row per variant × transcript (VEP expands CSQ).
+    For QC purposes we want one row per unique variant call (CHROM/POS/REF/ALT/Sample).
+    Drop transcript duplicates so we don't inflate Ti/Tv counts or flag the same
+    variant multiple times for allelic imbalance.
     """
-    transitions = {'A>G', 'G>A', 'C>T', 'T>C'}
-    transversions = {'A>C', 'C>A', 'A>T', 'T>A', 'G>C', 'C>G', 'G>T', 'T>G'}
-    
-    ti_count = 0
-    tv_count = 0
-    invalid = 0
-    
-    # Case-insensitive column lookup (columns may be REF/ref/Ref etc.)
-    ref_col = next((c for c in vcf_df.columns if c.upper() == 'REF'), None)
-    alt_col = next((c for c in vcf_df.columns if c.upper() == 'ALT'), None)
-    if ref_col is None or alt_col is None:
-        logger.warning("âš ï¸  REF or ALT column not found - cannot calculate Ti/Tv")
-        return {'ti_count': 0, 'tv_count': 0, 'ratio': float('nan'),
-                'qc_status': 'FAIL_NO_REF_ALT', 'qc_color': '#e74c3c'}
-
-    for _, row in vcf_df.iterrows():
-        ref = str(row.get(ref_col, '')).upper().strip()
-        alt = str(row.get(alt_col, '')).upper().strip()
-        
-        # Skip if not SNV (single nucleotide variant)
-        if len(ref) != 1 or len(alt) != 1:
-            continue
-        
-        # Skip if not standard bases
-        if ref not in 'ACGT' or alt not in 'ACGT':
-            invalid += 1
-            continue
-        
-        mutation = f"{ref}>{alt}"
-        
-        if mutation in transitions:
-            ti_count += 1
-        elif mutation in transversions:
-            tv_count += 1
-        else:
-            invalid += 1
-    
-    if tv_count == 0:
-        logger.warning("âš ï¸  No transversions found - Ti/Tv calculation may be unreliable")
-        return {
-            'ti_count': ti_count,
-            'tv_count': tv_count,
-            'ratio': np.nan,
-            'qc_status': 'FAIL_NO_TV',
-            'qc_color': '#e74c3c'
-        }
-    
-    ratio = ti_count / tv_count
-    
-    # QC interpretation with color coding
-    thresholds = QC_THRESHOLDS['titv']
-    if ratio < thresholds['acceptable_min']:
-        status = 'FAIL_LOW_TITV'
-        color = '#e74c3c'  # Red
-        logger.warning(f"âš ï¸  Low Ti/Tv ratio ({ratio:.3f}) - expected ~2.0-2.1")
-        logger.warning(f"     Possible causes: poor sequencing quality, PCR errors, or contamination")
-    elif ratio > thresholds['acceptable_max']:
-        status = 'WARN_HIGH_TITV'
-        color = '#f39c12'  # Orange
-        logger.warning(f"âš ï¸  High Ti/Tv ratio ({ratio:.3f}) - possible over-filtering or bias")
-    elif thresholds['optimal_min'] <= ratio <= thresholds['optimal_max']:
-        status = 'OPTIMAL'
-        color = '#2ecc71'  # Green
-        logger.info(f"âœ… Ti/Tv Ratio: {ratio:.3f} (optimal range)")
-    else:
-        status = 'ACCEPTABLE'
-        color = '#3498db'  # Blue
-        logger.info(f"âœ… Ti/Tv Ratio: {ratio:.3f} (acceptable range)")
-    
-    logger.info(f"   Transitions: {ti_count}, Transversions: {tv_count}")
-    
-    return {
-        'ti_count': ti_count,
-        'tv_count': tv_count,
-        'ratio': ratio,
-        'qc_status': status,
-        'qc_color': color
-    }
-
-# ============================================================================
-# ALLELIC BALANCE CHECK
-# ============================================================================
-
-def check_allelic_balance(vcf_df: pd.DataFrame, logger: logging.Logger, 
-                          ab_lower: float = None, ab_upper: float = None,
-                          sample_col: str = None) -> pd.DataFrame:
-    """
-    Flag heterozygous variants with abnormal allelic balance.
-    Expected: ~50% for true heterozygotes (0.25-0.75 acceptable range)
-    Deviations suggest: contamination, LOH, or copy number changes
-    
-    Args:
-        vcf_df: DataFrame with genotype info
-        logger: Logger instance
-        ab_lower: Lower threshold for allelic fraction (default from QC_THRESHOLDS)
-        ab_upper: Upper threshold for allelic fraction (default from QC_THRESHOLDS)
-        sample_col: Sample column name if multi-sample VCF
-        
-    Returns:
-        DataFrame with AB_Flag and AF_calc columns added
-    """
-    # Use configured thresholds if not provided
-    if ab_lower is None:
-        ab_lower = QC_THRESHOLDS['allelic_balance']['lower']
-    if ab_upper is None:
-        ab_upper = QC_THRESHOLDS['allelic_balance']['upper']
-    
-    logger.info("Checking allelic balance for heterozygous calls...")
-    logger.info(f"   Thresholds: {ab_lower:.2f} - {ab_upper:.2f}")
-    
-    vcf_df['AB_Flag'] = 'PASS'
-    vcf_df['AF_calc'] = np.nan
-    vcf_df['AB_Quality'] = 'UNKNOWN'  # New column for color coding
-    flagged_count = 0
-    het_count = 0
-    
-    # Determine which columns are available (case-insensitive)
-    col_upper = {c.upper(): c for c in vcf_df.columns}
-    has_ao_ro = 'AO' in col_upper and 'RO' in col_upper
-    has_af    = 'AF' in col_upper
-    has_dp    = 'DP' in col_upper
-    # Remap to actual column names so .get() works below
-    if has_ao_ro:
-        vcf_df = vcf_df.rename(columns={col_upper['AO']: 'AO', col_upper['RO']: 'RO'})
-    if has_af:
-        vcf_df = vcf_df.rename(columns={col_upper['AF']: 'AF'})
-    if 'GT' in col_upper:
-        vcf_df = vcf_df.rename(columns={col_upper['GT']: 'GT'})
-    if has_dp:
-        vcf_df = vcf_df.rename(columns={col_upper['DP']: 'DP'})
-    
-    if not has_ao_ro and not has_af:
-        logger.warning("âš ï¸  No AO/RO or AF columns found - skipping allelic balance check")
-        logger.warning("     This check requires variant caller output with allele depths")
-        return vcf_df
-    
-    optimal_lower = QC_THRESHOLDS['allelic_balance']['optimal_lower']
-    optimal_upper = QC_THRESHOLDS['allelic_balance']['optimal_upper']
-    
-    # Calculate AF from AO/RO if available
-    if has_ao_ro:
-        for idx, row in vcf_df.iterrows():
-            # Get genotype - handle both phased (|) and unphased (/) separators
-            gt = str(row.get('GT', '.')).replace('|', '/').split('/')[0] if '/' in str(row.get('GT', '.')).replace('|', '/') else str(row.get('GT', '.'))
-            
-            # Only check heterozygotes (0/1, 1/0, etc.)
-            if '/' not in str(row.get('GT', '.')).replace('|', '/'):
-                continue
-            
-            gt_parts = str(row.get('GT', '.')).replace('|', '/').split('/')
-            if len(gt_parts) != 2:
-                continue
-                
-            if gt_parts[0] == gt_parts[1]:  # Homozygous
-                continue
-            
-            het_count += 1
-            
-            try:
-                ao = float(row.get('AO', 0))
-                ro = float(row.get('RO', 0))
-                total = ao + ro
-                
-                if total > 0:
-                    af = ao / total
-                    vcf_df.at[idx, 'AF_calc'] = af
-                    
-                    # Assign quality level based on thresholds
-                    if af < ab_lower or af > ab_upper:
-                        vcf_df.at[idx, 'AB_Flag'] = f'IMBALANCED_AF={af:.3f}'
-                        vcf_df.at[idx, 'AB_Quality'] = 'POOR'
-                        flagged_count += 1
-                    elif optimal_lower <= af <= optimal_upper:
-                        vcf_df.at[idx, 'AB_Quality'] = 'OPTIMAL'
-                    else:
-                        vcf_df.at[idx, 'AB_Quality'] = 'ACCEPTABLE'
-            except (ValueError, TypeError):
-                continue
-                
-    elif has_af:
-        for idx, row in vcf_df.iterrows():
-            gt = str(row.get('GT', '.')).replace('|', '/')
-            
-            if '/' not in gt:
-                continue
-                
-            gt_parts = gt.split('/')
-            if len(gt_parts) != 2 or gt_parts[0] == gt_parts[1]:
-                continue
-            
-            het_count += 1
-            
-            try:
-                af = float(row.get('AF', 0.5))
-                vcf_df.at[idx, 'AF_calc'] = af
-                
-                if af < ab_lower or af > ab_upper:
-                    vcf_df.at[idx, 'AB_Flag'] = f'IMBALANCED_AF={af:.3f}'
-                    vcf_df.at[idx, 'AB_Quality'] = 'POOR'
-                    flagged_count += 1
-                elif optimal_lower <= af <= optimal_upper:
-                    vcf_df.at[idx, 'AB_Quality'] = 'OPTIMAL'
-                else:
-                    vcf_df.at[idx, 'AB_Quality'] = 'ACCEPTABLE'
-            except (ValueError, TypeError):
-                continue
-    
-    if het_count == 0:
-        logger.warning("âš ï¸  No heterozygous calls found")
-    else:
-        pct_flagged = (flagged_count / het_count) * 100
-        optimal_count = vcf_df[vcf_df['AB_Quality'] == 'OPTIMAL'].shape[0]
-        acceptable_count = vcf_df[vcf_df['AB_Quality'] == 'ACCEPTABLE'].shape[0]
-        
-        logger.info(f"   Heterozygous variants checked: {het_count}")
-        logger.info(f"   Optimal allelic balance: {optimal_count} ({optimal_count/het_count*100:.1f}%)")
-        logger.info(f"   Acceptable: {acceptable_count} ({acceptable_count/het_count*100:.1f}%)")
-        logger.info(f"   Flagged for allelic imbalance: {flagged_count} ({pct_flagged:.1f}%)")
-        
-        if pct_flagged > 20:
-            logger.warning(f"âš ï¸  High percentage of allelic imbalance ({pct_flagged:.1f}%)")
-            logger.warning(f"     Possible causes: LOH, contamination, CNV, or subclonal mutations")
-    
-    return vcf_df
-
-# ============================================================================
-# BATCH EFFECTS DETECTION
-# ============================================================================
-
-def detect_batch_effects(variant_summary: pd.DataFrame, logger: logging.Logger,
-                        cohort_col: str = 'Cohort', 
-                        tissue_col: str = 'Tissue',
-                        sample_col: str = 'Sample') -> pd.DataFrame:
-    """
-    Detect potential batch effects by analyzing variant count distributions
-    across cohorts and tissue types.
-    
-    Args:
-        variant_summary: DataFrame with cohort/tissue/sample info
-        logger: Logger instance
-        cohort_col: Column name for cohort
-        tissue_col: Column name for tissue type
-        sample_col: Column name for sample ID
-        
-    Returns:
-        DataFrame with batch effect statistics
-    """
-    logger.info("Analyzing potential batch effects...")
-    
-    # Count variants per sample
-    sample_counts = variant_summary.groupby([cohort_col, tissue_col, sample_col]).size().reset_index(name='Variant_Count')
-    
-    # Calculate statistics per group
-    batch_stats = []
-    thresholds = QC_THRESHOLDS['batch_cv']
-    
-    for (cohort, tissue), group in sample_counts.groupby([cohort_col, tissue_col]):
-        mean_count = group['Variant_Count'].mean()
-        median_count = group['Variant_Count'].median()
-        std_count = group['Variant_Count'].std()
-        cv = (std_count / mean_count * 100) if mean_count > 0 else 0
-        
-        # Assign quality level based on CV thresholds
-        if cv < thresholds['good']:
-            qc_flag = 'EXCELLENT'
-            qc_color = '#2ecc71'  # Green
-        elif cv < thresholds['acceptable']:
-            qc_flag = 'ACCEPTABLE'
-            qc_color = '#3498db'  # Blue
-        elif cv < thresholds['poor']:
-            qc_flag = 'HIGH_VARIATION'
-            qc_color = '#f39c12'  # Orange
-        else:
-            qc_flag = 'VERY_HIGH_VARIATION'
-            qc_color = '#e74c3c'  # Red
-        
-        batch_stats.append({
-            'Group': f"{cohort}_{tissue}",
-            'Cohort': cohort,
-            'Tissue': tissue,
-            'N_Samples': len(group),
-            'Mean_Variants': mean_count,
-            'Median_Variants': median_count,
-            'Std_Variants': std_count,
-            'CV_%': cv,
-            'QC_Flag': qc_flag,
-            'QC_Color': qc_color
-        })
-    
-    batch_df = pd.DataFrame(batch_stats)
-    
-    # Report findings
-    logger.info("\n" + "="*60)
-    logger.info("BATCH EFFECT ANALYSIS")
-    logger.info("="*60)
-    print(batch_df[['Group', 'N_Samples', 'Mean_Variants', 'CV_%', 'QC_Flag']].to_string(index=False))
-    
-    high_cv_groups = batch_df[batch_df['CV_%'] > thresholds['acceptable']]
-    if not high_cv_groups.empty:
-        logger.warning(f"\nâš ï¸  {len(high_cv_groups)} groups with high variation (CV > {thresholds['acceptable']}%)")
-        logger.warning("   This may indicate batch effects or sample quality issues")
-    else:
-        logger.info(f"\nâœ… No significant batch effects detected (all CV < {thresholds['acceptable']}%)")
-    
-    return batch_df
-
-# ============================================================================
-# VISUALIZATION WITH THRESHOLD HIGHLIGHTING
-# ============================================================================
-
-def plot_qc_summary(titv_results: dict, ab_df: pd.DataFrame, batch_df: pd.DataFrame,
-                    output_dir: str, logger: logging.Logger):
-    """
-    Create summary visualizations of QC metrics with color-coded thresholds.
-    
-    Args:
-        titv_results: Ti/Tv ratio results
-        ab_df: Allelic balance DataFrame
-        batch_df: Batch effect statistics
-        output_dir: Output directory
-        logger: Logger instance
-    """
-    logger.info("Generating QC summary plots with threshold highlighting...")
-    
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    
-    # 1. Ti/Tv Ratio with Threshold Zones
-    ax1 = axes[0, 0]
-    if not np.isnan(titv_results['ratio']):
-        categories = ['Transitions', 'Transversions']
-        counts = [titv_results['ti_count'], titv_results['tv_count']]
-        colors = ['#3498db', '#e74c3c']
-        
-        ax1.bar(categories, counts, color=colors, edgecolor='black', linewidth=1.5)
-        
-        # Color-coded title based on QC status
-        title_color = titv_results['qc_color']
-        ax1.set_title(f"Ti/Tv Ratio: {titv_results['ratio']:.3f}\nStatus: {titv_results['qc_status']}", 
-                     fontweight='bold', fontsize=12, color=title_color)
-        ax1.set_ylabel('Count')
-        
-        # Add threshold reference zones
-        thresholds = QC_THRESHOLDS['titv']
-        ax1.text(0.5, 0.95, 
-                f'Optimal: {thresholds["optimal_min"]:.1f}-{thresholds["optimal_max"]:.1f} | '
-                f'Acceptable: {thresholds["acceptable_min"]:.1f}-{thresholds["acceptable_max"]:.1f}', 
-                transform=ax1.transAxes, ha='center', va='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
-                fontsize=9)
-    else:
-        ax1.text(0.5, 0.5, 'Ti/Tv Calculation Failed', 
-                transform=ax1.transAxes, ha='center', va='center',
-                fontsize=14, color='red')
-    
-    # 2. Allelic Balance Distribution with Threshold Zones
-    ax2 = axes[0, 1]
-    if 'AF_calc' in ab_df.columns and ab_df['AF_calc'].notna().any():
-        het_af = ab_df[ab_df['AF_calc'].notna()]['AF_calc']
-        
-        # Create histogram with color-coded regions
-        thresholds_ab = QC_THRESHOLDS['allelic_balance']
-        
-        # Add colored background zones
-        ax2.axvspan(0, thresholds_ab['lower'], alpha=0.2, color='#e74c3c', label='Poor')
-        ax2.axvspan(thresholds_ab['lower'], thresholds_ab['optimal_lower'], 
-                   alpha=0.2, color='#3498db', label='Acceptable')
-        ax2.axvspan(thresholds_ab['optimal_lower'], thresholds_ab['optimal_upper'], 
-                   alpha=0.2, color='#2ecc71', label='Optimal')
-        ax2.axvspan(thresholds_ab['optimal_upper'], thresholds_ab['upper'], 
-                   alpha=0.2, color='#3498db')
-        ax2.axvspan(thresholds_ab['upper'], 1.0, alpha=0.2, color='#e74c3c')
-        
-        ax2.hist(het_af, bins=30, color='#9b59b6', edgecolor='black', alpha=0.7, zorder=3)
-        ax2.axvline(0.5, color='darkgreen', linestyle='--', linewidth=2, 
-                   label='Expected (0.5)', zorder=4)
-        
-        ax2.set_xlabel('Allelic Fraction')
-        ax2.set_ylabel('Count')
-        ax2.set_title('Allelic Balance Distribution\n(Heterozygous Variants)', 
-                     fontweight='bold', fontsize=12)
-        ax2.legend(loc='upper right', fontsize=8)
-        ax2.set_xlim(0, 1)
-    else:
-        ax2.text(0.5, 0.5, 'No Allelic Balance Data', 
-                transform=ax2.transAxes, ha='center', va='center',
-                fontsize=14)
-    
-    # 3. Variant Counts per Group with Color-Coded Bars
-    ax3 = axes[1, 0]
-    if not batch_df.empty:
-        x_pos = np.arange(len(batch_df))
-        
-        # Use the QC_Color column from batch_df
-        colors_batch = batch_df['QC_Color'].tolist()
-        
-        ax3.bar(x_pos, batch_df['Mean_Variants'], yerr=batch_df['Std_Variants'],
-               color=colors_batch, edgecolor='black', linewidth=1.5, alpha=0.7,
-               capsize=5)
-        ax3.set_xticks(x_pos)
-        ax3.set_xticklabels(batch_df['Group'], rotation=45, ha='right')
-        ax3.set_ylabel('Mean Variant Count')
-        ax3.set_title('Variant Distribution Across Groups\n(Error bars = Std Dev)', 
-                     fontweight='bold', fontsize=12)
-        ax3.grid(axis='y', alpha=0.3)
-        
-        # Add legend for color coding
-        from matplotlib.patches import Patch
-        legend_elements = [
-            Patch(facecolor='#2ecc71', label='Excellent (CV<15%)'),
-            Patch(facecolor='#3498db', label='Acceptable (CV<30%)'),
-            Patch(facecolor='#f39c12', label='High Var (CV<50%)'),
-            Patch(facecolor='#e74c3c', label='Very High (CVâ‰¥50%)')
-        ]
-        ax3.legend(handles=legend_elements, loc='upper right', fontsize=8)
-    else:
-        ax3.text(0.5, 0.5, 'No Batch Data', 
-                transform=ax3.transAxes, ha='center', va='center',
-                fontsize=14)
-    
-    # 4. Coefficient of Variation with Threshold Lines
-    ax4 = axes[1, 1]
-    if not batch_df.empty:
-        thresholds_cv = QC_THRESHOLDS['batch_cv']
-        
-        # Color bars based on CV thresholds
-        colors_cv = batch_df['QC_Color'].tolist()
-        
-        ax4.barh(batch_df['Group'], batch_df['CV_%'], color=colors_cv, 
-                edgecolor='black', linewidth=1.5, alpha=0.7)
-        
-        # Add threshold lines
-        ax4.axvline(thresholds_cv['good'], color='#2ecc71', linestyle='--', 
-                   linewidth=2, label=f'Good (<{thresholds_cv["good"]}%)')
-        ax4.axvline(thresholds_cv['acceptable'], color='#f39c12', linestyle='--', 
-                   linewidth=2, label=f'Acceptable (<{thresholds_cv["acceptable"]}%)')
-        ax4.axvline(thresholds_cv['poor'], color='#e74c3c', linestyle='--', 
-                   linewidth=2, label=f'Poor (<{thresholds_cv["poor"]}%)')
-        
-        ax4.set_xlabel('Coefficient of Variation (%)')
-        ax4.set_title('Sample Variation Within Groups\n(CV% - lower is better)', 
-                     fontweight='bold', fontsize=12)
-        ax4.legend(loc='lower right', fontsize=8)
-        ax4.grid(axis='x', alpha=0.3)
-    else:
-        ax4.text(0.5, 0.5, 'No CV Data', 
-                transform=ax4.transAxes, ha='center', va='center',
-                fontsize=14)
-    
-    plt.tight_layout()
-    
-    output_file = os.path.join(output_dir, "Variant_QC_Summary_Enhanced.png")
-    plt.savefig(output_file, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    logger.info(f"âœ… Enhanced QC summary plot saved: {output_file}")
-
-# ============================================================================
-# AMPLICON-SPECIFIC QC (NEW FUNCTION)
-# ============================================================================
-
-def _assign_amplicons_from_bed(df: pd.DataFrame, bed_path: str,
-                               logger: logging.Logger) -> pd.DataFrame:
-    """
-    Assign each variant to an amplicon by positional overlap with the BED file.
-
-    BED columns expected: chr, start (0-based), end (0-based exclusive), annotation/id.
-    Each variant gains an 'Amplicon_ID' column. Variants not overlapping any amplicon
-    receive 'No_Amplicon'.
-    """
-    try:
-        bed = pd.read_csv(bed_path, sep='\t', header=None,
-                          usecols=[0, 1, 2, 3],
-                          names=['bed_chr', 'bed_start', 'bed_end', 'bed_id'])
-        bed['bed_chr'] = bed['bed_chr'].astype(str).apply(
-            lambda c: c if c.startswith('chr') else f'chr{c}'
-        )
-        logger.info(f"Loaded {len(bed)} amplicons from BED: {bed_path}")
-    except Exception as e:
-        logger.warning(f"Could not load BED file ({e}) - falling back to SYMBOL grouping")
+    key_cols = [c for c in ["CHROM", "POS", "REF", "ALT", "Sample"] if find_col(df, c)]
+    if not key_cols:
+        logger.warning("Cannot identify variant key columns — using full table (may inflate counts)")
         return df
-
-    # VCF POS is 1-based; BED is 0-based half-open.
-    # Overlap: bed_start < POS <= bed_end
-    amplicon_ids = []
-    for _, var in df.iterrows():
-        chrom = str(var.get('CHROM', ''))
-        pos   = var.get('POS', None)
-        if pd.isna(pos):
-            amplicon_ids.append('No_Amplicon')
-            continue
-        pos = int(pos)
-        match = bed[
-            (bed['bed_chr'] == chrom) &
-            (bed['bed_start'] < pos) &
-            (bed['bed_end']   >= pos)
-        ]
-        if len(match) == 1:
-            amplicon_ids.append(str(match.iloc[0]['bed_id']))
-        elif len(match) > 1:
-            # Overlapping amplicons - use the smallest (most specific) one
-            match = match.copy()
-            match['span'] = match['bed_end'] - match['bed_start']
-            amplicon_ids.append(str(match.loc[match['span'].idxmin(), 'bed_id']))
-        else:
-            amplicon_ids.append('No_Amplicon')
-
-    df = df.copy()
-    df['Amplicon_ID'] = amplicon_ids
-    assigned = (df['Amplicon_ID'] != 'No_Amplicon').sum()
-    logger.info(f"Assigned {assigned}/{len(df)} variant rows to amplicons via BED overlap")
+    # Normalise column names for the key
+    rename = {find_col(df, c): c for c in key_cols}
+    df = df.rename(columns=rename)
+    before = len(df)
+    df = df.drop_duplicates(subset=key_cols)
+    logger.info(f"Deduplicated {before} transcript rows → {len(df)} unique variant calls")
     return df
 
 
-def analyze_amplicon_metrics(df: pd.DataFrame, logger: logging.Logger,
-                             output_dir: str,
-                             bed_path: str = None) -> pd.DataFrame:
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Ti/Tv RATIO
+# ─────────────────────────────────────────────────────────────────────────────
+
+TRANSITIONS  = {"A>G", "G>A", "C>T", "T>C"}
+TRANSVERSIONS = {"A>C", "C>A", "A>T", "T>A", "G>C", "C>G", "G>T", "T>G"}
+
+
+def calculate_titv(df: pd.DataFrame, logger: logging.Logger) -> dict:
     """
-    Analyze amplicon-specific metrics with threshold-based color coding.
+    Count transitions and transversions across all SNVs.
+    Only single-nucleotide substitutions are included; indels are skipped.
 
-    If a BED file path is provided, variants are assigned to individual amplicons
-    by positional overlap (true amplicon-level resolution - one bar per amplicon).
-    Otherwise falls back to grouping by SYMBOL (gene-level, as before).
-
-    Args:
-        df:         DataFrame with variant annotations (needs CHROM, POS, DP columns)
-        logger:     Logger instance
-        output_dir: Output directory for plots
-        bed_path:   Optional path to targets BED file for amplicon-level grouping
-
-    Returns:
-        DataFrame with per-amplicon QC statistics
+    A healthy targeted panel should produce Ti/Tv ≈ 2.0–2.1.
+    Lower values suggest poor-quality calls or technical artefacts.
+    Higher values can indicate over-filtering or CpG site enrichment.
     """
-    logger.info("Analyzing amplicon-specific QC metrics...")
+    ref_col = find_col(df, "REF")
+    alt_col = find_col(df, "ALT")
 
-    # Find DP column case-insensitively
-    dp_col = next((c for c in df.columns if c.upper() == 'DP'), None)
-    if dp_col is None:
-        logger.warning("No depth (DP) column found - skipping amplicon QC")
-        return pd.DataFrame()
-    if dp_col != 'DP':
-        df = df.rename(columns={dp_col: 'DP'})
+    if not ref_col or not alt_col:
+        logger.warning("REF or ALT column missing — cannot calculate Ti/Tv")
+        return {"ti": 0, "tv": 0, "snv_total": 0, "ratio": float("nan"),
+                "status": "FAIL_MISSING_COLUMNS", "colour": "#e74c3c"}
 
-    # ------------------------------------------------------------------
-    # Determine grouping column
-    # ------------------------------------------------------------------
-    if bed_path is not None:
-        df = _assign_amplicons_from_bed(df, bed_path, logger)
-        if 'Amplicon_ID' in df.columns and (df['Amplicon_ID'] != 'No_Amplicon').any():
-            amplicon_col = 'Amplicon_ID'
-            logger.info("Grouping by individual amplicon ID (BED positional overlap)")
-        else:
-            logger.warning("BED overlap produced no assignments - falling back to SYMBOL")
-            amplicon_col = 'SYMBOL' if 'SYMBOL' in df.columns else None
-    else:
-        amplicon_col = None
-        for col in ['Amplicon', 'Region', 'Gene', 'SYMBOL']:
-            if col in df.columns:
-                amplicon_col = col
-                break
-
-    if amplicon_col is None:
-        logger.warning("No amplicon/region identifier found - using global stats")
-        amplicon_col = 'Global'
-        df = df.copy()
-        df['Global'] = 'All_Variants'
-
-    if bed_path is None:
-        logger.warning(
-            f"No --bed file provided: grouping by '{amplicon_col}' (gene-level). "
-            "Pass --bed targets.sorted.bed for true per-amplicon resolution."
-        )
-    
-    # Calculate statistics per amplicon
-    amplicon_stats = []
-    thresholds = QC_THRESHOLDS['depth']
-    
-    for amplicon, group in df.groupby(amplicon_col):
-        depths = group['DP'].dropna()
-        
-        if len(depths) == 0:
+    ti = tv = skipped = 0
+    for ref, alt in zip(df[ref_col].astype(str).str.upper(),
+                        df[alt_col].astype(str).str.upper()):
+        if len(ref) != 1 or len(alt) != 1:
+            skipped += 1   # indel
             continue
-        
-        mean_depth = depths.mean()
-        median_depth = depths.median()
-        min_depth = depths.min()
-        max_depth = depths.max()
-        std_depth = depths.std()
-        
-        # Assign quality level based on mean depth
-        if mean_depth >= thresholds['optimal']:
-            qc_flag = 'EXCELLENT'
-            qc_color = '#2ecc71'  # Green
-        elif mean_depth >= thresholds['min_good']:
-            qc_flag = 'GOOD'
-            qc_color = '#3498db'  # Blue
-        elif mean_depth >= thresholds['min_acceptable']:
-            qc_flag = 'ACCEPTABLE'
-            qc_color = '#f39c12'  # Orange
-        else:
-            qc_flag = 'POOR'
-            qc_color = '#e74c3c'  # Red
-        
-        amplicon_stats.append({
-            'Amplicon': amplicon,
-            'N_Variants': len(group),
-            'Mean_Depth': mean_depth,
-            'Median_Depth': median_depth,
-            'Min_Depth': min_depth,
-            'Max_Depth': max_depth,
-            'Std_Depth': std_depth,
-            'QC_Flag': qc_flag,
-            'QC_Color': qc_color
-        })
-    
-    amplicon_df = pd.DataFrame(amplicon_stats)
-    
-    if amplicon_df.empty:
-        return amplicon_df
-    
-    # Plot amplicon metrics with color coding
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    
-    # 1. Mean Depth per Amplicon
-    ax1 = axes[0]
-    x_pos = np.arange(len(amplicon_df))
-    colors = amplicon_df['QC_Color'].tolist()
-    
-    ax1.bar(x_pos, amplicon_df['Mean_Depth'], color=colors, 
-           edgecolor='black', linewidth=1.5, alpha=0.7)
-    ax1.set_xticks(x_pos)
-    ax1.set_xticklabels(amplicon_df['Amplicon'], rotation=45, ha='right')
-    ax1.set_ylabel('Mean Depth')
-    ax1.set_title('Mean Coverage Depth per Amplicon/Region', 
-                 fontweight='bold', fontsize=12)
-    
-    # Add threshold lines
-    ax1.axhline(thresholds['min_acceptable'], color='#e74c3c', linestyle='--', 
-               linewidth=2, label=f'Min Acceptable ({thresholds["min_acceptable"]}x)')
-    ax1.axhline(thresholds['min_good'], color='#3498db', linestyle='--', 
-               linewidth=2, label=f'Good ({thresholds["min_good"]}x)')
-    ax1.axhline(thresholds['optimal'], color='#2ecc71', linestyle='--', 
-               linewidth=2, label=f'Optimal ({thresholds["optimal"]}x)')
-    
-    ax1.legend(loc='upper right')
-    ax1.grid(axis='y', alpha=0.3)
-    
-    # 2. Depth Distribution with Threshold Zones
-    ax2 = axes[1]
-    
-    # Add colored background zones
-    ax2.axhspan(0, thresholds['min_acceptable'], alpha=0.2, color='#e74c3c', label='Poor')
-    ax2.axhspan(thresholds['min_acceptable'], thresholds['min_good'], 
-               alpha=0.2, color='#f39c12', label='Acceptable')
-    ax2.axhspan(thresholds['min_good'], thresholds['optimal'], 
-               alpha=0.2, color='#3498db', label='Good')
-    ax2.axhspan(thresholds['optimal'], df['DP'].max() if 'DP' in df.columns else 200, 
-               alpha=0.2, color='#2ecc71', label='Excellent')
-    
-    if 'DP' in df.columns:
-        ax2.hist(df['DP'].dropna(), bins=50, color='#9b59b6', 
-                edgecolor='black', alpha=0.7, zorder=3)
-    
-    ax2.set_xlabel('Depth (DP)')
-    ax2.set_ylabel('Frequency')
-    ax2.set_title('Overall Depth Distribution\n(All Variants)', 
-                 fontweight='bold', fontsize=12)
-    ax2.legend(loc='upper right')
-    ax2.grid(axis='y', alpha=0.3)
-    
-    plt.tight_layout()
-    
-    output_file = os.path.join(output_dir, "Amplicon_QC_Metrics.png")
-    plt.savefig(output_file, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    logger.info(f"âœ… Amplicon QC plot saved: {output_file}")
-    
-    # Print summary
-    logger.info("\n" + "="*60)
-    logger.info("AMPLICON QC SUMMARY")
-    logger.info("="*60)
-    print(amplicon_df[['Amplicon', 'N_Variants', 'Mean_Depth', 'QC_Flag']].to_string(index=False))
-    
-    poor_amplicons = amplicon_df[amplicon_df['Mean_Depth'] < thresholds['min_acceptable']]
-    if not poor_amplicons.empty:
-        logger.warning(f"\nâš ï¸  {len(poor_amplicons)} amplicons with poor coverage (<{thresholds['min_acceptable']}x)")
-        logger.warning("   Consider re-sequencing or excluding these regions")
-    else:
-        logger.info(f"\nâœ… All amplicons meet minimum coverage threshold (â‰¥{thresholds['min_acceptable']}x)")
-    
-    return amplicon_df
+        if ref not in "ACGT" or alt not in "ACGT":
+            skipped += 1
+            continue
+        mut = f"{ref}>{alt}"
+        if mut in TRANSITIONS:
+            ti += 1
+        elif mut in TRANSVERSIONS:
+            tv += 1
 
-# ============================================================================
-# MAIN WORKFLOW
-# ============================================================================
+    snv_total = ti + tv
+    logger.info(f"SNVs: {snv_total} (transitions={ti}, transversions={tv}, indels/other skipped={skipped})")
+
+    if tv == 0:
+        logger.warning("No transversions found — Ti/Tv cannot be calculated (too few variants?)")
+        return {"ti": ti, "tv": tv, "snv_total": snv_total,
+                "ratio": float("nan"), "status": "FAIL_NO_TV", "colour": "#e74c3c"}
+
+    ratio = ti / tv
+    t = THRESHOLDS["titv"]
+
+    if ratio < t["acceptable_min"]:
+        status, colour = "FAIL — ratio too low (likely artefacts or very few variants)", "#e74c3c"
+    elif ratio > t["acceptable_max"]:
+        status, colour = "WARN — ratio high (CpG enrichment or over-filtering?)", "#f39c12"
+    elif t["optimal_min"] <= ratio <= t["optimal_max"]:
+        status, colour = "OPTIMAL", "#2ecc71"
+    else:
+        status, colour = "ACCEPTABLE", "#3498db"
+
+    logger.info(f"Ti/Tv ratio: {ratio:.3f}  →  {status}")
+    return {"ti": ti, "tv": tv, "snv_total": snv_total,
+            "ratio": ratio, "status": status, "colour": colour}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. ALLELIC BALANCE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def check_allelic_balance(df: pd.DataFrame, logger: logging.Logger,
+                          ab_lower: float, ab_upper: float) -> pd.DataFrame:
+    """
+    For every heterozygous call, check that the alternate-allele fraction
+    sits near 0.5 (expected for a true germline het or a ~50% VAF somatic).
+
+    Strong deviation flags:
+      - Contamination (another sample's reads boosting one allele)
+      - Loss of heterozygosity (one allele lost in tumour)
+      - Copy number changes inflating one allele count
+      - Strand/amplification artefacts
+
+    Adds columns:
+      AB_AF       — computed allele fraction (NaN for hom/missing)
+      AB_Flag     — PASS | IMBALANCED | NO_DATA
+      AB_Quality  — OPTIMAL | ACCEPTABLE | POOR | HOM/MISSING
+    """
+    t = THRESHOLDS["allelic_balance"]
+    df = df.copy()
+    df["AB_AF"]      = np.nan
+    df["AB_Flag"]    = "NO_DATA"
+    df["AB_Quality"] = "HOM/MISSING"
+
+    gt_col = find_col(df, "GT")
+    af_col = find_col(df, "AF")
+
+    if not gt_col:
+        logger.warning("GT column not found — skipping allelic balance check")
+        return df
+
+    het_idx = []
+    for idx, gt_raw in df[gt_col].items():
+        gt = str(gt_raw).replace("|", "/")
+        if "/" not in gt:
+            continue
+        parts = gt.split("/")
+        if len(parts) == 2 and parts[0] != parts[1] and "." not in parts:
+            het_idx.append(idx)
+
+    logger.info(f"Heterozygous calls to check: {len(het_idx)} / {len(df)}")
+
+    if not het_idx:
+        logger.warning("No heterozygous calls found — all homozygous or missing?")
+        return df
+
+    if not af_col:
+        logger.warning("AF column not found — cannot compute allelic fractions")
+        return df
+
+    flagged = optimal = acceptable = 0
+    for idx in het_idx:
+        try:
+            af = float(df.at[idx, af_col])
+        except (ValueError, TypeError):
+            continue
+
+        df.at[idx, "AB_AF"] = af
+
+        if af < ab_lower or af > ab_upper:
+            df.at[idx, "AB_Flag"]    = f"IMBALANCED (AF={af:.3f})"
+            df.at[idx, "AB_Quality"] = "POOR"
+            flagged += 1
+        elif t["optimal_lower"] <= af <= t["optimal_upper"]:
+            df.at[idx, "AB_Flag"]    = "PASS"
+            df.at[idx, "AB_Quality"] = "OPTIMAL"
+            optimal += 1
+        else:
+            df.at[idx, "AB_Flag"]    = "PASS"
+            df.at[idx, "AB_Quality"] = "ACCEPTABLE"
+            acceptable += 1
+
+    n = len(het_idx)
+    pct_flagged = flagged / n * 100
+    logger.info(f"Allelic balance — optimal: {optimal} ({optimal/n*100:.1f}%), "
+                f"acceptable: {acceptable} ({acceptable/n*100:.1f}%), "
+                f"imbalanced: {flagged} ({pct_flagged:.1f}%)")
+    if pct_flagged > 20:
+        logger.warning(f">{pct_flagged:.0f}% of hets are imbalanced — "
+                       "check for contamination, LOH, or CNV in these samples")
+
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. BATCH EFFECTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_batch_effects(df: pd.DataFrame, logger: logging.Logger) -> pd.DataFrame:
+    """
+    Count variants per sample, then compute the coefficient of variation (CV%)
+    within each cohort × tissue group.
+
+    High CV suggests one of:
+      - Batch effects (samples sequenced in different runs / reagent lots)
+      - Genuine biology (some tumours highly mutated)
+      - Sample quality outliers that should be excluded
+
+    Returns a summary DataFrame, one row per cohort × tissue group.
+    """
+    cohort_col  = find_col(df, "Cohort")
+    tissue_col  = find_col(df, "Tissue")
+    sample_col  = find_col(df, "Sample")
+
+    if not sample_col:
+        logger.warning("Sample column not found — skipping batch effect detection")
+        return pd.DataFrame()
+
+    group_cols = [c for c in [cohort_col, tissue_col] if c]
+    if not group_cols:
+        logger.warning("No Cohort or Tissue column found — using single global group")
+        df = df.copy()
+        df["_group"] = "All"
+        group_cols = ["_group"]
+
+    per_sample = df.groupby(group_cols + [sample_col]).size().reset_index(name="N_Variants")
+
+    t = THRESHOLDS["batch_cv"]
+    rows = []
+    for keys, grp in per_sample.groupby(group_cols):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        label = " / ".join(str(k) for k in keys)
+        mean = grp["N_Variants"].mean()
+        std  = grp["N_Variants"].std(ddof=1) if len(grp) > 1 else 0.0
+        cv   = std / mean * 100 if mean > 0 else 0.0
+
+        if cv < t["excellent"]:
+            flag, colour = "EXCELLENT",      "#2ecc71"
+        elif cv < t["acceptable"]:
+            flag, colour = "ACCEPTABLE",     "#3498db"
+        elif cv < t["poor"]:
+            flag, colour = "HIGH VARIATION", "#f39c12"
+        else:
+            flag, colour = "VERY HIGH VAR",  "#e74c3c"
+
+        rows.append({
+            "Group":           label,
+            "N_Samples":       len(grp),
+            "Mean_Variants":   round(mean, 1),
+            "Median_Variants": round(grp["N_Variants"].median(), 1),
+            "Std_Variants":    round(std, 1),
+            "CV_%":            round(cv, 1),
+            "Min_Variants":    grp["N_Variants"].min(),
+            "Max_Variants":    grp["N_Variants"].max(),
+            "QC_Flag":         flag,
+            "_colour":         colour,
+        })
+
+    batch_df = pd.DataFrame(rows)
+    logger.info("\nBatch effect summary:\n" +
+                batch_df[["Group", "N_Samples", "Mean_Variants", "CV_%", "QC_Flag"]]
+                .to_string(index=False))
+
+    high_var = batch_df[batch_df["CV_%"] > t["acceptable"]]
+    if not high_var.empty:
+        logger.warning(f"{len(high_var)} group(s) with CV > {t['acceptable']}% — "
+                       "possible batch effects or sample outliers")
+    return batch_df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. PLOTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_qc_summary(titv: dict, df: pd.DataFrame,
+                    batch_df: pd.DataFrame, out_dir: str,
+                    logger: logging.Logger):
+    """Three-panel QC figure: Ti/Tv bar, allelic balance histogram, batch CV."""
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig.suptitle("Variant-Level QC Summary", fontsize=14, fontweight="bold", y=1.01)
+
+    # ── Panel 1: Ti/Tv ──────────────────────────────────────────────────────
+    ax = axes[0]
+    if not np.isnan(titv["ratio"]):
+        ax.bar(["Transitions", "Transversions"],
+               [titv["ti"], titv["tv"]],
+               color=["#3498db", "#e74c3c"], edgecolor="black", linewidth=1.2)
+        t = THRESHOLDS["titv"]
+        ax.set_title(
+            f"Ti/Tv Ratio: {titv['ratio']:.3f}\n{titv['status']}",
+            fontweight="bold", color=titv["colour"], fontsize=11)
+        ax.text(0.5, 0.02,
+                f"Optimal {t['optimal_min']}–{t['optimal_max']}  |  "
+                f"Acceptable {t['acceptable_min']}–{t['acceptable_max']}",
+                transform=ax.transAxes, ha="center", va="bottom", fontsize=8,
+                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+    else:
+        ax.text(0.5, 0.5, f"Ti/Tv\n{titv['status']}",
+                transform=ax.transAxes, ha="center", va="center",
+                fontsize=12, color="red")
+    ax.set_ylabel("Count")
+    ax.grid(axis="y", alpha=0.3)
+
+    # ── Panel 2: Allelic balance histogram ──────────────────────────────────
+    ax = axes[1]
+    t_ab = THRESHOLDS["allelic_balance"]
+    if "AB_AF" in df.columns and df["AB_AF"].notna().any():
+        het_af = df["AB_AF"].dropna()
+
+        # Colour-coded background zones
+        ax.axvspan(0,             t_ab["lower"],         alpha=0.15, color="#e74c3c", label="Poor")
+        ax.axvspan(t_ab["lower"], t_ab["optimal_lower"], alpha=0.15, color="#3498db", label="Acceptable")
+        ax.axvspan(t_ab["optimal_lower"], t_ab["optimal_upper"], alpha=0.2, color="#2ecc71", label="Optimal")
+        ax.axvspan(t_ab["optimal_upper"], t_ab["upper"], alpha=0.15, color="#3498db")
+        ax.axvspan(t_ab["upper"], 1.0,                   alpha=0.15, color="#e74c3c")
+
+        ax.hist(het_af, bins=30, color="#9b59b6", edgecolor="black", alpha=0.75, zorder=3)
+        ax.axvline(0.5, color="darkgreen", linestyle="--", linewidth=1.5,
+                   label="Expected (0.5)", zorder=4)
+
+        n_flagged = (df["AB_Flag"].str.startswith("IMBALANCED") == True).sum()
+        ax.set_title(
+            f"Allelic Balance (heterozygous calls)\n"
+            f"n={len(het_af)}  flagged={n_flagged} ({n_flagged/len(het_af)*100:.1f}%)",
+            fontweight="bold", fontsize=11)
+        ax.legend(loc="upper right", fontsize=7)
+    else:
+        ax.text(0.5, 0.5, "No allelic fraction data\n(AF column missing or all homozygous)",
+                transform=ax.transAxes, ha="center", va="center", fontsize=11)
+        ax.set_title("Allelic Balance", fontweight="bold")
+    ax.set_xlabel("Allele Fraction (AF)")
+    ax.set_ylabel("Count")
+    ax.set_xlim(0, 1)
+    ax.grid(axis="y", alpha=0.3)
+
+    # ── Panel 3: Batch CV% ───────────────────────────────────────────────────
+    ax = axes[2]
+    if not batch_df.empty:
+        t_cv = THRESHOLDS["batch_cv"]
+        colours = batch_df["_colour"].tolist()
+        y_pos = range(len(batch_df))
+        ax.barh(list(y_pos), batch_df["CV_%"], color=colours,
+                edgecolor="black", linewidth=1.2, alpha=0.75)
+        ax.set_yticks(list(y_pos))
+        ax.set_yticklabels(batch_df["Group"], fontsize=9)
+        ax.axvline(t_cv["excellent"],  color="#2ecc71", linestyle="--",
+                   linewidth=1.5, label=f"Excellent (<{t_cv['excellent']}%)")
+        ax.axvline(t_cv["acceptable"], color="#f39c12", linestyle="--",
+                   linewidth=1.5, label=f"Acceptable (<{t_cv['acceptable']}%)")
+        ax.axvline(t_cv["poor"],       color="#e74c3c", linestyle="--",
+                   linewidth=1.5, label=f"Poor (<{t_cv['poor']}%)")
+        ax.set_xlabel("CV% of variant counts across samples")
+        ax.set_title("Batch Effects\n(variant count variability per group)",
+                     fontweight="bold", fontsize=11)
+        ax.legend(loc="lower right", fontsize=7)
+    else:
+        ax.text(0.5, 0.5, "No batch data", transform=ax.transAxes,
+                ha="center", va="center", fontsize=12)
+        ax.set_title("Batch Effects", fontweight="bold")
+    ax.grid(axis="x", alpha=0.3)
+
+    plt.tight_layout()
+    out_path = os.path.join(out_dir, "Variant_QC_Plots.png")
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    logger.info(f"QC plot saved: {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Comprehensive variant-level QC analysis with threshold highlighting',
+        description="Variant-level QC: Ti/Tv, allelic balance, batch effects",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-EXAMPLE USAGE:
-  # Process annotated variants
-  python 07b_variant-qc.py \\
-    --input /path/to/GSDMB_Annotated_Report_Fixed.xlsx \\
-    --bed /path/to/targets.sorted.bed \\
-    --output /path/to/qc_results \\
-    --verbose
-
-  # With custom thresholds
-  python 05b_variant_qc_enhanced.py \\
-    --input annotations.xlsx \\
-    --ab-lower 0.2 \\
-    --ab-upper 0.8 \\
-    --min-depth 30
-        """
     )
-    
-    parser.add_argument(
-        '--input', '-i',
-        required=True,
-        help='Path to annotated variants Excel file (from script 07)'
-    )
-
-    parser.add_argument(
-        '--bed',
-        default=None,
-        help='Path to targets BED file for true amplicon-level grouping by positional '
-             'overlap. If not provided, falls back to grouping by SYMBOL.'
-    )
-
-    parser.add_argument(
-        '--output', '-o',
-        default='.',
-        help='Output directory for QC reports'
-    )
-    
-    parser.add_argument(
-        '--ab-lower',
-        type=float,
-        default=None,
-        help=f'Lower threshold for allelic balance (default: {QC_THRESHOLDS["allelic_balance"]["lower"]})'
-    )
-    
-    parser.add_argument(
-        '--ab-upper',
-        type=float,
-        default=None,
-        help=f'Upper threshold for allelic balance (default: {QC_THRESHOLDS["allelic_balance"]["upper"]})'
-    )
-    
-    parser.add_argument(
-        '--min-depth',
-        type=int,
-        default=None,
-        help=f'Minimum acceptable depth (default: {QC_THRESHOLDS["depth"]["min_acceptable"]})'
-    )
-    
-    parser.add_argument(
-        '--verbose', '-v',
-        action='store_true',
-        help='Verbose logging'
-    )
-    
+    parser.add_argument("--input",  "-i", required=True,
+                        help="Annotated Excel file from script 07 "
+                             "(GSDMB_Annotated_Report_Fixed.xlsx)")
+    parser.add_argument("--output", "-o", default=".",
+                        help="Output directory (default: current directory)")
+    parser.add_argument("--ab-lower", type=float,
+                        default=THRESHOLDS["allelic_balance"]["lower"],
+                        help="Lower AF threshold for allelic balance "
+                             f"(default: {THRESHOLDS['allelic_balance']['lower']})")
+    parser.add_argument("--ab-upper", type=float,
+                        default=THRESHOLDS["allelic_balance"]["upper"],
+                        help="Upper AF threshold for allelic balance "
+                             f"(default: {THRESHOLDS['allelic_balance']['upper']})")
+    parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
+
     logger = setup_logging(args.verbose)
-    
-    # Update thresholds if provided
-    if args.min_depth is not None:
-        QC_THRESHOLDS['depth']['min_acceptable'] = args.min_depth
-    
-    # Create output directory
     os.makedirs(args.output, exist_ok=True)
-    
-    logger.info("="*70)
-    logger.info("VARIANT-LEVEL QUALITY CONTROL ANALYSIS (ENHANCED)")
-    logger.info("="*70)
-    logger.info(f"Input file: {args.input}")
-    logger.info(f"Output dir: {args.output}")
-    logger.info("="*70)
-    
-    # Load annotated variants
-    logger.info("\nLoading annotated variants...")
+
+    logger.info("=" * 65)
+    logger.info("VARIANT-LEVEL QC  (script 07b)")
+    logger.info("=" * 65)
+    logger.info(f"Input : {args.input}")
+    logger.info(f"Output: {args.output}")
+    logger.info(f"AB thresholds: {args.ab_lower} – {args.ab_upper}")
+
+    # ── Load ────────────────────────────────────────────────────────────────
     try:
-        df = pd.read_excel(args.input, sheet_name='Biological_Annotations')
-        logger.info(f"âœ… Loaded {len(df)} variants")
+        df_raw = pd.read_excel(args.input, sheet_name="Biological_Annotations")
+        logger.info(f"Loaded {len(df_raw)} rows from Biological_Annotations")
     except Exception as e:
-        logger.error(f"Failed to load input file: {e}")
+        logger.error(f"Failed to load input: {e}")
         sys.exit(1)
-    
-    # 1. Calculate Ti/Tv Ratio
-    logger.info("\n" + "="*70)
-    logger.info("1. CALCULATING Ti/Tv RATIO")
-    logger.info("="*70)
-    titv_results = calculate_titv_ratio(df, logger)
-    
-    # 2. Check Allelic Balance
-    logger.info("\n" + "="*70)
-    logger.info("2. CHECKING ALLELIC BALANCE")
-    logger.info("="*70)
+
+    # ── Deduplicate to one row per variant call ──────────────────────────────
+    df = deduplicate_to_variants(df_raw, logger)
+
+    # ── 1. Ti/Tv ────────────────────────────────────────────────────────────
+    logger.info("\n── 1. Ti/Tv RATIO ──────────────────────────────────────────")
+    titv = calculate_titv(df, logger)
+
+    # ── 2. Allelic balance ───────────────────────────────────────────────────
+    logger.info("\n── 2. ALLELIC BALANCE ──────────────────────────────────────")
     df = check_allelic_balance(df, logger, args.ab_lower, args.ab_upper)
-    
-    # 3. Detect Batch Effects
-    logger.info("\n" + "="*70)
-    logger.info("3. DETECTING BATCH EFFECTS")
-    logger.info("="*70)
+
+    # ── 3. Batch effects ─────────────────────────────────────────────────────
+    logger.info("\n── 3. BATCH EFFECTS ────────────────────────────────────────")
     batch_df = detect_batch_effects(df, logger)
-    
-    # 4. Analyze Amplicon Metrics (NEW)
-    logger.info("\n" + "="*70)
-    logger.info("4. ANALYZING AMPLICON METRICS")
-    logger.info("="*70)
-    amplicon_df = analyze_amplicon_metrics(df, logger, args.output, bed_path=args.bed)
-    
-    # 5. Generate Visualizations
-    logger.info("\n" + "="*70)
-    logger.info("5. GENERATING QC VISUALIZATIONS")
-    logger.info("="*70)
-    plot_qc_summary(titv_results, df, batch_df, args.output, logger)
-    
-    # 6. Save Results
-    logger.info("\n" + "="*70)
-    logger.info("6. SAVING QC RESULTS")
-    logger.info("="*70)
-    
-    # Save Ti/Tv results
-    titv_df = pd.DataFrame([titv_results])
-    titv_file = os.path.join(args.output, "TiTv_Ratio_Report.csv")
-    titv_df.to_csv(titv_file, index=False)
-    logger.info(f"âœ… Ti/Tv report saved: {titv_file}")
-    
-    # Save batch analysis
-    batch_file = os.path.join(args.output, "Batch_Effects_Report.csv")
-    batch_df.to_csv(batch_file, index=False)
-    logger.info(f"âœ… Batch effects report saved: {batch_file}")
-    
-    # Save amplicon analysis
-    if not amplicon_df.empty:
-        amplicon_file = os.path.join(args.output, "Amplicon_QC_Report.csv")
-        amplicon_df.to_csv(amplicon_file, index=False)
-        logger.info(f"âœ… Amplicon QC report saved: {amplicon_file}")
-    
-    # Save updated annotations with AB flags
-    output_excel = os.path.join(args.output, "GSDMB_Annotated_Report_QC.xlsx")
-    with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
-        df.to_excel(writer, sheet_name='Biological_Annotations', index=False)
-    logger.info(f"âœ… Updated annotations saved: {output_excel}")
-    
-    # Final Summary
-    logger.info("\n" + "="*70)
-    logger.info("QC SUMMARY")
-    logger.info("="*70)
-    logger.info(f"Ti/Tv Ratio: {titv_results['ratio']:.3f} ({titv_results['qc_status']})")
-    
-    if 'AB_Flag' in df.columns:
-        flagged = df[df['AB_Flag'] != 'PASS'].shape[0]
-        optimal = df[df['AB_Quality'] == 'OPTIMAL'].shape[0]
-        logger.info(f"Allelic Balance: {optimal} optimal, {flagged} flagged")
-    
-    high_cv = batch_df[batch_df['CV_%'] > QC_THRESHOLDS['batch_cv']['acceptable']].shape[0]
-    logger.info(f"Batch Effects: {high_cv} groups with high variation")
-    
-    if not amplicon_df.empty:
-        poor_amp = amplicon_df[amplicon_df['Mean_Depth'] < QC_THRESHOLDS['depth']['min_acceptable']].shape[0]
-        logger.info(f"Amplicon QC: {poor_amp} regions below minimum coverage")
-    
-    logger.info("\n" + "="*70)
-    logger.info("âœ… VARIANT QC COMPLETE")
-    logger.info("="*70)
+
+    # ── 4. Plots ─────────────────────────────────────────────────────────────
+    logger.info("\n── 4. PLOTS ────────────────────────────────────────────────")
+    plot_qc_summary(titv, df, batch_df, args.output, logger)
+
+    # ── 5. Save outputs ──────────────────────────────────────────────────────
+    logger.info("\n── 5. SAVING OUTPUTS ───────────────────────────────────────")
+
+    # Annotated table with AB flags
+    # Re-attach AB columns to the full (non-deduplicated) table so every transcript
+    # row for a flagged variant is also flagged.
+    key_cols = [c for c in ["CHROM", "POS", "REF", "ALT", "Sample"] if c in df.columns]
+    if key_cols and all(c in df_raw.columns for c in key_cols):
+        ab_cols = df[key_cols + ["AB_AF", "AB_Flag", "AB_Quality"]].drop_duplicates(subset=key_cols)
+        df_out = df_raw.merge(ab_cols, on=key_cols, how="left")
+    else:
+        df_out = df  # fallback
+
+    excel_path = os.path.join(args.output, "Variant_QC_Report.xlsx")
+    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+        df_out.to_excel(writer, sheet_name="Biological_Annotations", index=False)
+    logger.info(f"Annotated table saved: {excel_path}")
+
+    # Ti/Tv summary
+    titv_path = os.path.join(args.output, "TiTv_Summary.csv")
+    pd.DataFrame([{k: v for k, v in titv.items() if k != "colour"}]).to_csv(
+        titv_path, index=False)
+    logger.info(f"Ti/Tv summary saved: {titv_path}")
+
+    # Batch effects summary
+    if not batch_df.empty:
+        batch_path = os.path.join(args.output, "Batch_Effects_Summary.csv")
+        batch_df.drop(columns=["_colour"], errors="ignore").to_csv(batch_path, index=False)
+        logger.info(f"Batch effects summary saved: {batch_path}")
+
+    # ── Final summary ────────────────────────────────────────────────────────
+    logger.info("\n" + "=" * 65)
+    logger.info("QC COMPLETE — Summary")
+    logger.info("=" * 65)
+    ratio_str = f"{titv['ratio']:.3f}" if not np.isnan(titv["ratio"]) else "N/A"
+    logger.info(f"  Ti/Tv ratio  : {ratio_str}  [{titv['status']}]")
+    if "AB_Flag" in df.columns:
+        n_het     = df["AB_AF"].notna().sum()
+        n_flagged = df["AB_Flag"].str.startswith("IMBALANCED").sum()
+        logger.info(f"  Allelic bal. : {n_flagged}/{n_het} hets flagged as imbalanced")
+    if not batch_df.empty:
+        high_cv = (batch_df["CV_%"] > THRESHOLDS["batch_cv"]["acceptable"]).sum()
+        logger.info(f"  Batch effects: {high_cv} group(s) with CV > "
+                    f"{THRESHOLDS['batch_cv']['acceptable']}%")
+    logger.info("=" * 65)
+
 
 if __name__ == "__main__":
     main()
