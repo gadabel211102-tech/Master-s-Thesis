@@ -5,7 +5,6 @@ Script 13: Permutation Testing for SNP Associations
 Addresses small sample size limitations using non-parametric permutation tests.
 More robust than Fisher's exact test when sample sizes are imbalanced.
 
-Author: Enhanced Genomics Analysis Pipeline
 Date: 2026-02-12
 """
 
@@ -264,8 +263,8 @@ def run_permutation_analysis():
     )
     
     # Classify significance
-    final_results['Permutation_Significant'] = final_results['Permutation_FDR'] < 0.05
-    final_results['Fisher_Significant'] = final_results['Fisher_FDR'] < 0.05
+    final_results['Permutation_Significant'] = final_results['Permutation_P_Value'] < 0.05
+    final_results['Fisher_Significant'] = final_results['Fisher_P_Value'] < 0.05
     final_results['Agreement'] = (
         final_results['Permutation_Significant'] == final_results['Fisher_Significant']
     )
