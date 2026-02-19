@@ -24,7 +24,6 @@ To use a specific BED file for rsID annotations, edit the PATHS dictionary below
 Or set to None to use the default location (dna_qc/targets.clean.bed):
     "bed_file": None
 
-Author: Research Team
 Date: February 2026
 """
 
