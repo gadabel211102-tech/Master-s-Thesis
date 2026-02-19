@@ -1,6 +1,6 @@
 # GSDMB Variant Analysis Pipeline
 
-A bioinformatics pipeline for targeted amplicon sequencing analysis of the **GSDMB locus** on chromosome 17q21, applied to cancer cohorts (breast and endometrial). The pipeline covers everything from raw BAM quality control through to haplotype association testing, with interactive visualisation outputs.
+A bioinformatics pipeline for targeted amplicon sequencing analysis of the **GSDMB/ORMDL3 locus** on chromosome 17q21, applied to cancer cohorts (breast and endometrial). The pipeline covers everything from raw BAM quality control through to haplotype association testing, with interactive visualisation outputs.
 
 ---
 
@@ -12,8 +12,8 @@ This pipeline was developed as part of a master's thesis (*TFM*) and processes I
 - Per-sample and per-amplicon quality control (coverage, uniformity, GC bias)
 - Variant calling, normalisation, and filtering
 - Functional annotation via Ensembl VEP
+- COSMIC Cancer Gene Census contextualisation of detected germline variants
 - Downstream variant statistics, enrichment, and permutation testing
-- COSMIC cancer database integration
 - Clonality and tumour heterogeneity analysis
 - Haplotype phasing and association statistics
 - Interactive HTML dashboard for result exploration
@@ -34,13 +34,13 @@ This pipeline was developed as part of a master's thesis (*TFM*) and processes I
 ├── 06_annotation.sh             # VEP functional annotation
 ├── 07_merge-annotations.py      # Merge VEP annotations into master table
 ├── 07b_variant-qc.py            # Post-annotation variant QC
+├── 07c_cosmic_integration.py     # COSMIC Cancer Gene Census contextualisation (germline)
 ├── 08_mapping.py                # Variant-to-gene mapping
 ├── 09_gsdmb-only.py             # GSDMB locus-specific extraction
 ├── 10_variant-stats.py          # Descriptive variant statistics
 ├── 11_SNPs.py                   # SNP filtering and established variant identification
 ├── 12_stats-enrichment.py       # Statistical enrichment analysis
 ├── 13_permutation_testing.py    # Permutation-based significance testing
-├── 14_cosmic_integration.py     # COSMIC database comparison
 ├── 15_clonality_analysis.py     # Tumour heterogeneity and clonality assessment
 ├── 16_interactive_dashboard.py  # Interactive Plotly HTML dashboard
 ├── 17_haplotypes.sh             # BEAGLE haplotype phasing
@@ -160,13 +160,13 @@ conda activate vep_env
 source tfm_env/bin/activate
 python 07_merge-annotations.py
 python 07b_variant-qc.py
+python 07c_cosmic_integration.py   # Biological context before SNP analysis
 python 08_mapping.py
 python 09_gsdmb-only.py
 python 10_variant-stats.py
 python 11_SNPs.py
 python 12_stats-enrichment.py
 python 13_permutation_testing.py
-python 14_cosmic_integration.py
 python 15_clonality_analysis.py
 python 16_interactive_dashboard.py
 ```
@@ -222,7 +222,7 @@ install.packages("haplo.stats")
 
 ## Notes
 
-- All scripts are written to be run in order (numbered `01` → `17`).
+- All scripts are written to be run in order (numbered `01` → `17`). N3`.
 - Scripts assume a directory structure of `<root>/<cohort>/<tissue_type>/<sample>/`.
 - The pipeline was developed and tested on **Ubuntu 24 (WSL2)** with Python 3.11.
 - Ion Torrent variant calling in `05_variant_calling.sh` wraps `tvc` (Torrent Variant Caller); ensure this is available and in `PATH` if using a non-standard installation.
