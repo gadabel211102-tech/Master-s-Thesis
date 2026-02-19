@@ -1,8 +1,7 @@
 #!/bin/bash
 # =============================================================================
-# Script 19a: Merge all sample VCFs → Phase with BEAGLE → Extract phased GTs
+# Script 15: Merge all sample VCFs → Phase with BEAGLE → Extract phased GTs
 # =============================================================================
-# Run from ~/tfm:  bash 19_phase_and_haplotype.sh
 # =============================================================================
 
 set -euo pipefail
