@@ -1,6 +1,6 @@
 # GSDMB Variant Analysis Pipeline
 
-A bioinformatics pipeline for targeted amplicon sequencing analysis of the **GSDMB/ORMDL3 locus** on chromosome 17q21, applied to cancer cohorts (breast and endometrial). The pipeline covers everything from raw BAM quality control through to haplotype association testing, with interactive visualisation outputs.
+A bioinformatics pipeline for targeted amplicon sequencing analysis of the **GSDMB locus** on chromosome 17q21, applied to cancer cohorts (breast and endometrial). The pipeline covers everything from raw BAM quality control through to haplotype association testing, with interactive visualisation outputs.
 
 ---
 
