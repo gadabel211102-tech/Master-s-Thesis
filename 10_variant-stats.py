@@ -53,10 +53,19 @@ def create_stat_visuals(df_to_plot, title_suffix, filename, use_log=False):
     # Top Panel: Consequences
     con_pivot = df_to_plot.groupby(['Group', con_c]).size().unstack(fill_value=0)
     con_pivot.plot(kind='bar', stacked=True, ax=ax1, colormap='tab20')
-    ax1.set_title(f'Functional  Consequences: {title_suffix}', fontsize=16, fontweight='bold')
+    ax1.set_title(f'Functional Consequences: {title_suffix}', fontsize=16, fontweight='bold')
     if use_log: ax1.set_yscale('log')
     ax1.set_ylabel('Count (Log Scale)' if use_log else 'Count')
     ax1.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize='small')
+
+    # Add numeric labels to the right side of each Consequence segment
+    for p in ax1.patches:
+        h = p.get_height()
+        if h > 0:
+            x = p.get_x() + p.get_width() + 0.02
+            y = p.get_y() + h / 2
+            ax1.text(x, y, f'{int(h)}', ha='left', va='center', fontsize=7,
+                     fontweight='bold', clip_on=False)
 
     # Bottom Panel: Impacts
     impact_pivot = df_to_plot.groupby(['Group', imp_c]).size().unstack(fill_value=0)
@@ -72,13 +81,14 @@ def create_stat_visuals(df_to_plot, title_suffix, filename, use_log=False):
     ax2.set_ylabel('Count (Log Scale)' if use_log else 'Count')
     plt.xticks(rotation=0)
 
-    # Add numeric labels to the Impact bars
+    # Add numeric labels to the right side of each Impact segment
     for p in ax2.patches:
         h = p.get_height()
         if h > 0:
-            x, y = p.get_x() + p.get_width() / 2, p.get_y()
-            y_pos = y * 1.15 if use_log and y > 0 else y + h/2
-            ax2.text(x, y_pos, f'{int(h)}', ha='center', va='center', fontsize=10, fontweight='bold')
+            x = p.get_x() + p.get_width() + 0.02
+            y = p.get_y() + h / 2
+            ax2.text(x, y, f'{int(h)}', ha='left', va='center', fontsize=8,
+                     fontweight='bold', clip_on=False)
 
     plt.tight_layout()
     plt.savefig(os.path.join(input_dir, filename), dpi=300)
