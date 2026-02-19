@@ -8,9 +8,6 @@
 #   - Calculates coverage metrics using mosdepth
 #   - Identifies poorly performing amplicons
 #   - Filters samples into PASS/FAIL categories
-#
-# Author: [Your name]
-# Date: February 2026
 # ==============================================================================
 
 # Exit immediately if any command fails, treat unset variables as errors,
