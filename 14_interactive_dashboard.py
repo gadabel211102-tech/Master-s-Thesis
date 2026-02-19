@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Script 17: Interactive Visualization Dashboard
+Script 14: Interactive Visualization Dashboard
 ================================================
 Creates interactive HTML dashboard with Plotly for exploring variant data.
 Enables filtering, zooming, and detailed inspection of results.
 
-Author: Enhanced Genomics Analysis Pipeline
 Date: 2026-02-12
 """
 
@@ -190,17 +189,45 @@ def create_gene_coverage_timeline(df, sym_c, sam_c, coh_c):
 
 
 def create_3d_scatter(df, pos_c, sym_c, imp_c):
-    """Create 3D scatter plot for multi-dimensional exploration."""
-    # Simulate additional dimension (in real analysis, use actual quality metrics)
-    df['Quality_Score'] = np.random.uniform(20, 100, size=len(df))
-    
-    # Sample data for performance
-    df_sample = df.sample(min(500, len(df)))
-    
+    """
+    Create 3D scatter plot for multi-dimensional exploration.
+    Axes:
+      X — Genomic position (Chr17)
+      Y — gnomAD NFE population frequency (log scale)
+      Z — Read depth (DP), reflecting sequencing coverage at each variant site
+    Colour — Variant impact level (HIGH → LOW)
+    """
+    # Use real read depth (DP) from VCF FORMAT field as the Z axis.
+    # Locate DP column case-insensitively; fall back gracefully if absent.
+    dp_col = next((c for c in df.columns if c.upper() == 'DP'), None)
+    if dp_col is None:
+        print("  WARNING: No DP column found — 3D scatter plot will be skipped.")
+        fig = go.Figure()
+        fig.update_layout(
+            title='3D Variant Explorer (unavailable — DP column not found)',
+            height=700
+        )
+        return fig
+
+    # Work on a copy to avoid mutating the shared dataframe
+    df_3d = df[[pos_c, 'gnomADe_NFE_AF', dp_col, imp_c, sym_c]].copy()
+    df_3d['Read_Depth'] = pd.to_numeric(df_3d[dp_col], errors='coerce')
+    df_3d['gnomADe_NFE_AF'] = pd.to_numeric(df_3d['gnomADe_NFE_AF'], errors='coerce')
+
+    # Drop rows missing any of the three axes
+    df_3d = df_3d.dropna(subset=['Read_Depth', 'gnomADe_NFE_AF'])
+
+    # Cap depth at 99th percentile to prevent extreme outliers compressing the axis
+    depth_cap = df_3d['Read_Depth'].quantile(0.99)
+    df_3d['Read_Depth'] = df_3d['Read_Depth'].clip(upper=depth_cap)
+
+    # Sample for rendering performance
+    df_sample = df_3d.sample(min(500, len(df_3d)), random_state=42)
+
     fig = go.Figure(data=[go.Scatter3d(
         x=df_sample[pos_c],
         y=df_sample['gnomADe_NFE_AF'],
-        z=df_sample['Quality_Score'],
+        z=df_sample['Read_Depth'],
         mode='markers',
         marker=dict(
             size=5,
@@ -217,20 +244,26 @@ def create_3d_scatter(df, pos_c, sym_c, imp_c):
             line=dict(color='black', width=0.5)
         ),
         text=df_sample[sym_c],
-        hovertemplate='<b>%{text}</b><br>Pos: %{x}<br>AF: %{y:.4f}<br>Quality: %{z:.1f}'
+        hovertemplate=(
+            '<b>%{text}</b><br>'
+            'Position: %{x:,}<br>'
+            'gnomAD NFE AF: %{y:.4f}<br>'
+            'Read Depth: %{z:.0f}x'
+            '<extra></extra>'
+        )
     )])
-    
+
     fig.update_layout(
-        title='3D Variant Explorer',
+        title='3D Variant Explorer: Position × Population Frequency × Read Depth',
         scene=dict(
-            xaxis_title='Genomic Position',
-            yaxis_title='Allele Frequency',
-            zaxis_title='Quality Score'
+            xaxis_title='Genomic Position (Chr17)',
+            yaxis_title='gnomAD NFE Allele Frequency',
+            zaxis_title='Read Depth (DP)',
         ),
         height=700,
         font=dict(size=11)
     )
-    
+
     return fig
 
 
@@ -269,10 +302,235 @@ def create_interactive_table(df, sym_c, pos_c, imp_c, con_c):
     return fig
 
 
+def load_snp_data():
+    """
+    Load the SNP summary produced by script 11.
+    Returns None gracefully if the file is not yet available.
+    """
+    snp_file = os.path.join(BASE_PATH, "11_Master_Unique_SNP_Summary.xlsx")
+    if not os.path.exists(snp_file):
+        print(f"  WARNING: SNP summary not found at {snp_file}")
+        print("  Run script 11 first to enable SNP panels.")
+        return None
+    df_snp = pd.read_excel(snp_file)
+    # Standardise tissue/cohort labels in column names
+    df_snp.columns = df_snp.columns.str.strip()
+    print(f"  ✓ SNP data loaded: {len(df_snp)} unique SNPs")
+    return df_snp
+
+
+def create_snp_benchmarking(df_snp):
+    """
+    Plot 8 — SNP Frequency Benchmarking (interactive).
+    X: gnomAD NFE population frequency
+    Y: study carrier frequency per group
+    Colour: tissue type (Tumour / Healthy)
+    One trace per cohort-tissue group, hover shows rsID, gene, consequence.
+
+    This is the interactive equivalent of the static identity plots from script 11.
+    Points above the diagonal are enriched in your cohort vs. the general population;
+    points below are depleted.
+    """
+    # Detect the four frequency columns dynamically
+    freq_cols = [c for c in df_snp.columns if c.endswith('Frequency_%')]
+    if not freq_cols or 'gnomAD_NFE_AF' not in df_snp.columns:
+        fig = go.Figure()
+        fig.update_layout(title='SNP Benchmarking (data columns not found)', height=600)
+        return fig
+
+    # Melt wide format → long so each row is one SNP × one group
+    id_vars = [c for c in ['Variant_ID', 'SYMBOL', 'Consequence', 'IMPACT', 'gnomAD_NFE_AF']
+               if c in df_snp.columns]
+    df_long = df_snp.melt(
+        id_vars=id_vars,
+        value_vars=freq_cols,
+        var_name='Group',
+        value_name='Study_Frequency_%'
+    )
+
+    # Parse cohort and tissue from column name e.g. "Breast_Tumour_Frequency_%"
+    df_long['Cohort'] = df_long['Group'].str.split('_').str[0]
+    df_long['Tissue'] = df_long['Group'].str.split('_').str[1]
+    df_long = df_long[df_long['Study_Frequency_%'] > 0].copy()
+
+    colour_map = {'Tumour': '#e74c3c', 'Healthy': '#3498db'}
+
+    fig = px.scatter(
+        df_long,
+        x='gnomAD_NFE_AF',
+        y='Study_Frequency_%',
+        color='Tissue',
+        symbol='Cohort',
+        hover_data={
+            'Variant_ID': True,
+            'SYMBOL': True,
+            'Consequence': True,
+            'IMPACT': True,
+            'gnomAD_NFE_AF': ':.4f',
+            'Study_Frequency_%': ':.1f',
+            'Group': False
+        },
+        color_discrete_map=colour_map,
+        title='SNP Frequency Benchmarking: Study Cohort vs. gnomAD NFE Population',
+        labels={
+            'gnomAD_NFE_AF': 'gnomAD NFE Allele Frequency (population)',
+            'Study_Frequency_%': 'Carrier Frequency in Study (%)',
+        },
+        height=600
+    )
+
+    # Diagonal reference line — perfect agreement with population frequency
+    x_range = [0, df_long['gnomAD_NFE_AF'].max() * 1.05]
+    fig.add_trace(go.Scatter(
+        x=x_range,
+        y=[v * 100 for v in x_range],
+        mode='lines',
+        line=dict(color='grey', dash='dash', width=1),
+        name='Population baseline (y = x)',
+        hoverinfo='skip'
+    ))
+
+    fig.update_layout(
+        hovermode='closest',
+        legend_title='Tissue / Cohort',
+        font=dict(size=11)
+    )
+
+    return fig
+
+
+def create_snp_heatmap(df_snp):
+    """
+    Plot 9 — SNP Carrier Frequency Heatmap.
+    Rows: top 40 SNPs by mean carrier frequency across groups
+    Columns: the four cohort-tissue groups
+    Colour: carrier frequency (%)
+
+    Immediately reveals which SNPs are shared across groups (pan-cohort)
+    vs. enriched in one specific group.
+    """
+    freq_cols = [c for c in df_snp.columns if c.endswith('Frequency_%')]
+    if not freq_cols:
+        fig = go.Figure()
+        fig.update_layout(title='SNP Heatmap (frequency columns not found)', height=600)
+        return fig
+
+    # Select top SNPs by mean frequency across all groups
+    df_snp['Mean_Freq'] = df_snp[freq_cols].mean(axis=1)
+    top_snps = df_snp.nlargest(40, 'Mean_Freq').copy()
+
+    # Use Variant_ID as row label, falling back gracefully
+    label_col = 'Variant_ID' if 'Variant_ID' in top_snps.columns else top_snps.index
+    top_snps['Label'] = (
+        top_snps[label_col].astype(str) + '  (' + top_snps['SYMBOL'].astype(str) + ')'
+        if 'SYMBOL' in top_snps.columns
+        else top_snps[label_col].astype(str)
+    )
+
+    z_data = top_snps[freq_cols].values
+    # Tidy column labels: "Breast_Tumour_Frequency_%" → "Breast Tumour"
+    x_labels = [c.replace('_Frequency_%', '').replace('_', ' ') for c in freq_cols]
+    y_labels = top_snps['Label'].tolist()
+
+    # Build hover text matrix
+    hover_text = []
+    for _, row in top_snps.iterrows():
+        row_text = []
+        for col, x_lbl in zip(freq_cols, x_labels):
+            consequence = row.get('Consequence', 'N/A')
+            gnomad = row.get('gnomAD_NFE_AF', 'N/A')
+            row_text.append(
+                f"SNP: {row.get('Variant_ID', '')}<br>"
+                f"Gene: {row.get('SYMBOL', '')}<br>"
+                f"Group: {x_lbl}<br>"
+                f"Carrier freq: {row[col]:.1f}%<br>"
+                f"gnomAD NFE AF: {gnomad}<br>"
+                f"Consequence: {consequence}"
+            )
+        hover_text.append(row_text)
+
+    fig = go.Figure(data=go.Heatmap(
+        z=z_data,
+        x=x_labels,
+        y=y_labels,
+        colorscale='YlOrRd',
+        text=[[f'{v:.1f}%' for v in row] for row in z_data],
+        texttemplate='%{text}',
+        textfont=dict(size=9),
+        hovertext=hover_text,
+        hovertemplate='%{hovertext}<extra></extra>',
+        colorbar=dict(title='Carrier<br>Frequency (%)'),
+        zmin=0
+    ))
+
+    fig.update_layout(
+        title='Top 40 SNPs: Carrier Frequency Across Cohort Groups',
+        xaxis_title='Cohort — Tissue Group',
+        yaxis_title='SNP (rsID / Gene)',
+        height=900,
+        font=dict(size=11),
+        yaxis=dict(tickfont=dict(size=9))
+    )
+
+    return fig
+
+
+def create_snp_consequence_breakdown(df_snp):
+    """
+    Plot 10 — SNP Consequence Breakdown.
+    Interactive bar chart of unique SNP counts by consequence type,
+    coloured by gene. Click legend entries to isolate individual genes.
+    """
+    if 'Consequence' not in df_snp.columns or 'SYMBOL' not in df_snp.columns:
+        fig = go.Figure()
+        fig.update_layout(title='SNP Consequence Breakdown (columns not found)', height=500)
+        return fig
+
+    con_counts = (
+        df_snp.groupby(['Consequence', 'SYMBOL'])
+        .size()
+        .reset_index(name='Count')
+    )
+
+    # Order by total count descending
+    con_order = (
+        con_counts.groupby('Consequence')['Count']
+        .sum()
+        .sort_values(ascending=True)
+        .index.tolist()
+    )
+
+    fig = px.bar(
+        con_counts,
+        x='Count',
+        y='Consequence',
+        color='SYMBOL',
+        orientation='h',
+        title='SNP Distribution by Functional Consequence and Gene',
+        labels={
+            'Count': 'Number of Unique SNPs',
+            'Consequence': 'Functional Consequence',
+            'SYMBOL': 'Gene'
+        },
+        category_orders={'Consequence': con_order},
+        height=600,
+        color_discrete_sequence=px.colors.qualitative.Bold
+    )
+
+    fig.update_layout(
+        barmode='stack',
+        legend_title='Gene',
+        font=dict(size=11),
+        hovermode='closest'
+    )
+
+    return fig
+
+
 def create_dashboard():
     """Main function to create complete interactive dashboard."""
     print("="*70)
-    print("SCRIPT 17: INTERACTIVE VISUALIZATION DASHBOARD")
+    print("SCRIPT 14: INTERACTIVE VISUALIZATION DASHBOARD")
     print("="*70)
     print(f"\nConfiguration:")
     print(f"  - Input: {INPUT_FILE}")
@@ -301,30 +559,78 @@ def create_dashboard():
     })
     df[coh_c] = df[coh_c].astype(str).str.strip()
     
-    print(f"Total variants to visualize: {len(df)}\n")
-    
-    # Create all visualizations
-    print("Creating interactive visualizations:")
+    print(f"Total variants to visualise: {len(df)}\n")
+
+    # Load SNP summary from script 11
+    print("Loading SNP summary data...")
+    df_snp = load_snp_data()
+
+    # Create all visualisations
+    print("Creating interactive visualisations:")
     print("  [1/7] Genomic scatter plot...")
     fig1 = create_interactive_scatter(df, sym_c, pos_c, imp_c, coh_c, tis_c)
-    
+
     print("  [2/7] Variant hierarchy sunburst...")
     fig2 = create_variant_sunburst(df, sym_c, imp_c, con_c)
-    
+
     print("  [3/7] Cohort comparison boxes...")
     fig3 = create_cohort_comparison_box(df, coh_c, tis_c)
-    
+
     print("  [4/7] Impact-Consequence heatmap...")
     fig4 = create_impact_consequence_heatmap(df, imp_c, con_c)
-    
+
     print("  [5/7] Gene coverage timeline...")
     fig5 = create_gene_coverage_timeline(df, sym_c, 'Sample', coh_c)
-    
+
     print("  [6/7] 3D scatter explorer...")
     fig6 = create_3d_scatter(df, pos_c, sym_c, imp_c)
-    
+
     print("  [7/7] Interactive data table...")
     fig7 = create_interactive_table(df, sym_c, pos_c, imp_c, con_c)
+
+    # SNP panels (require script 11 output)
+    snp_section_html = ''
+    snp_stat_card_html = ''
+    if df_snp is not None:
+        n_snps = len(df_snp)
+        snp_stat_card_html = f"""
+                <div class="stat-card">
+                    <div class="stat-number">{n_snps:,}</div>
+                    <div class="stat-label">Established SNPs (gnomAD NFE &gt;1%)</div>
+                </div>"""
+
+        print("  [8/10] SNP frequency benchmarking...")
+        fig8 = create_snp_benchmarking(df_snp)
+
+        print("  [9/10] SNP carrier frequency heatmap...")
+        fig9 = create_snp_heatmap(df_snp)
+
+        print("  [10/10] SNP consequence breakdown...")
+        fig10 = create_snp_consequence_breakdown(df_snp)
+
+        snp_section_html = f"""
+            <div class="section-divider">
+                <h2 class="section-heading">&#128202; SNP Analysis (Script 11)</h2>
+                <p class="section-desc">
+                    Established SNPs defined as variants with gnomAD NFE allele frequency &gt;1%.
+                    Carrier frequencies are calculated per cohort–tissue group across all samples.
+                </p>
+            </div>
+
+            <div class="plot-section">
+                <h2 class="plot-title">8. SNP Frequency Benchmarking vs. gnomAD Population</h2>
+                {fig8.to_html(include_plotlyjs=False, div_id='plot8')}
+            </div>
+
+            <div class="plot-section">
+                <h2 class="plot-title">9. SNP Carrier Frequency Heatmap (Top 40)</h2>
+                {fig9.to_html(include_plotlyjs=False, div_id='plot9')}
+            </div>
+
+            <div class="plot-section">
+                <h2 class="plot-title">10. SNP Distribution by Functional Consequence</h2>
+                {fig10.to_html(include_plotlyjs=False, div_id='plot10')}
+            </div>"""
     
     # Combine into single HTML file
     print("\nCombining visualizations into dashboard...")
@@ -400,6 +706,23 @@ def create_dashboard():
                 color: #666;
                 margin-top: 10px;
             }}
+            .section-divider {{
+                background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+                color: white;
+                padding: 20px 30px;
+                border-radius: 8px;
+                margin-bottom: 20px;
+                margin-top: 10px;
+            }}
+            .section-heading {{
+                margin: 0 0 8px 0;
+                font-size: 1.6em;
+            }}
+            .section-desc {{
+                margin: 0;
+                font-size: 0.95em;
+                opacity: 0.92;
+            }}
             .footer {{
                 text-align: center;
                 padding: 20px;
@@ -435,8 +758,9 @@ def create_dashboard():
                 </div>
                 <div class="stat-card">
                     <div class="stat-number">{(df[imp_c] == 'HIGH').sum()}</div>
-                    <div class="stat-label">High Impact</div>
+                    <div class="stat-label">High Impact Variants</div>
                 </div>
+                {snp_stat_card_html}
             </div>
             
             <div class="plot-section">
@@ -473,6 +797,8 @@ def create_dashboard():
                 <h2 class="plot-title">7. Variant Data Table (Top 100)</h2>
                 {fig7.to_html(include_plotlyjs=False, div_id='plot7')}
             </div>
+
+            {snp_section_html}
             
             <div class="footer">
                 <p><strong>Enhanced Genomics Analysis Pipeline</strong></p>
@@ -497,12 +823,8 @@ def create_dashboard():
     print(f"Output saved to: {OUTPUT_HTML}")
     print(f"File size: {os.path.getsize(OUTPUT_HTML) / 1024 / 1024:.2f} MB")
     print(f"\nOpen this file in any web browser to explore the data interactively.")
-    print(f"Features:")
-    print(f"  • Zoom and pan on all plots")
-    print(f"  • Hover for detailed information")
-    print(f"  • Click legend items to show/hide")
-    print(f"  • Download plots as PNG")
-    print(f"  • Fully responsive design")
+    n_plots = 10 if df_snp is not None else 7
+    print(f"Total interactive plots: {n_plots}")
     print(f"\n{'='*70}\n")
 
 
