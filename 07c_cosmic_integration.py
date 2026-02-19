@@ -377,8 +377,7 @@ def generate_cosmic_plots(df, summary_by_gene, hotspots, cancer_specific,
         ax3.set_title("Variant Impact by Tissue Type\n(Tumour vs. Healthy)",
                       fontweight='bold', fontsize=11)
         plt.setp(ax3.xaxis.get_majorticklabels(), rotation=0)
-        ax3.legend(title="Impact", bbox_to_anchor=(1.02, 1),
-                   loc='upper left', fontsize=8)
+        ax3.legend(title="Impact", loc='upper right', fontsize=8)
     else:
         ax3.text(0.5, 0.5, 'No tissue impact data available',
                  ha='center', va='center', fontsize=11)
@@ -387,7 +386,7 @@ def generate_cosmic_plots(df, summary_by_gene, hotspots, cancer_specific,
     # Plot 4: Hotspot Recurrence
     ax4 = fig.add_subplot(gs[1, 1])
     if not hotspots.empty:
-        top_hotspots = hotspots.nsmallest(10, 'Recurrence_Rate_%')
+        top_hotspots = hotspots.nlargest(10, 'Recurrence_Rate_%').sort_values('Recurrence_Rate_%', ascending=True)
         ax4.barh(range(len(top_hotspots)), top_hotspots['Recurrence_Rate_%'],
                  color='#e74c3c', alpha=0.7)
         ax4.set_yticks(range(len(top_hotspots)))
