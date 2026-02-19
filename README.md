@@ -41,10 +41,9 @@ This pipeline was developed as part of a master's thesis (*TFM*) and processes I
 ├── 11_SNPs.py                   # SNP filtering and established variant identification
 ├── 12_stats-enrichment.py       # Statistical enrichment analysis
 ├── 13_permutation_testing.py    # Permutation-based significance testing
-├── 15_clonality_analysis.py     # Tumour heterogeneity and clonality assessment
-├── 16_interactive_dashboard.py  # Interactive Plotly HTML dashboard
-├── 17_haplotypes.sh             # BEAGLE haplotype phasing
-└── 17_haplo_stats.r             # Haplotype-phenotype association (haplo.stats)
+├── 14_interactive_dashboard.py  # Interactive Plotly HTML dashboard
+├── 15_haplotypes.sh             # BEAGLE haplotype phasing
+└── 15_haplo_stats.r             # Haplotype-phenotype association (haplo.stats)
 ```
 
 ---
@@ -167,17 +166,16 @@ python 10_variant-stats.py
 python 11_SNPs.py
 python 12_stats-enrichment.py
 python 13_permutation_testing.py
-python 15_clonality_analysis.py
-python 16_interactive_dashboard.py
+python 14_interactive_dashboard.py
 ```
 
 ### Stage 6: Haplotype Analysis
 
 ```bash
 micromamba activate bam-steps
-./17_haplotypes.sh   # BEAGLE phasing
+./15_haplotypes.sh   # BEAGLE phasing
 
-Rscript 17_haplo_stats.r  # Association testing
+Rscript 15_haplo_stats.r  # Association testing
 ```
 
 ---
@@ -211,7 +209,7 @@ Most scripts define configuration variables at the top of the file (typically un
 
 ## R Dependencies
 
-Script `17_haplo_stats.r` requires the following R packages:
+Script `15_haplo_stats.r` requires the following R packages:
 
 ```r
 install.packages(c("ggplot2", "dplyr", "tidyr", "openxlsx"))
