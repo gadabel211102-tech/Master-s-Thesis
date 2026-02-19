@@ -20,7 +20,7 @@ warnings.filterwarnings('ignore')
 # --- CONFIGURATION ---
 BASE_PATH = "/home/gadeaalonsoj/tfm/gsdmb_final_results/"
 INPUT_FILE = os.path.join(BASE_PATH, "GSDMB_Annotated_Report_Fixed.xlsx")
-OUTPUT_HTML = os.path.join(BASE_PATH, "17_Interactive_Dashboard.html")
+OUTPUT_HTML = os.path.join(BASE_PATH, "14_Interactive_Dashboard.html")
 
 
 def find_col(df, target):
