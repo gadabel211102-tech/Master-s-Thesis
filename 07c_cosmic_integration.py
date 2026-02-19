@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script 15: COSMIC Integration - Cancer Mutation Database Comparison
+Script 07c: COSMIC Integration - Cancer Mutation Database Comparison
 ====================================================================
 Compares detected variants against COSMIC cancer mutation database.
 Identifies known cancer hotspots and novel cancer-associated variants.
@@ -20,8 +20,8 @@ warnings.filterwarnings('ignore')
 # --- CONFIGURATION ---
 BASE_PATH = "/home/gadeaalonsoj/tfm/gsdmb_final_results/"
 INPUT_FILE = os.path.join(BASE_PATH, "GSDMB_Annotated_Report_Fixed.xlsx")
-OUTPUT_XLSX = os.path.join(BASE_PATH, "15_COSMIC_Integration_Results.xlsx")
-OUTPUT_PLOT = os.path.join(BASE_PATH, "15_COSMIC_Analysis_Plots.png")
+OUTPUT_XLSX = os.path.join(BASE_PATH, "07c_COSMIC_Integration_Results.xlsx")
+OUTPUT_PLOT = os.path.join(BASE_PATH, "07c_COSMIC_Analysis_Plots.png")
 
 # COSMIC Cancer Gene Census - genes with roles in cancer
 # This is a subset; full list available from COSMIC database
@@ -116,7 +116,7 @@ def identify_hotspot_positions(df, sym_c, pos_c, tissue_c, sam_c='Sample'):
 def analyze_cosmic_context():
     """Main pipeline for COSMIC integration analysis."""
     print("="*70)
-    print("SCRIPT 15: COSMIC CANCER MUTATION DATABASE INTEGRATION")
+    print("SCRIPT 07c: COSMIC CANCER MUTATION DATABASE INTEGRATION")
     print("="*70)
     print(f"\nConfiguration:")
     print(f"  - Input: {INPUT_FILE}")
