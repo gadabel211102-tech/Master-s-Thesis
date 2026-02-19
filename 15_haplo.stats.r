@@ -1,6 +1,6 @@
 #!/usr/bin/env Rscript
 # =============================================================================
-# Script 19b: Haplotype Analysis with haplo.stats
+# Script 15: Haplotype Analysis with haplo.stats
 # =============================================================================
 # Uses BEAGLE-phased genotypes to:
 #   1. Filter to established SNPs (gnomAD NFE AF > 1%) from script 11
@@ -8,7 +8,7 @@
 #   3. Test haplotype-phenotype associations for all group comparisons
 #   4. Export results + plots
 #
-# Run: Rscript 17_haplo_stats.r
+# Run: Rscript 15_haplo_stats.r
 # =============================================================================
 
 suppressPackageStartupMessages({
