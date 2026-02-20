@@ -175,7 +175,7 @@ python 14_interactive_dashboard.py
 micromamba activate bam-steps
 ./15_haplotypes.sh   # BEAGLE phasing
 
-Rscript 15_haplo_stats.r  # Association testing
+Rscript 15_haplo.stats.r  # Association testing
 ```
 
 ---
@@ -209,7 +209,7 @@ Most scripts define configuration variables at the top of the file (typically un
 
 ## R Dependencies
 
-Script `15_haplo_stats.r` requires the following R packages:
+Script `15_haplo.stats.r` requires the following R packages:
 
 ```r
 install.packages(c("ggplot2", "dplyr", "tidyr", "openxlsx"))
