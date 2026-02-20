@@ -34,7 +34,7 @@ This pipeline was developed as part of a master's thesis (*TFM*) and processes I
 ├── 06_annotation.sh             # VEP functional annotation
 ├── 07_merge-annotations.py      # Merge VEP annotations into master table
 ├── 07b_variant-qc.py            # Post-annotation variant QC
-├── 07c_cosmic_integration.py     # COSMIC Cancer Gene Census contextualisation (germline)
+├── 07c_cosmic_integration.py    # COSMIC Cancer Gene Census contextualisation (germline)
 ├── 08_mapping.py                # Variant-to-gene mapping
 ├── 09_gsdmb-only.py             # GSDMB locus-specific extraction
 ├── 10_variant-stats.py          # Descriptive variant statistics
