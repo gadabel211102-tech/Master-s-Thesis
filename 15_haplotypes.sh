@@ -363,13 +363,15 @@ bcftools query -l "${PHASED_PREFIX}.vcf.gz" > "${HAPLO_DIR}/sample_order.txt"
 
 # Extract one row per variant with all sample genotypes
 # %GT retrieves the phased genotype field (e.g. 0|1) for each sample
+# Extract one row per variant with all sample genotypes
+# Added %ID here so R can match the Excel rsIDs!
 bcftools query \
-    -f '%CHROM\t%POS\t%REF\t%ALT[\t%GT]\n' \
+    -f '%CHROM\t%POS\t%ID\t%REF\t%ALT[\t%GT]\n' \
     "${PHASED_PREFIX}.vcf.gz" \
     > "${PHASED_TSV}"
 
-# Prepend a header row using sample names from sample_order.txt
-HEADER="CHROM\tPOS\tREF\tALT\t$(paste -s -d'\t' "${HAPLO_DIR}/sample_order.txt")"
+# Also update the HEADER line right below it to include ID:
+HEADER="CHROM\tPOS\tID\tREF\tALT\t$(paste -s -d'\t' "${HAPLO_DIR}/sample_order.txt")"
 { echo -e "${HEADER}"; cat "${PHASED_TSV}"; } > "${PHASED_TSV}.tmp"
 mv "${PHASED_TSV}.tmp" "${PHASED_TSV}"
 
