@@ -175,6 +175,7 @@ python 14_interactive_dashboard.py
 micromamba activate bam-steps
 ./15_haplotypes.sh   # BEAGLE phasing
 
+conda activate vep_env
 Rscript 15_haplo.stats.r  # Association testing
 ```
 
