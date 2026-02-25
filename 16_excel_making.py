@@ -1,5 +1,7 @@
 """
 MASTER SNP BUILDER + CLINICAL JOINER (ONE MERGED FILE)
++ AU ENDOMETRIAL TUMOUR CLINICAL JOIN (3rd Excel)
+
 Updated to reflect: paired normal (NT) is treated like tumour for germline SNPs.
 So for HER2 breast cases we join clinical data by CASE, not by T/NT block.
 
@@ -16,22 +18,28 @@ Inputs:
      - TANDA HER2 MAMA T + NT     (breast tumour + paired normal; joins via CASE ID)
      - DCs MAMA HER2              (detailed clinical; joins via NHC to HER2 sheet)
 
+3) AU Endometrial tumour clinical workbook:
+   "Clinical DATA AU_Endometrial cancer.xlsx"
+   Sheet used: Hoja1
+   Key used: PATIENT_ID (NOT "nombre en el chip"/SNP_AT_* because it is NOT stable across files)
+
 Output:
-- One merged dataframe (and optional Excel) containing:
+- One merged dataframe (and Excel) containing:
   master SNP rows (DNA/RNA) + all clinical variables that can be linked.
 
 Key design:
 - master has BOTH:
-    sample_id  (e.g., M06152-T, NT250072)
-    case_id    (e.g., M06152 for M06152-T / M06152-NT; else equals sample_id for NT codes)
+    sample_id  (e.g., M06152-T, NT250072, BL039, EndoBL039, MDA040, EndoMDA_40)
+    case_id    (e.g., M06152 for M06152-T / M06152-NT; else equals sample_id for NT/BL/MDA codes)
 - For HER2 cases, clinical join uses case_id (M06152), not block type.
+- For AU endometrial tumour clinical, join uses a normalised "endo_id" derived from PATIENT_ID and sample_id.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 import pandas as pd
 
@@ -40,8 +48,13 @@ import pandas as pd
 # CONFIG
 # =============================================================================
 
-SNP_XLSX = Path(r"/mnt/data/Muestras SNPs nomenclaturas, equivalencias y cuantificaciones.xlsx")
-CLINICAL_XLSX = Path(r"/mnt/data/MUESTRAS + VARIABLES CLINICAS PROY SNPs GM(4).xlsx")
+SNP_XLSX = Path("/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/Muestras SNPs nomenclaturas, equivalencias y cuantificaciones.xlsx")
+CLINICAL_XLSX = Path("/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/MUESTRAS + VARIABLES CLINICAS PROY SNPs GM(4).xlsx")
+
+
+# AU endometrial tumour clinical data (3rd Excel)
+AU_ENDO_XLSX = Path("/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/Clinical DATA AU_Endometrial cancer.xlsx")
+AU_ENDO_SHEET = "Hoja1"
 
 SNP_SHEETS = ["AT=AUs", "EN", "MT-T_N", "MN"]  # ignore OVSER
 
@@ -76,20 +89,17 @@ def _pick_existing(df: pd.DataFrame, candidates: List[str]) -> str:
     for c in candidates:
         if c in df.columns:
             return c
-    raise KeyError(f"None of these columns were found: {candidates}. Available: {df.columns.tolist()}")
+    raise KeyError(
+        f"None of these columns were found: {candidates}. "
+        f"Available: {df.columns.tolist()}"
+    )
 
 
 def add_case_id_and_block_type(master: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds two columns to master:
-      - case_id: germline case identifier used for HER2 breast tumour/paired-normal joins
+    Adds:
+      - case_id: used for HER2 breast tumour/paired-normal joins (germline logic)
       - block_type: 'T' / 'NT' if sample_id looks like M06152-T or M06152-NT, else None
-
-    Rules:
-    - If sample_id matches ^M\\d+-(T|NT)$ -> case_id = M\\d+ and block_type = T or NT
-    - Otherwise (e.g., NT250072, MO221478, BL039) -> case_id = sample_id; block_type = None
-
-    This supports your germline logic: T and NT share germline variants, so join by case_id.
     """
     out = master.copy()
 
@@ -106,6 +116,49 @@ def add_case_id_and_block_type(master: pd.DataFrame) -> pd.DataFrame:
     out["case_id"] = parsed.apply(lambda x: x[0])
     out["block_type"] = parsed.apply(lambda x: x[1])
     return out
+
+
+def normalize_endo_id(x: str) -> str:
+    """
+    Canonical key to match AU endometrial tumour clinical (PATIENT_ID)
+    with SNP master sample_id values that can look like:
+      BL039
+      BL136 1:100
+      EndoBL010
+      MDA040
+      EndoMDA_040
+      EndoMDA_40
+    Output always one of:
+      ENDOBL###      (3 digits)
+      ENDOMDA_##     (no zero padding; matches AU style EndoMDA_40)
+    """
+    s = _to_str(x)
+    if not s:
+        return ""
+
+    # Remove dilution / trailing comments: "BL136 1:100" -> "BL136"
+    s = s.split()[0].strip()
+
+    # Upper + remove spaces
+    s = s.replace(" ", "").upper()
+
+    # BL
+    m = re.match(r"^ENDOBL(\d+)$", s)
+    if m:
+        return f"ENDOBL{int(m.group(1)):03d}"
+    m = re.match(r"^BL(\d+)$", s)
+    if m:
+        return f"ENDOBL{int(m.group(1)):03d}"
+
+    # MDA (AU uses EndoMDA_40 style; keep underscore, no padding)
+    m = re.match(r"^ENDOMDA[_\-]?(\d+)$", s)
+    if m:
+        return f"ENDOMDA_{int(m.group(1))}"
+    m = re.match(r"^MDA(\d+)$", s)
+    if m:
+        return f"ENDOMDA_{int(m.group(1))}"
+
+    return s
 
 
 # =============================================================================
@@ -176,7 +229,7 @@ def process_MT_TN(sheet_df: pd.DataFrame) -> pd.DataFrame:
     out["pd_status"] = None
     out["histology"] = None
     out["tissue"] = "Breast"
-    out["tumour_normal"] = "Tumour"  # NOTE: still labelled tumour, but germline joins use case_id
+    out["tumour_normal"] = "Tumour"  # still labelled tumour, but germline joins use case_id
     out["sheet"] = "MT-T_N"
     return out
 
@@ -211,9 +264,7 @@ def process_MN(sheet_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_master(snp_xlsx: Path) -> pd.DataFrame:
-    """
-    Build the SNP master (DNA+RNA long format) and add case_id + block_type.
-    """
+    """Build SNP master (DNA+RNA long format) and add case_id + block_type."""
     xls = pd.ExcelFile(snp_xlsx)
     frames: List[pd.DataFrame] = []
 
@@ -234,13 +285,14 @@ def build_master(snp_xlsx: Path) -> pd.DataFrame:
     # Keep only DNA/RNA rows and non-empty SNP codes
     master["nucleic_acid"] = master["nucleic_acid"].astype(str).str.upper().replace({"": pd.NA, "NAN": pd.NA})
     master = master[master["nucleic_acid"].isin(["DNA", "RNA"])]
+
     master["snp_code"] = master["snp_code"].astype(str).replace({"": pd.NA, "nan": pd.NA})
     master = master[master["snp_code"].notna()].reset_index(drop=True)
 
-    # Add case_id + block_type to support germline joins
+    # Add case_id + block_type to support germline joins (HER2)
     master = add_case_id_and_block_type(master)
 
-    # Nice column order
+    # Column order
     cols = [
         "snp_code", "nucleic_acid",
         "tissue", "tumour_normal",
@@ -256,25 +308,23 @@ def build_master(snp_xlsx: Path) -> pd.DataFrame:
 # CLINICAL LOADER + MERGER (ONE MERGED FILE)
 # =============================================================================
 
-def load_clinical_tables(clinical_xlsx: Path) -> dict[str, pd.DataFrame]:
+def load_clinical_tables(clinical_xlsx: Path) -> Dict[str, pd.DataFrame]:
     """
-    Load and lightly standardize the clinical workbook into 3 tables:
+    Load and standardize the clinical workbook into tables:
 
     1) clinical_breast_healthy (TANDA MAMA SANA) keyed by sample_id (NT250xxx)
     2) clinical_endo_healthy   (TANDA ENDOMETRIO SANO) keyed by sample_id (NT... / MO...)
     3) clinical_her2_case      (TANDA HER2 MAMA T + NT enriched with DCs) keyed by case_id (M06152)
-
-    Returns dict of dataframes.
     """
     xls = pd.ExcelFile(clinical_xlsx)
-    tables: dict[str, pd.DataFrame] = {}
+    tables: Dict[str, pd.DataFrame] = {}
 
     # ---- Healthy breast (NT250xxx) ----
     if "TANDA MAMA SANA" in xls.sheet_names:
         df = standard_columns(pd.read_excel(xls, sheet_name="TANDA MAMA SANA"))
         df = df.rename(columns={"Código Noray-BB": "sample_id"})
         df["sample_id"] = df["sample_id"].map(_to_str)
-        # Prefix clinical columns to avoid collisions after merge
+
         keep = df.copy()
         rename_map = {c: f"clin_mn__{c}" for c in keep.columns if c != "sample_id"}
         keep = keep.rename(columns=rename_map)
@@ -285,17 +335,16 @@ def load_clinical_tables(clinical_xlsx: Path) -> dict[str, pd.DataFrame]:
         df = standard_columns(pd.read_excel(xls, sheet_name="TANDA ENDOMETRIO SANO"))
         df = df.rename(columns={"Código Noray": "sample_id"})
         df["sample_id"] = df["sample_id"].map(_to_str)
+
         keep = df.copy()
         rename_map = {c: f"clin_en__{c}" for c in keep.columns if c != "sample_id"}
         keep = keep.rename(columns=rename_map)
         tables["clinical_endo_healthy"] = keep
 
     # ---- HER2 breast case-level clinical ----
-    # Base: TANDA HER2 MAMA T + NT (has NHC and CÓDIGO BB CASO)
     her2 = None
     if "TANDA HER2 MAMA T + NT" in xls.sheet_names:
         her2 = standard_columns(pd.read_excel(xls, sheet_name="TANDA HER2 MAMA T + NT"))
-        # Standardize key columns
         her2 = her2.rename(columns={
             "CÓDIGO BB CASO": "case_id",
             "NHC": "NHC",
@@ -305,7 +354,6 @@ def load_clinical_tables(clinical_xlsx: Path) -> dict[str, pd.DataFrame]:
         her2["case_id"] = her2["case_id"].map(_to_str).str.upper()
         her2["NHC"] = her2["NHC"].map(_to_str)
 
-        # Prefix non-key columns
         rename_map = {}
         for c in her2.columns:
             if c in {"case_id", "NHC"}:
@@ -313,17 +361,14 @@ def load_clinical_tables(clinical_xlsx: Path) -> dict[str, pd.DataFrame]:
             rename_map[c] = f"clin_her2__{c}"
         her2 = her2.rename(columns=rename_map)
 
-    # Enrich: DCs MAMA HER2 (join to her2 via NHC, then keep case_id)
+    # Enrich HER2 with DCs
     if her2 is not None and "DCs MAMA HER2" in xls.sheet_names:
         dcs = standard_columns(pd.read_excel(xls, sheet_name="DCs MAMA HER2"))
-        # standardize key column
         dcs["NHC"] = dcs["NHC"].map(_to_str)
 
-        # Prefix DCs columns (except NHC)
         rename_map = {c: f"clin_dcs__{c}" for c in dcs.columns if c != "NHC"}
         dcs = dcs.rename(columns=rename_map)
 
-        # Merge DCs into HER2 on NHC (left join keeps all HER2 cases)
         her2 = her2.merge(dcs, how="left", on="NHC")
 
     if her2 is not None:
@@ -332,14 +377,50 @@ def load_clinical_tables(clinical_xlsx: Path) -> dict[str, pd.DataFrame]:
     return tables
 
 
-def merge_master_with_clinical(master_df: pd.DataFrame, clinical_xlsx: Path) -> pd.DataFrame:
+def load_au_endo_clinical(au_xlsx: Path, sheet_name: str = "Hoja1") -> Optional[pd.DataFrame]:
+    """
+    Load AU endometrial tumour clinical file and return a table keyed by endo_id.
+    endo_id is derived from PATIENT_ID using normalize_endo_id().
+    """
+    if not au_xlsx.exists():
+        print(f"AU endo clinical file not found at: {au_xlsx} (skipping).")
+        return None
+
+    au = pd.read_excel(au_xlsx, sheet_name=sheet_name)
+    au = standard_columns(au)
+
+    if "PATIENT_ID" not in au.columns:
+        print(f"AU endo clinical: PATIENT_ID column not found in {sheet_name}; skipping merge.")
+        return None
+
+    au = au.copy()
+    au["endo_id"] = au["PATIENT_ID"].astype(str).map(normalize_endo_id)
+
+    # Drop empty keys
+    au = au[au["endo_id"].astype(str).str.len() > 0].copy()
+
+    # Deduplicate if needed
+    if au["endo_id"].duplicated().any():
+        dups = au.loc[au["endo_id"].duplicated(), "endo_id"].unique().tolist()
+        print(f"WARNING: AU endo clinical has duplicate PATIENT_ID keys after normalisation: {dups[:10]}{'...' if len(dups) > 10 else ''}")
+        au = au.drop_duplicates(subset=["endo_id"], keep="first").copy()
+
+    # Prefix columns (except endo_id)
+    rename_map = {c: f"clin_au_endo__{c}" for c in au.columns if c != "endo_id"}
+    au = au.rename(columns=rename_map)
+
+    # Keep endo_id first
+    cols = ["endo_id"] + [c for c in au.columns if c != "endo_id"]
+    return au[cols].copy()
+
+
+def merge_master_with_clinical(master_df: pd.DataFrame, clinical_xlsx: Path, au_endo_xlsx: Path) -> pd.DataFrame:
     """
     Produce ONE merged file:
-    - For NT-coded healthy breast: join by sample_id
-    - For NT/MO-coded healthy endometrium: join by sample_id
-    - For HER2 breast cases: join by case_id (germline logic), regardless of T vs NT blocks
-
-    Returns merged dataframe.
+    - Healthy breast: join by sample_id
+    - Healthy endometrium: join by sample_id
+    - HER2 breast: join by case_id (germline logic)
+    - AU endometrial tumour clinical: join by normalised endo_id (PATIENT_ID <-> sample_id)
     """
     tables = load_clinical_tables(clinical_xlsx)
     merged = master_df.copy()
@@ -356,6 +437,24 @@ def merge_master_with_clinical(master_df: pd.DataFrame, clinical_xlsx: Path) -> 
     if "clinical_her2_case" in tables:
         merged = merged.merge(tables["clinical_her2_case"], how="left", on="case_id")
 
+    # Join AU endometrial tumour clinical by normalised endo_id
+    au = load_au_endo_clinical(au_endo_xlsx, sheet_name=AU_ENDO_SHEET)
+    if au is not None:
+        merged = merged.copy()
+        merged["endo_id"] = merged["sample_id"].astype(str).map(normalize_endo_id)
+
+        # Audit before merge
+        au_keys = set(au["endo_id"].tolist())
+        master_keys = set([k for k in merged["endo_id"].tolist() if k])
+        matched = merged["endo_id"].isin(au_keys).sum()
+        print("\nAU ENDO JOIN AUDIT")
+        print("------------------")
+        print(f"AU keys (unique):        {len(au_keys)}")
+        print(f"Master endo_id (unique): {len(master_keys)}")
+        print(f"Master rows matched:     {matched} / {len(merged)}")
+
+        merged = merged.merge(au, how="left", on="endo_id")
+
     return merged
 
 
@@ -369,12 +468,12 @@ if __name__ == "__main__":
     print("MASTER:", master_df.shape)
     print(master_df.head(10).to_string(index=False))
 
-    # 2) Merge clinical into master (ONE merged file)
-    merged_df = merge_master_with_clinical(master_df, CLINICAL_XLSX)
+    # 2) Merge all clinical into master (ONE merged file)
+    merged_df = merge_master_with_clinical(master_df, CLINICAL_XLSX, AU_ENDO_XLSX)
     print("\nMERGED:", merged_df.shape)
     print(merged_df.head(10).to_string(index=False))
 
-    # 3) Save merged output (optional)
+    # 3) Save merged output
     out_path = SNP_XLSX.with_name("MASTER_SNP_plus_clinical__MERGED.xlsx")
     merged_df.to_excel(out_path, index=False)
     print("\nSaved:", out_path)
