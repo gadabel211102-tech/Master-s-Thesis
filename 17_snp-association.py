@@ -416,45 +416,96 @@ def load_and_merge(gsdmb_path: Path, master_path: Path,
     master_dna = master_dna.drop_duplicates("case_id").copy()
 
     # ── Derived columns ──────────────────────────────────────────────────────
-    # Breast
+    # Breast tumour
     master_dna["BREAST_RECURRENCE_DERIVED"] = master_dna["clin_dcs__Recaida/Progresión"].apply(_derive_breast_recurrence)
     master_dna["BREAST_EXITUS_DERIVED"]     = master_dna["clin_dcs__Exitus"].apply(_derive_breast_exitus)
     master_dna["BREAST_METASTASIS_DERIVED"] = master_dna["clin_dcs__MTxDISTANCIA"].apply(_derive_breast_metastasis)
     master_dna["BREAST_HER2_SUBTYPE"]       = master_dna["clin_her2__DX"].apply(_derive_her2_subtype)
-    master_dna["BREAST_ER_BIN"]             = master_dna["clin_dcs__RE"].map({"POSITIVO": 1, "NEGATIVO": 0})
-    master_dna["BREAST_PR_BIN"]             = master_dna["clin_dcs__RP"].map({"POSITIVO": 1, "NEGATIVO": 0})
+    master_dna["BREAST_ER_BIN"]             = master_dna["canon__er_status"].map({"Positive": 1, "Negative": 0})
+    master_dna["BREAST_PR_BIN"]             = master_dna["canon__pr_status"].map({"Positive": 1, "Negative": 0})
     master_dna["BREAST_KI67_NUMERIC"]       = master_dna["clin_dcs__KI67"].apply(_derive_ki67_numeric)
     master_dna["BREAST_OS_MONTHS_DERIVED"]  = master_dna.apply(_derive_breast_os, axis=1)
+    master_dna["BREAST_GRADE_NUMERIC"]      = pd.to_numeric(master_dna["clin_dcs__GRADO"], errors="coerce")
+    master_dna["BREAST_P53_NUMERIC"]        = pd.to_numeric(master_dna["clin_dcs__p53"], errors="coerce")
+    master_dna["BREAST_BMI_NUMERIC"]        = pd.to_numeric(master_dna["clin_dcs__BMI"], errors="coerce")
+    master_dna["BREAST_MENARCHE_NUMERIC"]   = pd.to_numeric(master_dna["canon__menarche_age"], errors="coerce")
+    master_dna["BREAST_MENOPAUSE_NUMERIC"]  = pd.to_numeric(master_dna["canon__menopause_age"], errors="coerce")
+    # Breast DX type (CDI vs CDIS vs other)
+    master_dna["BREAST_DX_TYPE"] = master_dna["clin_dcs__Dx"].apply(
+        lambda x: "CDI" if pd.notna(x) and "CDI" in str(x).upper() and "CDIS" not in str(x).upper()
+        else ("CDIS" if pd.notna(x) and "CDIS" in str(x).upper() else (str(x).strip() if pd.notna(x) else None))
+    )
+    # Local metastasis binary
+    master_dna["BREAST_LOCAL_MET_BIN"] = master_dna["clin_dcs__MTxDISTANCIA"].map(
+        {"NO": 0, "NO-LOCAL": 1, "SI": 0}   # local only vs not
+    )
 
-    # Endometrial AU
+    # Endometrial AU tumour
     master_dna["ENDO_FIGO_NUMERIC"]         = master_dna["clin_au_endo__FIGO_STAGE"].apply(_derive_figo_numeric)
     master_dna["ENDO_GRADE_NUMERIC"]        = master_dna["clin_au_endo__GRADE"].apply(_derive_endo_grade)
     master_dna["ENDO_LVSI_BIN"]             = master_dna["clin_au_endo__LVSI"].map({"YES": 1, "NO": 0})
     master_dna["ENDO_MYOINV_BIN"]           = master_dna["clin_au_endo__MYOMETRIAL_INFILTRATION"].map({"<50%": 0, ">50%": 1})
-    master_dna["ENDO_MSI_BIN"]              = master_dna["canon__msi_status"].map({"UNSTABLE": 1, "Stable": 0})
+    master_dna["ENDO_MSI_BIN"]              = master_dna["canon__msi_status"].map({"Unstable": 1, "Stable": 0})
     master_dna["ENDO_NEEC_BIN"]             = master_dna["clin_au_endo__HISTOLOGY_GROUP"].map({"NEEC": 1, "EEC": 0})
     master_dna["ENDO_PD_BIN"]               = master_dna["clin_au_endo__PD_STATUS"].map({"PD": 1, "NO PD": 0})
     master_dna["ENDO_EXITUS_BIN"]           = master_dna["clin_au_endo__EXITUS"].map({"YES": 1, "NO": 0})
+    master_dna["ENDO_EXITUS_DISEASE_BIN"]   = master_dna["clin_au_endo__EXITUS_DISEASE"].map({"YES": 1, "NO": 0})
     master_dna["ENDO_RISK_ORDINAL"]         = master_dna["clin_au_endo__RISK_OF_RECURRENCE"].apply(_derive_risk_ordinal)
     master_dna["ENDO_ER_BIN"]               = master_dna["canon__er_status"].map({"Positive": 1, "Negative": 0})
     master_dna["ENDO_PR_BIN"]               = master_dna["canon__pr_status"].map({"Positive": 1, "Negative": 0})
+    master_dna["ENDO_TP53_ABN_BIN"]         = master_dna["canon__tp53_ihc"].apply(
+        lambda x: 0 if pd.notna(x) and str(x).strip().upper() == "WT"
+        else (1 if pd.notna(x) else None)   # HIGH / POSITIVE / LOST = abnormal
+    )
+    master_dna["ENDO_GENE_AMP_BIN"]         = master_dna["clin_au_endo__Gene amplification"].map({"YES": 1, "NO": 0})
+    master_dna["ENDO_ITH_BIN"]              = master_dna["clin_au_endo__ITH: intratumor heterogeneity"].map({"YES": 1, "NO": 0})
+    master_dna["ENDO_CTDNA_BIN"]            = master_dna["clin_au_endo__BLOOD_BASAL_CTDNA"].map({"POSITIVE": 1, "NEGATIVE": 0})
+    master_dna["ENDO_CTDNA_MAF_NUMERIC"]    = pd.to_numeric(master_dna["clin_au_endo__BLOOD_BASAL_CTDNA_MAF"], errors="coerce")
+    master_dna["ENDO_CFDN_CONC_NUMERIC"]    = pd.to_numeric(master_dna["clin_au_endo__BLOOD_BASAL_CFDNA_CONCENTRATION"], errors="coerce")
+    master_dna["ENDO_PDL1_NUMERIC"]         = pd.to_numeric(master_dna["clin_au_endo__FFPE_PDL1 POLAND RESULTS"], errors="coerce")
+    master_dna["ENDO_CD8_NUMERIC"]          = pd.to_numeric(master_dna["clin_au_endo__FFPE_CD8"], errors="coerce")
+    master_dna["ENDO_KI67_NUMERIC"]         = master_dna["clin_au_endo__FFPE_KI67"].apply(_derive_ki67_numeric)
+    master_dna["ENDO_PTEN_BIN"]             = master_dna["clin_au_endo__FFPE_PTEN"].map({"CONSERVED": 0, "LOST/REDUCED": 1})
+    master_dna["ENDO_MLH1_BIN"]             = master_dna["clin_au_endo__FFPE_MLH1"].map({"CONSERVED": 0, "LOST/REDUCED": 1})
+    master_dna["ENDO_N_STAGE_BIN"]          = master_dna["clin_au_endo__N"].apply(
+        lambda x: 0 if pd.notna(x) and str(x).strip().upper() == "N0" else (1 if pd.notna(x) else None)
+    )
+    master_dna["ENDO_M_STAGE_BIN"]          = master_dna["clin_au_endo__M"].apply(
+        lambda x: 0 if pd.notna(x) and str(x).strip().upper() == "M0" else (1 if pd.notna(x) else None)
+    )
 
     # Keep only relevant columns
     canon_cols = [c for c in master_dna.columns
                   if c.startswith("canon__") and not c.endswith("__source")]
     derived_cols = [c for c in master_dna.columns if c.endswith("_DERIVED") or c.endswith("_BIN")
                     or c.endswith("_NUMERIC") or c.endswith("_ORDINAL") or c.endswith("_SUBTYPE")]
-    raw_breast_cols = ["clin_dcs__GRADO", "clin_dcs__RE", "clin_dcs__RP",
-                       "clin_her2__DX", "clin_dcs__Exitus",
-                       "clin_dcs__Recaida/Progresión", "clin_dcs__MTxDISTANCIA",
-                       "clin_dcs__KI67", "clin_dcs__Fecha dx",
-                       "clin_dcs__Última fecha disponible"]
-    raw_endo_cols  = ["clin_au_endo__FIGO_STAGE", "clin_au_endo__GRADE",
-                       "clin_au_endo__HISTOLOGY_GROUP", "clin_au_endo__LVSI",
-                       "clin_au_endo__MYOMETRIAL_INFILTRATION",
-                       "clin_au_endo__MSI_STATUS_IHC", "clin_au_endo__RISK_OF_RECURRENCE",
-                       "clin_au_endo__PD_STATUS", "clin_au_endo__EXITUS",
-                       "clin_au_endo__MOLECULAR CLASSIFICATION_according to IHC and/or NGS profile"]
+    raw_breast_cols = [
+        "clin_dcs__GRADO", "clin_dcs__RE", "clin_dcs__RP",
+        "clin_her2__DX", "clin_dcs__Exitus", "clin_dcs__Dx",
+        "clin_dcs__Recaida/Progresión", "clin_dcs__MTxDISTANCIA",
+        "clin_dcs__KI67", "clin_dcs__Fecha dx", "clin_dcs__p53",
+        "clin_dcs__BMI", "clin_dcs__Última fecha disponible",
+    ]
+    raw_endo_cols = [
+        "clin_au_endo__FIGO_STAGE", "clin_au_endo__GRADE",
+        "clin_au_endo__HISTOLOGY_GROUP", "clin_au_endo__HISTOLOGY",
+        "clin_au_endo__LVSI", "clin_au_endo__MYOMETRIAL_INFILTRATION",
+        "clin_au_endo__MSI_STATUS_IHC", "clin_au_endo__RISK_OF_RECURRENCE",
+        "clin_au_endo__PD_STATUS", "clin_au_endo__EXITUS",
+        "clin_au_endo__EXITUS_DISEASE",
+        "clin_au_endo__MOLECULAR CLASSIFICATION_according to IHC and/or NGS profile",
+        "clin_au_endo__T", "clin_au_endo__N", "clin_au_endo__M",
+        "clin_au_endo__FFPE_TP53_IHC", "clin_au_endo__FFPE_KI67",
+        "clin_au_endo__FFPE_PTEN", "clin_au_endo__FFPE_MLH1",
+        "clin_au_endo__FFPE_MSH2", "clin_au_endo__FFPE_MSH6", "clin_au_endo__FFPE_PMS2",
+        "clin_au_endo__FFPE_PD1", "clin_au_endo__FFPE_PDL1 POLAND RESULTS",
+        "clin_au_endo__FFPE_CD8",
+        "clin_au_endo__Gene amplification", "clin_au_endo__Amplified genes",
+        "clin_au_endo__ITH: intratumor heterogeneity",
+        "clin_au_endo__BLOOD_BASAL_CTDNA", "clin_au_endo__BLOOD_BASAL_CTDNA_MAF",
+        "clin_au_endo__BLOOD_BASAL_CFDNA_CONCENTRATION",
+        "clin_au_endo__BLOOD_BASAL_CFDNA_CLASSIFICATION",
+    ]
     keep = (["snp_code", "case_id", "sample_id", "sheet", "tissue", "tumour_normal",
               "histology", "pd_status"]
             + canon_cols + derived_cols
@@ -542,59 +593,97 @@ MIN_EVENTS_FOR_LOGISTIC = 5   # minimum events in smaller group for adjusted mod
 
 CLINICAL_VARS_BREAST: Dict[str, Dict] = {
     # ── Continuous (Mann-Whitney U) ───────────────────────────────────────
+    "canon__age":               {"type": "continuous", "label": "Age at diagnosis"},
+    "BREAST_GRADE_NUMERIC":     {"type": "continuous", "label": "Tumour grade",
+                                  "note": "Ordinal 1/2/3"},
     "BREAST_KI67_NUMERIC":      {"type": "continuous", "label": "KI67",
-                                  "note": "Proliferation index (coerced to fraction)"},
+                                  "note": "Proliferation index (fraction)"},
     "canon__her2_copies":       {"type": "continuous", "label": "HER2 copies (FISH)",
                                   "note": "Continuous copy number"},
-    "clin_dcs__GRADO":          {"type": "continuous", "label": "Tumour grade",
-                                  "note": "Ordinal 1/2/3"},
     "BREAST_OS_MONTHS_DERIVED": {"type": "continuous", "label": "Overall survival (months)",
                                   "note": "Derived from fecha_dx + ultima_fecha"},
-    "canon__age":               {"type": "continuous", "label": "Age at diagnosis"},
+    "BREAST_P53_NUMERIC":       {"type": "continuous", "label": "p53 expression",
+                                  "note": "Numeric IHC value"},
+    "BREAST_BMI_NUMERIC":       {"type": "continuous", "label": "BMI",
+                                  "note": "Body mass index"},
+    "BREAST_MENARCHE_NUMERIC":  {"type": "continuous", "label": "Age at menarche"},
+    "BREAST_MENOPAUSE_NUMERIC": {"type": "continuous", "label": "Age at menopause"},
     # ── Binary (Fisher exact + age-adjusted logistic) ─────────────────────
     "BREAST_ER_BIN":            {"type": "binary", "label": "ER positive",
-                                  "note": "POSITIVO=1 vs NEGATIVO=0"},
+                                  "note": "Positive=1 vs Negative=0"},
     "BREAST_PR_BIN":            {"type": "binary", "label": "PR positive",
-                                  "note": "POSITIVO=1 vs NEGATIVO=0"},
+                                  "note": "Positive=1 vs Negative=0"},
     "BREAST_RECURRENCE_DERIVED":{"type": "binary", "label": "Recurrence / progression",
                                   "note": "Any recurrence=1 vs NO=0"},
     "BREAST_METASTASIS_DERIVED":{"type": "binary", "label": "Distant metastasis",
                                   "note": "SI=1 vs NO/NO-LOCAL=0"},
+    "BREAST_LOCAL_MET_BIN":     {"type": "binary", "label": "Local metastasis",
+                                  "note": "NO-LOCAL=1 vs NO/SI=0"},
     "BREAST_EXITUS_DERIVED":    {"type": "binary", "label": "Exitus",
                                   "note": "SI=1 vs NO=0"},
     # ── Nominal (chi-square) ─────────────────────────────────────────────
     "BREAST_HER2_SUBTYPE":      {"type": "nominal", "label": "HER2 subtype",
                                   "note": "HER2+ / TN / Other"},
+    "BREAST_DX_TYPE":           {"type": "nominal", "label": "Histological diagnosis type",
+                                  "note": "CDI / CDIS / other"},
 }
 
 CLINICAL_VARS_ENDO: Dict[str, Dict] = {
     # ── Continuous (Mann-Whitney U) ───────────────────────────────────────
-    "ENDO_FIGO_NUMERIC":        {"type": "continuous", "label": "FIGO stage",
-                                  "note": "Ordinal: IA=1, IB=1.5, II=2, IIIA=3.1 … IVB=4.2"},
+    "canon__age":               {"type": "continuous", "label": "Age at surgery"},
+    "ENDO_FIGO_NUMERIC":        {"type": "continuous", "label": "FIGO stage (ordinal)",
+                                  "note": "IA=1, IB=1.5, II=2, IIIA=3.1 … IVB=4.2"},
     "ENDO_GRADE_NUMERIC":       {"type": "continuous", "label": "Tumour grade",
                                   "note": "G1=1, G2=2, G3=3"},
-    "ENDO_RISK_ORDINAL":        {"type": "continuous", "label": "Risk of recurrence",
+    "ENDO_RISK_ORDINAL":        {"type": "continuous", "label": "Risk of recurrence (ordinal)",
                                   "note": "LOW=1, INT=2, INT-HIGH=3, HIGH=4"},
     "canon__os_months":         {"type": "continuous", "label": "Overall survival (months)"},
     "canon__pfs_months":        {"type": "continuous", "label": "Progression-free survival (months)"},
-    "canon__age":               {"type": "continuous", "label": "Age at surgery"},
+    "ENDO_KI67_NUMERIC":        {"type": "continuous", "label": "KI67",
+                                  "note": "Proliferation index (fraction)"},
+    "ENDO_PDL1_NUMERIC":        {"type": "continuous", "label": "PD-L1 expression (%)",
+                                  "note": "FFPE IHC numeric value"},
+    "ENDO_CD8_NUMERIC":         {"type": "continuous", "label": "CD8+ TILs (%)",
+                                  "note": "FFPE IHC numeric value"},
+    "ENDO_CTDNA_MAF_NUMERIC":   {"type": "continuous", "label": "Basal ctDNA MAF",
+                                  "note": "Mutant allele fraction (%)"},
+    "ENDO_CFDN_CONC_NUMERIC":   {"type": "continuous", "label": "Basal cfDNA concentration",
+                                  "note": "ng/mL"},
     # ── Binary (Fisher exact + age-adjusted logistic) ─────────────────────
     "ENDO_LVSI_BIN":            {"type": "binary", "label": "LVSI",
                                   "note": "YES=1 vs NO=0"},
     "ENDO_MYOINV_BIN":          {"type": "binary", "label": "Myometrial invasion ≥50%",
                                   "note": ">50%=1 vs <50%=0"},
     "ENDO_MSI_BIN":             {"type": "binary", "label": "MSI-H",
-                                  "note": "UNSTABLE=1 vs Stable=0"},
+                                  "note": "Unstable=1 vs Stable=0"},
     "ENDO_NEEC_BIN":            {"type": "binary", "label": "Non-endometrioid histology",
                                   "note": "NEEC=1 vs EEC=0"},
     "ENDO_PD_BIN":              {"type": "binary", "label": "Disease progression",
                                   "note": "PD=1 vs NO PD=0"},
-    "ENDO_EXITUS_BIN":          {"type": "binary", "label": "Exitus",
+    "ENDO_EXITUS_BIN":          {"type": "binary", "label": "Exitus (all cause)",
+                                  "note": "YES=1 vs NO=0"},
+    "ENDO_EXITUS_DISEASE_BIN":  {"type": "binary", "label": "Exitus (disease-specific)",
                                   "note": "YES=1 vs NO=0"},
     "ENDO_ER_BIN":              {"type": "binary", "label": "ER positive",
                                   "note": "Positive=1 vs Negative=0"},
     "ENDO_PR_BIN":              {"type": "binary", "label": "PR positive",
                                   "note": "Positive=1 vs Negative=0"},
+    "ENDO_TP53_ABN_BIN":        {"type": "binary", "label": "TP53 IHC abnormal",
+                                  "note": "HIGH/POSITIVE/LOST=1 vs WT=0"},
+    "ENDO_GENE_AMP_BIN":        {"type": "binary", "label": "Gene amplification",
+                                  "note": "YES=1 vs NO=0"},
+    "ENDO_ITH_BIN":             {"type": "binary", "label": "Intratumoural heterogeneity",
+                                  "note": "YES=1 vs NO=0"},
+    "ENDO_CTDNA_BIN":           {"type": "binary", "label": "Basal ctDNA detected",
+                                  "note": "POSITIVE=1 vs NEGATIVE=0"},
+    "ENDO_PTEN_BIN":            {"type": "binary", "label": "PTEN loss/reduced",
+                                  "note": "LOST/REDUCED=1 vs CONSERVED=0"},
+    "ENDO_MLH1_BIN":            {"type": "binary", "label": "MLH1 loss/reduced",
+                                  "note": "LOST/REDUCED=1 vs CONSERVED=0"},
+    "ENDO_N_STAGE_BIN":         {"type": "binary", "label": "Lymph node involvement",
+                                  "note": "N1/N2=1 vs N0=0"},
+    "ENDO_M_STAGE_BIN":         {"type": "binary", "label": "Distant metastasis (M stage)",
+                                  "note": "M1=1 vs M0=0"},
     # ── Nominal (chi-square) ─────────────────────────────────────────────
     "canon__molecular_class":   {"type": "nominal", "label": "Molecular classification",
                                   "note": "POLE / MMRd / NSMP / P53"},
@@ -959,34 +1048,111 @@ def survival_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ── VISUALISATION ─────────────────────────────────────────────────────────────
+# Shared style
+_PALETTE   = {"carrier": "#D32F2F", "non_carrier": "#1976D2"}
+_IMPACT_C  = {"HIGH": "#b71c1c", "MODERATE": "#e65100", "LOW": "#2e7d32", "MODIFIER": "#78909c"}
+_COHORT_C  = {"Breast": "#AD1457", "Endometrial": "#00695C"}
+
+def _style_ax(ax, grid=True):
+    """Apply consistent clean style to an axis."""
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    if grid:
+        ax.yaxis.grid(True, linestyle=":", color="#cccccc", alpha=0.7)
+        ax.set_axisbelow(True)
+
+def _sig_label(p):
+    """Return asterisk string for a p-value."""
+    if pd.isna(p):   return ""
+    if p < 0.001:    return "***"
+    if p < 0.01:     return "**"
+    if p < 0.05:     return "*"
+    return "ns"
+
+
+# ── 1. VOLCANO (tumour vs healthy) ───────────────────────────────────────────
 
 def _draw_volcano(tvh, p_col, sig_col, thresh, title_suffix, out_path):
-    groups = tvh["Analysis_Group"].unique()
-    fig, axes = plt.subplots(1, len(groups), figsize=(7*len(groups), 6), squeeze=False)
+    groups = sorted(tvh["Analysis_Group"].unique())
+    ncols  = len(groups)
+    fig, axes = plt.subplots(1, ncols, figsize=(7.5 * ncols, 6.5), squeeze=False)
     axes = axes[0]
-    impact_colours = {"HIGH": "#d32f2f", "MODERATE": "#f57c00",
-                      "LOW": "#388e3c", "MODIFIER": "#90a4ae"}
+
     for ax, grp in zip(axes, groups):
         sub = tvh[tvh["Analysis_Group"] == grp].copy()
         sub["-log10p"] = -np.log10(pd.to_numeric(sub[p_col], errors="coerce").clip(lower=1e-10))
-        sub["log2OR"]  = np.log2(sub["Odds_Ratio"].replace({0: 0.001, np.inf: 1000}).clip(0.001, 1000))
-        for imp, col in impact_colours.items():
+        sub["log2OR"]  = np.log2(
+            sub["Odds_Ratio"].replace({0: 0.001, np.inf: 1000}).clip(0.001, 1000)
+        )
+        sig_line = -np.log10(thresh)
+
+        # Background shading: enriched (right) vs depleted (left) in tumour
+        ax.axvspan( 0,  ax.get_xlim()[1] if ax.get_xlim()[1] > 0 else 10,
+                   alpha=0.04, color="#D32F2F")
+        ax.axvspan(ax.get_xlim()[0] if ax.get_xlim()[0] < 0 else -10, 0,
+                   alpha=0.04, color="#1976D2")
+
+        # Points — coloured by VEP impact, sized by -log10p
+        for imp, col in _IMPACT_C.items():
             m = sub["IMPACT"] == imp
+            if not m.any(): continue
+            sizes = np.clip(sub.loc[m, "-log10p"] * 18, 30, 220)
             ax.scatter(sub.loc[m, "log2OR"], sub.loc[m, "-log10p"],
-                       c=col, label=imp, alpha=0.8, s=70, edgecolors="k", linewidths=0.4)
-        ax.axhline(-np.log10(thresh), color="red", linestyle="--", linewidth=1.2, alpha=0.8)
-        ax.axvline(0, color="grey", linestyle="--", linewidth=1, alpha=0.5)
-        for _, row in sub[sub[sig_col]].nsmallest(8, p_col).iterrows():
-            ax.annotate(row["Variant_ID"], xy=(row["log2OR"], row["-log10p"]),
-                        xytext=(8, 4), textcoords="offset points", fontsize=7, fontweight="bold",
-                        bbox=dict(boxstyle="round,pad=0.2", fc="yellow", alpha=0.75),
-                        arrowprops=dict(arrowstyle="->", lw=0.8))
-        ax.set_title(grp, fontsize=13, fontweight="bold")
-        ax.set_xlabel("log₂(OR)"); ax.set_ylabel(f"-log₁₀(p)")
-        ax.grid(True, linestyle=":", alpha=0.35)
-    handles = [mpatches.Patch(color=c, label=i) for i, c in impact_colours.items()]
-    fig.legend(handles=handles, title="VEP Impact", bbox_to_anchor=(1.01, 0.5), loc="center left")
-    fig.suptitle(f"Tumour vs Healthy — {title_suffix}", fontsize=14, fontweight="bold")
+                       c=col, s=sizes, alpha=0.82,
+                       edgecolors="white", linewidths=0.5,
+                       zorder=3, label=imp)
+
+        # Significance threshold line
+        ax.axhline(sig_line, color="#c62828", linestyle="--", linewidth=1.2,
+                   alpha=0.85, zorder=2,
+                   label=f"p = {thresh}" if thresh == 0.05 else f"FDR = {thresh}")
+        ax.axvline(0, color="#555555", linestyle="--", linewidth=0.9, alpha=0.5, zorder=2)
+
+        # Annotate top hits — smart repulsion to avoid overlap
+        hits = sub[sub[sig_col]].nsmallest(10, p_col)
+        for _, row in hits.iterrows():
+            ax.annotate(
+                row.get("Gene", row["Variant_ID"]) or row["Variant_ID"],
+                xy=(row["log2OR"], row["-log10p"]),
+                xytext=(14, 6), textcoords="offset points",
+                fontsize=7.5, fontweight="bold",
+                color="#212121",
+                bbox=dict(boxstyle="round,pad=0.25", fc="white",
+                          ec="#bdbdbd", alpha=0.9, linewidth=0.8),
+                arrowprops=dict(arrowstyle="-", color="#888888",
+                                lw=0.8, connectionstyle="arc3,rad=0.1"),
+            )
+
+        # Axis labels and styling
+        ax.set_xlabel("log₂(Odds Ratio)  [tumour enriched →]", fontsize=10)
+        ax.set_ylabel("-log₁₀(p-value)", fontsize=10)
+        ax.set_title(grp, fontsize=12, fontweight="bold", pad=8)
+        _style_ax(ax, grid=False)
+        ax.xaxis.grid(True, linestyle=":", color="#cccccc", alpha=0.5)
+        ax.yaxis.grid(True, linestyle=":", color="#cccccc", alpha=0.5)
+        ax.set_axisbelow(True)
+
+        # Marginal rug showing OR distribution
+        ax.plot(sub["log2OR"], np.full(len(sub), ax.get_ylim()[0]),
+                "|", color="#aaaaaa", alpha=0.5, markersize=4, zorder=1)
+
+        # N label
+        n_sig = int(sub[sig_col].sum())
+        ax.text(0.98, 0.02, f"n variants = {len(sub)}\nn sig. = {n_sig}",
+                transform=ax.transAxes, ha="right", va="bottom",
+                fontsize=8, color="#555555",
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8, ec="none"))
+
+    # Shared legend
+    impact_handles = [mpatches.Patch(facecolor=c, label=i,
+                                     edgecolor="white", linewidth=0.5)
+                      for i, c in _IMPACT_C.items()]
+    fig.legend(handles=impact_handles, title="VEP Impact",
+               bbox_to_anchor=(1.01, 0.5), loc="center left",
+               frameon=True, framealpha=0.9, edgecolor="#cccccc")
+
+    fig.suptitle(f"GSDMB SNPs — Tumour vs Healthy  ({title_suffix})",
+                 fontsize=13, fontweight="bold", y=1.01)
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
@@ -995,57 +1161,729 @@ def _draw_volcano(tvh, p_col, sig_col, thresh, title_suffix, out_path):
 
 def make_volcano_plots(tvh, out_dir):
     if tvh.empty: return
-    _draw_volcano(tvh, "P_Value",     "Nominal_Sig", 0.05,          "Raw p-value",     out_dir/"17_SNP_Volcano_raw_p.png")
-    _draw_volcano(tvh, "FDR_P_Value", "FDR_Sig",     FDR_THRESHOLD, "FDR-corrected",   out_dir/"17_SNP_Volcano_FDR.png")
+    _draw_volcano(tvh, "P_Value",     "Nominal_Sig", 0.05,
+                  "unadjusted p",  out_dir / "17_SNP_Volcano_raw_p.png")
+    _draw_volcano(tvh, "FDR_P_Value", "FDR_Sig",     FDR_THRESHOLD,
+                  "FDR-corrected", out_dir / "17_SNP_Volcano_FDR.png")
 
+
+# ── 2. HEATMAP (SNP × clinical variable) ─────────────────────────────────────
 
 def _draw_heatmap(clin_res, p_col, title_suffix, out_path, filter_thresh=0.20):
-    pivot = clin_res.pivot_table(index="Variant_ID", columns="Clin_Label",
-                                  values=p_col, aggfunc="min").dropna(how="all")
+    pivot = (clin_res
+             .pivot_table(index="Variant_ID", columns="Clin_Label",
+                          values=p_col, aggfunc="min")
+             .dropna(how="all"))
     pivot = pivot[(pivot < filter_thresh).any(axis=1)]
     if pivot.empty:
         print(f"  Heatmap ({title_suffix}): no hits below {filter_thresh} — skipped")
         return
+
+    # Sort rows by min p-value; columns by number of hits
+    pivot = pivot.loc[pivot.min(axis=1).sort_values().index]
+    pivot = pivot[pivot.notna().sum().sort_values(ascending=False).index]
+
     log_piv = -np.log10(pivot.fillna(1).clip(lower=1e-10))
-    fig, ax = plt.subplots(figsize=(max(7, len(pivot.columns)*1.3), max(5, len(pivot)*0.45)))
-    sns.heatmap(log_piv, ax=ax, cmap="YlOrRd", linewidths=0.5, linecolor="lightgrey",
-                annot=True, fmt=".2f", cbar_kws={"label": f"-log₁₀(p)"})
-    sig_t = -np.log10(0.05 if "Raw" in title_suffix else FDR_THRESHOLD)
+    sig_t   = -np.log10(0.05 if "Raw" in title_suffix else FDR_THRESHOLD)
+
+    cell_h  = 0.52
+    cell_w  = 1.4
+    fig_h   = max(5, len(pivot) * cell_h + 2.5)
+    fig_w   = max(8, len(pivot.columns) * cell_w + 3)
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    # Draw heatmap
+    sns.heatmap(log_piv, ax=ax,
+                cmap="RdPu", vmin=0, vmax=max(4, log_piv.max().max()),
+                linewidths=0.4, linecolor="#e0e0e0",
+                annot=False,
+                cbar_kws={"label": "-log₁₀(p-value)", "shrink": 0.6})
+
+    # Manual cell annotations: p-value + significance stars
     for i, var in enumerate(log_piv.index):
         for j, clin in enumerate(log_piv.columns):
-            if log_piv.loc[var, clin] >= sig_t:
-                ax.text(j+0.5, i+0.15, "★", ha="center", va="top",
-                        fontsize=9, color="white", fontweight="bold")
-    ax.set_title(f"SNP × Clinical — {title_suffix}", fontsize=12, fontweight="bold")
-    ax.set_xlabel("Clinical Variable"); ax.set_ylabel("Variant")
-    plt.xticks(rotation=40, ha="right", fontsize=9); plt.yticks(fontsize=8)
-    plt.tight_layout(); plt.savefig(out_path, dpi=300, bbox_inches="tight"); plt.close()
+            raw_p = pivot.loc[var, clin]
+            lp    = log_piv.loc[var, clin]
+            if pd.isna(raw_p): continue
+            star  = _sig_label(raw_p)
+            txt_c = "white" if lp >= sig_t else "#333333"
+            ax.text(j + 0.5, i + 0.38,
+                    f"{raw_p:.3f}" if raw_p >= 0.001 else f"{raw_p:.1e}",
+                    ha="center", va="center", fontsize=6.5, color=txt_c)
+            if star not in ("", "ns"):
+                ax.text(j + 0.5, i + 0.72, star,
+                        ha="center", va="center",
+                        fontsize=8, color="white" if lp >= sig_t else "#c62828",
+                        fontweight="bold")
+
+    # Add significance threshold annotation to colourbar
+    cbar = ax.collections[0].colorbar
+    cbar.ax.axhline(sig_t, color="#c62828", linewidth=1.5, linestyle="--")
+    cbar.ax.text(1.05, sig_t / cbar.ax.get_ylim()[1],
+                 f" p<{'0.05' if 'Raw' in title_suffix else str(FDR_THRESHOLD)}",
+                 transform=cbar.ax.transAxes, va="center",
+                 fontsize=7, color="#c62828")
+
+    ax.set_title(f"GSDMB SNPs × Clinical Variables — {title_suffix}",
+                 fontsize=11, fontweight="bold", pad=10)
+    ax.set_xlabel("Clinical variable", fontsize=9, labelpad=8)
+    ax.set_ylabel("Variant", fontsize=9, labelpad=8)
+    plt.xticks(rotation=40, ha="right", fontsize=8)
+    plt.yticks(fontsize=7.5)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close()
     print(f"  Saved: {out_path}")
 
 
 def make_heatmaps(breast_clin, endo_clin, out_dir):
     for clin_res, label in [(breast_clin, "Breast"), (endo_clin, "Endometrial")]:
         if clin_res.empty: continue
-        _draw_heatmap(clin_res, "P_Unadj",   f"Raw p-value (unadjusted) — {label}",
-                      out_dir/f"17_SNP_Heatmap_{label}_raw_p.png",  filter_thresh=0.10)
-        _draw_heatmap(clin_res, "FDR_Unadj", f"FDR-corrected (unadjusted) — {label}",
-                      out_dir/f"17_SNP_Heatmap_{label}_FDR.png",    filter_thresh=0.30)
-        # Age-adjusted heatmap (only rows where adjusted test was run)
+        _draw_heatmap(clin_res, "P_Unadj",
+                      f"Unadjusted p — {label}",
+                      out_dir / f"17_SNP_Heatmap_{label}_raw_p.png",
+                      filter_thresh=0.10)
+        _draw_heatmap(clin_res, "FDR_Unadj",
+                      f"FDR-corrected — {label}",
+                      out_dir / f"17_SNP_Heatmap_{label}_FDR.png",
+                      filter_thresh=0.30)
         adj_res = clin_res[clin_res["P_Adj"].notna()].copy()
         if not adj_res.empty:
-            _draw_heatmap(adj_res, "P_Adj",   f"Raw p-value (age-adjusted) — {label}",
-                          out_dir/f"17_SNP_Heatmap_{label}_adj_raw_p.png", filter_thresh=0.10)
-            _draw_heatmap(adj_res, "FDR_Adj", f"FDR-corrected (age-adjusted) — {label}",
-                          out_dir/f"17_SNP_Heatmap_{label}_adj_FDR.png",   filter_thresh=0.30)
+            _draw_heatmap(adj_res, "P_Adj",
+                          f"Age-adjusted p — {label}",
+                          out_dir / f"17_SNP_Heatmap_{label}_adj_raw_p.png",
+                          filter_thresh=0.10)
+            _draw_heatmap(adj_res, "FDR_Adj",
+                          f"Age-adjusted FDR — {label}",
+                          out_dir / f"17_SNP_Heatmap_{label}_adj_FDR.png",
+                          filter_thresh=0.30)
 
+
+# ── 3. FOREST PLOT (OR with 95% CI) ──────────────────────────────────────────
+
+def make_forest_plots(breast_clin, endo_clin, out_dir):
+    """
+    One forest plot per cohort showing OR ± 95% CI for all binary/nominal
+    associations that reached nominal significance in the age-adjusted model.
+    """
+    for clin_res, label, colour in [
+        (breast_clin,  "Breast",       _COHORT_C["Breast"]),
+        (endo_clin,    "Endometrial",  _COHORT_C["Endometrial"]),
+    ]:
+        if clin_res.empty: continue
+
+        # Keep only binary tests with a valid adjusted OR and CI
+        sub = clin_res[
+            (clin_res["Clin_Type"] == "binary") &
+            clin_res["OR_Adj"].notna() &
+            clin_res["OR_Adj_CI95"].notna()
+        ].copy()
+        if sub.empty: continue
+
+        # Parse CI strings "[lo, hi]"
+        def _parse_ci(s):
+            try:
+                lo, hi = re.findall(r"[-0-9.eE+]+", str(s))[:2]
+                return float(lo), float(hi)
+            except Exception:
+                return np.nan, np.nan
+        sub[["CI_lo", "CI_hi"]] = sub["OR_Adj_CI95"].apply(
+            lambda s: pd.Series(_parse_ci(s))
+        )
+        sub = sub.dropna(subset=["CI_lo", "CI_hi"])
+        if sub.empty: continue
+
+        # Sort by p-value; label = "Gene: clinical var"
+        sub = sub.sort_values("P_Adj")
+        sub["label"] = sub.apply(
+            lambda r: f"{r['Gene'] or r['Variant_ID']} — {r['Clin_Label']}", axis=1
+        )
+
+        n_rows = len(sub)
+        fig_h  = max(5, n_rows * 0.42 + 2)
+        fig, ax = plt.subplots(figsize=(9, fig_h))
+
+        ypos = np.arange(n_rows)[::-1]   # top = most significant
+
+        # Colour by significance
+        sig_mask = sub["P_Adj"] < 0.05
+        point_c  = [colour if s else "#999999" for s in sig_mask]
+
+        # Error bars
+        xerr_lo = (sub["OR_Adj"] - sub["CI_lo"]).values
+        xerr_hi = (sub["CI_hi"] - sub["OR_Adj"]).values
+        ax.errorbar(sub["OR_Adj"].values, ypos,
+                    xerr=[np.clip(xerr_lo, 0, None), np.clip(xerr_hi, 0, None)],
+                    fmt="none", ecolor="#aaaaaa", elinewidth=1.2, capsize=3, zorder=2)
+
+        # Points
+        for i, (_, row) in enumerate(sub.iterrows()):
+            ax.scatter(row["OR_Adj"], ypos[i],
+                       s=90, color=point_c[i],
+                       edgecolors="white", linewidths=0.6, zorder=3)
+
+        # p-value and OR labels on the right
+        x_max = ax.get_xlim()[1]
+        for i, (_, row) in enumerate(sub.iterrows()):
+            pstr = f"p={row['P_Adj']:.3f}{_sig_label(row['P_Adj'])}"
+            ax.text(x_max * 1.01, ypos[i], pstr,
+                    va="center", ha="left", fontsize=7, color="#444444")
+
+        ax.axvline(1, color="#555555", linestyle="--", linewidth=1, alpha=0.7)
+        ax.set_yticks(ypos)
+        ax.set_yticklabels(sub["label"].values, fontsize=8)
+        ax.set_xlabel("Odds Ratio (age-adjusted, 95% CI)", fontsize=10)
+        ax.set_title(f"{label} — Age-adjusted OR for GSDMB carrier status",
+                     fontsize=11, fontweight="bold", pad=10)
+        _style_ax(ax, grid=False)
+        ax.xaxis.grid(True, linestyle=":", color="#cccccc", alpha=0.6)
+        ax.set_axisbelow(True)
+
+        # Shade OR > 1 region
+        xlims = ax.get_xlim()
+        ax.axvspan(1, xlims[1], alpha=0.04, color="#c62828")
+        ax.axvspan(xlims[0], 1, alpha=0.04, color="#1976D2")
+        ax.text(0.97, 0.01, "← protective", transform=ax.transAxes,
+                ha="right", va="bottom", fontsize=7.5, color="#1976D2", style="italic")
+        ax.text(0.99, 0.01, "risk →",       transform=ax.transAxes,
+                ha="right", va="bottom", fontsize=7.5, color="#c62828", style="italic")
+
+        plt.tight_layout()
+        out_path = out_dir / f"17_Forest_{label}.png"
+        plt.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved: {out_path}")
+
+
+# ── 4. BOXPLOT / VIOLIN STRIP for top hits ────────────────────────────────────
+
+def make_distribution_plots(breast_clin, endo_clin, merged, out_dir):
+    """
+    For the top N nominally significant continuous associations, draw a
+    split violin + strip plot comparing carriers vs non-carriers.
+    """
+    TOP_N = 12
+
+    for clin_res, label, coh_sheet, colour in [
+        (breast_clin, "Breast",      "MT-T_N",  _COHORT_C["Breast"]),
+        (endo_clin,   "Endometrial", "AT=AUs",  _COHORT_C["Endometrial"]),
+    ]:
+        if clin_res.empty: continue
+
+        cont = (clin_res[
+            (clin_res["Clin_Type"] == "continuous") &
+            clin_res["P_Unadj"].notna()
+        ].sort_values("P_Unadj")
+         .drop_duplicates("Clinical_Var")
+         .head(TOP_N))
+        if cont.empty: continue
+
+        n_plots = len(cont)
+        ncols   = min(3, n_plots)
+        nrows   = int(np.ceil(n_plots / ncols))
+        fig, axes = plt.subplots(nrows, ncols,
+                                 figsize=(5.5 * ncols, 4.5 * nrows),
+                                 squeeze=False)
+        axes_flat = axes.flatten()
+
+        cohort_df = merged[
+            (merged["sheet"] == coh_sheet) & (~merged["is_replicate"])
+        ].drop_duplicates("Sample")
+
+        for idx, (_, row) in enumerate(cont.iterrows()):
+            ax      = axes_flat[idx]
+            col     = row["Clinical_Var"]
+            var_id  = row["Variant_ID"]
+            p_u     = row["P_Unadj"]
+            p_a     = row.get("P_Adj", np.nan)
+
+            # Carrier flag for this specific variant
+            var_samples = set(
+                merged[(merged["Variant_ID"] == var_id) &
+                        (merged["sheet"] == coh_sheet)]["Sample"].unique()
+            )
+            cohort_df["_carrier"] = cohort_df.index.map(
+                lambda s: "Carrier" if s in var_samples else "Non-carrier"
+            ) if cohort_df.index.name == "Sample" else cohort_df["Sample"].map(
+                lambda s: "Carrier" if s in var_samples else "Non-carrier"
+            )
+
+            plot_df = cohort_df[[col, "_carrier"]].dropna()
+            if plot_df.empty or plot_df["_carrier"].nunique() < 2:
+                ax.set_visible(False); continue
+
+            # Violin
+            parts = ax.violinplot(
+                [plot_df.loc[plot_df["_carrier"] == g, col].values
+                 for g in ["Carrier", "Non-carrier"]],
+                positions=[0, 1], widths=0.6, showmedians=False,
+            )
+            for pc, c in zip(parts["bodies"],
+                             [_PALETTE["carrier"], _PALETTE["non_carrier"]]):
+                pc.set_facecolor(c); pc.set_alpha(0.35); pc.set_edgecolor("none")
+            for comp in ("cbars", "cmins", "cmaxes"):
+                if comp in parts:
+                    parts[comp].set_color("#aaaaaa"); parts[comp].set_linewidth(0.8)
+
+            # Strip jitter
+            rng = np.random.default_rng(42)
+            for gi, (grp, c) in enumerate([("Carrier", _PALETTE["carrier"]),
+                                            ("Non-carrier", _PALETTE["non_carrier"])]):
+                vals = plot_df.loc[plot_df["_carrier"] == grp, col].values
+                jit  = rng.uniform(-0.08, 0.08, len(vals))
+                ax.scatter(np.full(len(vals), gi) + jit, vals,
+                           color=c, alpha=0.65, s=28,
+                           edgecolors="white", linewidths=0.3, zorder=3)
+
+            # Median line
+            for gi, grp in enumerate(["Carrier", "Non-carrier"]):
+                med = plot_df.loc[plot_df["_carrier"] == grp, col].median()
+                ax.hlines(med, gi - 0.18, gi + 0.18,
+                          colors="#222222", linewidths=2, zorder=4)
+
+            # Significance bracket
+            y_top = plot_df[col].max()
+            y_rng = plot_df[col].max() - plot_df[col].min()
+            br_y  = y_top + y_rng * 0.08
+            ax.annotate("", xy=(1, br_y), xytext=(0, br_y),
+                        arrowprops=dict(arrowstyle="-", color="#555555", lw=1.2))
+            p_disp = p_a if pd.notna(p_a) else p_u
+            lbl    = _sig_label(p_disp)
+            suffix = "adj" if pd.notna(p_a) else "unadj"
+            ax.text(0.5, br_y + y_rng * 0.03,
+                    f"{lbl}  p={p_disp:.3f} ({suffix})",
+                    ha="center", va="bottom", fontsize=7.5, color="#333333")
+
+            # Sample sizes
+            for gi, grp in enumerate(["Carrier", "Non-carrier"]):
+                n = (plot_df["_carrier"] == grp).sum()
+                ax.text(gi, plot_df[col].min() - y_rng * 0.1,
+                        f"n={n}", ha="center", va="top", fontsize=7.5, color="#555555")
+
+            ax.set_xticks([0, 1])
+            ax.set_xticklabels(["Carrier", "Non-carrier"], fontsize=9)
+            ax.set_ylabel(row["Clin_Label"], fontsize=9)
+            ax.set_title(f"{row.get('Gene', '') or var_id}", fontsize=9, fontweight="bold")
+            _style_ax(ax)
+
+        # Hide unused subplots
+        for ax in axes_flat[n_plots:]:
+            ax.set_visible(False)
+
+        fig.suptitle(f"{label} — Carrier vs Non-carrier: top continuous associations",
+                     fontsize=12, fontweight="bold", y=1.01)
+        plt.tight_layout()
+        out_path = out_dir / f"17_Distribution_{label}.png"
+        plt.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved: {out_path}")
+
+
+# ── 5. STACKED BAR — binary outcomes ─────────────────────────────────────────
+
+def make_binary_bar_plots(breast_clin, endo_clin, merged, out_dir):
+    """
+    For the top binary associations, show a stacked proportion bar
+    (% positive in carrier vs non-carrier) per variant.
+    """
+    TOP_N = 12
+
+    for clin_res, label, coh_sheet, colour in [
+        (breast_clin, "Breast",      "MT-T_N",  _COHORT_C["Breast"]),
+        (endo_clin,   "Endometrial", "AT=AUs",  _COHORT_C["Endometrial"]),
+    ]:
+        if clin_res.empty: continue
+
+        bin_hits = (clin_res[
+            (clin_res["Clin_Type"] == "binary") &
+            clin_res["P_Unadj"].notna()
+        ].sort_values("P_Unadj")
+         .drop_duplicates("Clinical_Var")
+         .head(TOP_N))
+        if bin_hits.empty: continue
+
+        n_plots = len(bin_hits)
+        ncols   = min(3, n_plots)
+        nrows   = int(np.ceil(n_plots / ncols))
+        fig, axes = plt.subplots(nrows, ncols,
+                                 figsize=(4.5 * ncols, 4.0 * nrows),
+                                 squeeze=False)
+        axes_flat = axes.flatten()
+
+        cohort_df = merged[
+            (merged["sheet"] == coh_sheet) & (~merged["is_replicate"])
+        ].drop_duplicates("Sample").copy()
+
+        for idx, (_, row) in enumerate(bin_hits.iterrows()):
+            ax     = axes_flat[idx]
+            col    = row["Clinical_Var"]
+            var_id = row["Variant_ID"]
+            p_u    = row["P_Unadj"]
+            p_a    = row.get("P_Adj", np.nan)
+            or_v   = row.get("OR_Adj", row.get("OR_Unadj", np.nan))
+
+            var_samples = set(
+                merged[(merged["Variant_ID"] == var_id) &
+                        (merged["sheet"] == coh_sheet)]["Sample"].unique()
+            )
+            cohort_df["_carrier"] = cohort_df["Sample"].map(
+                lambda s: "Carrier" if s in var_samples else "Non-carrier"
+            )
+
+            plot_df = cohort_df[[col, "_carrier"]].dropna()
+            if plot_df.empty or plot_df["_carrier"].nunique() < 2:
+                ax.set_visible(False); continue
+
+            groups = ["Carrier", "Non-carrier"]
+            pos_rates = []
+            ns        = []
+            for grp in groups:
+                vals = plot_df.loc[plot_df["_carrier"] == grp, col]
+                pos_rates.append(100 * vals.mean() if len(vals) else 0)
+                ns.append(len(vals))
+
+            xpos = [0, 1]
+            bars = ax.bar(xpos, pos_rates,
+                          color=[_PALETTE["carrier"], _PALETTE["non_carrier"]],
+                          width=0.55, edgecolor="white", linewidth=1.2,
+                          alpha=0.85, zorder=3)
+
+            # Complement bars (light)
+            for xi, (r, c) in enumerate(zip(pos_rates,
+                                            [_PALETTE["carrier"], _PALETTE["non_carrier"]])):
+                ax.bar(xi, 100 - r, bottom=r, color=c,
+                       width=0.55, alpha=0.18, edgecolor="none", zorder=2)
+
+            # Value labels
+            for xi, (r, n) in enumerate(zip(pos_rates, ns)):
+                ax.text(xi, r / 2, f"{r:.0f}%",
+                        ha="center", va="center",
+                        fontsize=9, fontweight="bold", color="white")
+                ax.text(xi, -4, f"n={n}",
+                        ha="center", va="top", fontsize=7.5, color="#555555")
+
+            # OR annotation
+            if pd.notna(or_v):
+                or_str = f"OR = {or_v:.2f}"
+                ci_str = row.get("OR_Adj_CI95", "")
+                ax.text(0.5, 105,
+                        f"{or_str}  {ci_str}",
+                        ha="center", va="bottom",
+                        transform=ax.get_xaxis_transform(),
+                        fontsize=7.5, color="#333333")
+
+            p_disp = p_a if pd.notna(p_a) else p_u
+            suffix = "adj" if pd.notna(p_a) else "unadj"
+            ax.set_title(
+                f"{row.get('Gene', '') or var_id}\n{row['Clin_Label']}  {_sig_label(p_disp)} (p={p_disp:.3f} {suffix})",
+                fontsize=8.5, fontweight="bold"
+            )
+            ax.set_xticks(xpos)
+            ax.set_xticklabels(groups, fontsize=9)
+            ax.set_ylim(-8, 115)
+            ax.set_ylabel("% positive", fontsize=9)
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+            _style_ax(ax)
+
+        for ax in axes_flat[n_plots:]:
+            ax.set_visible(False)
+
+        fig.suptitle(f"{label} — % positive: carriers vs non-carriers",
+                     fontsize=12, fontweight="bold", y=1.01)
+        plt.tight_layout()
+        out_path = out_dir / f"17_BinaryBar_{label}.png"
+        plt.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved: {out_path}")
+
+
+# ── 6. KAPLAN-MEIER (improved) ────────────────────────────────────────────────
 
 def save_km_pdf(km_pages, out_path):
+    """Save pre-built KM figures — replaced by make_km_plots below."""
     if not km_pages: return
     with pdf_backend.PdfPages(out_path) as pdf:
         for fig in km_pages:
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
     print(f"  Saved: {out_path} ({len(km_pages)} KM curves)")
+
+
+def make_km_plots(surv_df, merged, out_dir):
+    """
+    Improved KM plots: at-risk table, shaded CI, clean styling.
+    One page per variant × endpoint combination.
+    """
+    if not _HAS_LIFELINES or surv_df.empty: return
+
+    endpoint_meta = {
+        "OS":  ("canon__os_months",  "ENDO_EXITUS_BIN",  "Overall Survival"),
+        "PFS": ("canon__pfs_months", "ENDO_PD_BIN",      "Progression-free Survival"),
+    }
+
+    endo_df = (merged[
+        (~merged["is_replicate"]) &
+        (merged["sheet"] == "AT=AUs")
+    ].drop_duplicates("Sample")
+     .set_index("Sample"))
+
+    out_pdf = out_dir / "17_KM_Curves_AU_Endo.pdf"
+    with pdf_backend.PdfPages(out_pdf) as pdf:
+        for _, srow in surv_df.iterrows():
+            ep      = srow["Endpoint"]
+            var_id  = srow["Variant_ID"]
+            gene    = srow.get("Gene", "") or var_id
+            t_col, ev_col, ep_label = endpoint_meta[ep]
+
+            if t_col not in endo_df.columns or ev_col not in endo_df.columns:
+                continue
+
+            # Carrier flag
+            var_samples = set(
+                merged[(merged["Variant_ID"] == var_id) &
+                        (merged["sheet"] == "AT=AUs")]["Sample"].unique()
+            )
+            T = endo_df[t_col]
+            E = endo_df[ev_col].astype(float)
+            x = endo_df.index.map(lambda s: "Carrier" if s in var_samples
+                                  else "Non-carrier")
+            valid = pd.concat([T, E, x.rename("group")], axis=1).dropna()
+            valid.columns = ["T", "E", "group"]
+            if valid["group"].nunique() < 2: continue
+
+            # Build figure with at-risk table
+            fig = plt.figure(figsize=(8, 6))
+            gs  = fig.add_gridspec(2, 1, height_ratios=[4, 1], hspace=0.05)
+            ax_km   = fig.add_subplot(gs[0])
+            ax_risk = fig.add_subplot(gs[1], sharex=ax_km)
+
+            kmf = KaplanMeierFitter()
+            time_points = np.linspace(0, valid["T"].max(), 8)
+            risk_table  = {}
+
+            for grp, c in [("Carrier", _PALETTE["carrier"]),
+                            ("Non-carrier", _PALETTE["non_carrier"])]:
+                m = valid["group"] == grp
+                if m.sum() < 2: continue
+                kmf.fit(valid.loc[m, "T"], valid.loc[m, "E"],
+                        label=f"{grp} (n={m.sum()})")
+                kmf.plot_survival_function(
+                    ax=ax_km, ci_show=True,
+                    color=c, ci_alpha=0.12, linewidth=2.2,
+                )
+                # At-risk counts at each time point
+                risk_table[grp] = [
+                    int((valid.loc[m, "T"] >= t).sum()) for t in time_points
+                ]
+
+            # Significance + HR annotation
+            lr_p = srow.get("Logrank_P", np.nan)
+            hr   = srow.get("HR", np.nan)
+            hr_ci= srow.get("HR_CI95", "")
+            info = (f"Log-rank p = {lr_p:.4f}" if pd.notna(lr_p) else "")
+            if pd.notna(hr):
+                info += f"\nHR = {hr:.2f} {hr_ci}"
+            ax_km.text(0.97, 0.97, info,
+                       transform=ax_km.transAxes,
+                       ha="right", va="top", fontsize=8.5,
+                       bbox=dict(boxstyle="round,pad=0.4", fc="white",
+                                 ec="#cccccc", alpha=0.9))
+
+            ax_km.set_ylabel("Survival probability", fontsize=10)
+            ax_km.set_xlabel("")
+            ax_km.set_ylim(-0.03, 1.08)
+            ax_km.set_title(
+                f"{gene} ({var_id})  —  {ep_label}",
+                fontsize=11, fontweight="bold"
+            )
+            _style_ax(ax_km, grid=False)
+            ax_km.yaxis.grid(True, linestyle=":", alpha=0.4)
+            ax_km.axhline(0.5, color="#aaaaaa", linestyle=":", linewidth=1)
+
+            # At-risk table
+            ax_risk.set_xlim(ax_km.get_xlim())
+            ax_risk.set_ylim(-0.5, len(risk_table) - 0.5)
+            ax_risk.set_yticks(range(len(risk_table)))
+            ax_risk.set_yticklabels(list(risk_table.keys()), fontsize=8)
+            for yi, (grp, counts) in enumerate(risk_table.items()):
+                for xi, (tp, cnt) in enumerate(zip(time_points, counts)):
+                    ax_risk.text(tp, yi, str(cnt),
+                                 ha="center", va="center", fontsize=7.5,
+                                 color=(_PALETTE["carrier"] if grp == "Carrier"
+                                        else _PALETTE["non_carrier"]))
+            ax_risk.set_xlabel("Time (months)", fontsize=10)
+            ax_risk.set_ylabel("At risk", fontsize=8, labelpad=4)
+            ax_risk.spines["top"].set_visible(False)
+            ax_risk.spines["right"].set_visible(False)
+            ax_risk.spines["left"].set_visible(False)
+            ax_risk.yaxis.set_tick_params(length=0)
+            ax_risk.xaxis.grid(False)
+            ax_risk.yaxis.grid(False)
+            plt.setp(ax_km.get_xticklabels(), visible=False)
+
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+
+    print(f"  Saved: {out_pdf}")
+
+
+# ── 7. SUMMARY OVERVIEW PANEL ─────────────────────────────────────────────────
+
+def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
+    """
+    A single summary figure with 4 panels:
+      A) SNP frequency in tumour vs healthy (lollipop)
+      B) Number of nominal associations per variant (dot chart)
+      C) -log10 p-value overview across all tests (dot plot)
+      D) Survival HR overview
+    """
+    fig = plt.figure(figsize=(18, 13))
+    gs  = fig.add_gridspec(2, 2, hspace=0.45, wspace=0.4)
+    ax_freq = fig.add_subplot(gs[0, 0])
+    ax_hits = fig.add_subplot(gs[0, 1])
+    ax_dots = fig.add_subplot(gs[1, 0])
+    ax_hr   = fig.add_subplot(gs[1, 1])
+
+    # ── Panel A: SNP frequency in tumour vs healthy ───────────────────────
+    if not tvh.empty:
+        grp_cols = {"Breast_Tumour_vs_Healthy": "#AD1457",
+                    "Endo_Tumour_vs_Healthy":   "#00695C"}
+        for grp, col in grp_cols.items():
+            sub = tvh[tvh["Analysis_Group"] == grp].copy()
+            if sub.empty: continue
+            sub = sub.sort_values("Freq_Tumour_%", ascending=False).head(20)
+            y = np.arange(len(sub))
+            ax_freq.hlines(y, sub["Freq_Healthy_%"].values,
+                           sub["Freq_Tumour_%"].values,
+                           colors=col, linewidth=1.2, alpha=0.6)
+            ax_freq.scatter(sub["Freq_Tumour_%"].values, y,
+                            color=col, s=60, zorder=3,
+                            label=grp.replace("_", " "))
+            ax_freq.scatter(sub["Freq_Healthy_%"].values, y,
+                            color=col, s=40, marker="D",
+                            alpha=0.5, zorder=3)
+        ax_freq.set_yticks([])
+        ax_freq.set_xlabel("Frequency (%)", fontsize=9)
+        ax_freq.set_title("A  SNP frequency: \u25cf tumour  \u25c6 healthy\n(top 20 per cohort)",
+                           fontsize=9, fontweight="bold", loc="left")
+        ax_freq.legend(fontsize=7.5, frameon=False)
+        _style_ax(ax_freq)
+
+    # ── Panel B: Number of nominal hits per variant ───────────────────────
+    all_clin = pd.concat(
+        [x for x in [breast_clin, endo_clin] if not x.empty],
+        ignore_index=True
+    )
+    if not all_clin.empty:
+        hit_counts = (all_clin[all_clin["Nominal_Sig_Unadj"]]
+                      .groupby(["Variant_ID", "Cohort"])
+                      .size().reset_index(name="N_hits"))
+        if not hit_counts.empty:
+            hit_counts = hit_counts.sort_values("N_hits", ascending=True)
+            colours = hit_counts["Cohort"].map(
+                lambda c: _COHORT_C.get(
+                    "Breast" if "Breast" in c else "Endometrial", "#888888"
+                )
+            )
+            ypos = np.arange(len(hit_counts))
+            ax_hits.barh(ypos, hit_counts["N_hits"].values,
+                         color=colours, alpha=0.8, edgecolor="white",
+                         height=0.6)
+            ax_hits.set_yticks(ypos)
+            labels = hit_counts["Variant_ID"] + "\n(" + hit_counts["Cohort"].str.replace("_Tumour", "") + ")"
+            ax_hits.set_yticklabels(labels.values, fontsize=7.5)
+            ax_hits.set_xlabel("Nominal associations (p < 0.05)", fontsize=9)
+            ax_hits.set_title("B  Nominally significant clinical associations per variant",
+                               fontsize=9, fontweight="bold", loc="left")
+            _style_ax(ax_hits)
+            # Cohort legend
+            legend_handles = [
+                mpatches.Patch(color=_COHORT_C["Breast"],       label="Breast"),
+                mpatches.Patch(color=_COHORT_C["Endometrial"],  label="Endometrial"),
+            ]
+            ax_hits.legend(handles=legend_handles, fontsize=7.5,
+                           frameon=False, loc="lower right")
+
+    # ── Panel C: p-value dot overview ─────────────────────────────────────
+    if not all_clin.empty:
+        top = (all_clin.sort_values("P_Unadj")
+                       .drop_duplicates(["Variant_ID", "Clin_Label"])
+                       .head(30))
+        top["_lp"] = -np.log10(pd.to_numeric(top["P_Unadj"],
+                                              errors="coerce").clip(1e-10))
+        top["_cohort_c"] = top["Cohort"].map(
+            lambda c: _COHORT_C.get(
+                "Breast" if "Breast" in c else "Endometrial", "#888888"
+            )
+        )
+        xpos = np.arange(len(top))
+        ax_dots.scatter(xpos, top["_lp"].values,
+                        c=top["_cohort_c"].values,
+                        s=top["_lp"].values * 15 + 20,
+                        alpha=0.8, edgecolors="white", linewidths=0.5, zorder=3)
+        ax_dots.axhline(-np.log10(0.05), color="#c62828", linestyle="--",
+                        linewidth=1, alpha=0.7, label="p = 0.05")
+        ax_dots.set_xticks(xpos)
+        ax_dots.set_xticklabels(
+            [f"{r['Gene'] or r['Variant_ID']}\n{r['Clin_Label']}" for _, r in top.iterrows()],
+            rotation=45, ha="right", fontsize=6.5
+        )
+        ax_dots.set_ylabel("-log₁₀(p-value)", fontsize=9)
+        ax_dots.set_title("C  Top SNP × clinical associations (unadjusted)",
+                           fontsize=9, fontweight="bold", loc="left")
+        ax_dots.legend(fontsize=7.5, frameon=False)
+        _style_ax(ax_dots, grid=False)
+        ax_dots.yaxis.grid(True, linestyle=":", alpha=0.4)
+
+    # ── Panel D: Survival HR overview ─────────────────────────────────────
+    if not surv_res.empty and "HR" in surv_res.columns:
+        sr = surv_res.dropna(subset=["HR"]).copy()
+        sr["_label"] = sr["Gene"].fillna("") + " " + sr["Variant_ID"] + "\n(" + sr["Endpoint"] + ")"
+        sr = sr.sort_values("HR")
+        ypos = np.arange(len(sr))
+
+        def _parse_ci(s):
+            try:
+                lo, hi = re.findall(r"[-0-9.eE+]+", str(s))[:2]
+                return float(lo), float(hi)
+            except Exception:
+                return np.nan, np.nan
+
+        sr[["CI_lo", "CI_hi"]] = sr["HR_CI95"].apply(
+            lambda s: pd.Series(_parse_ci(s))
+        )
+        ax_hr.errorbar(
+            sr["HR"].values, ypos,
+            xerr=[np.clip((sr["HR"] - sr["CI_lo"]).values, 0, None),
+                  np.clip((sr["CI_hi"] - sr["HR"]).values, 0, None)],
+            fmt="none", ecolor="#aaaaaa", elinewidth=1, capsize=2
+        )
+        c_hr = sr["Logrank_P"].apply(
+            lambda p: "#c62828" if pd.notna(p) and p < 0.05 else "#999999"
+        )
+        ax_hr.scatter(sr["HR"].values, ypos, c=c_hr, s=65,
+                      edgecolors="white", linewidths=0.5, zorder=3)
+        ax_hr.axvline(1, color="#555555", linestyle="--", linewidth=1, alpha=0.7)
+        ax_hr.set_yticks(ypos)
+        ax_hr.set_yticklabels(sr["_label"].values, fontsize=7.5)
+        ax_hr.set_xlabel("Hazard Ratio (95% CI)", fontsize=9)
+        ax_hr.set_title("D  Survival HR \u2014 AU endometrial cohort\n(\u25cf p<0.05  \u25cb n.s.)",
+                         fontsize=9, fontweight="bold", loc="left")
+        _style_ax(ax_hr, grid=False)
+        ax_hr.xaxis.grid(True, linestyle=":", alpha=0.4)
+    else:
+        ax_hr.text(0.5, 0.5, "No survival data",
+                   ha="center", va="center",
+                   transform=ax_hr.transAxes, color="#aaaaaa", fontsize=11)
+        ax_hr.set_axis_off()
+
+    fig.suptitle("GSDMB SNP Association Analysis — Overview",
+                 fontsize=14, fontweight="bold", y=1.01)
+    out_path = out_dir / "17_Summary_Panel.png"
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {out_path}")
 
 
 # ── MAIN ─────────────────────────────────────────────────────────────────────
@@ -1160,7 +1998,11 @@ def main():
     print("=== Generating plots ===")
     make_volcano_plots(tvh, out_dir)
     make_heatmaps(breast_clin, endo_clin, out_dir)
-    save_km_pdf(km_pages, out_dir / "17_KM_Curves_AU_Endo.pdf")
+    make_forest_plots(breast_clin, endo_clin, out_dir)
+    make_distribution_plots(breast_clin, endo_clin, merged, out_dir)
+    make_binary_bar_plots(breast_clin, endo_clin, merged, out_dir)
+    make_km_plots(surv_res, merged, out_dir)
+    make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir)
 
     # Final summary
     print("\n" + "="*60)
