@@ -645,6 +645,9 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
         # Demographics / reproductive history
         "canon__age": [
             "clin_au_endo__AGE",
+            "clin_dcs__Edad dx",
+            "clin_mn__Edad muestra",
+            "clin_en__Edad muestra",    # SP healthy endometrium (age at sample)
         ],
         "canon__bmi": [
             "clin_au_endo__BMI_CALCULATED",
@@ -691,7 +694,9 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
             "clin_au_endo__FIGO_STAGE_GROUP",
         ],
 
-        # AU receptors (raw numeric) -> derived status later
+        # ER/PR status
+        # AU endometrial: numeric raw values -> derived Positive/Negative
+        # SP breast: direct POSITIVO/NEGATIVO categories
         "canon__er_raw": [
             "clin_au_endo__FFPE_ER1_RECEPTORS_RAW_VALUE",
             "clin_au_endo__FFPE_ER1_RECEPTORS_RAW_VALUE POLAND RESULTS",
@@ -699,6 +704,13 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
         "canon__pr_raw": [
             "clin_au_endo__FFPE_PR_RECEPTORS_RAW_VALUE",
             "clin_au_endo__FFPE_PR_RECEPTORS_RAW_VALUE POLAND RESULTS",
+        ],
+        # Breast ER/PR (Spanish cohort — direct categorical)
+        "canon__er_status_breast": [
+            "clin_dcs__RE",
+        ],
+        "canon__pr_status_breast": [
+            "clin_dcs__RP",
         ],
 
         # Breast HER2 copies:
@@ -719,7 +731,42 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
             "clin_en__CORTES",
             "clin_her2__REALIZADO",
             "clin_her2__REALIZADO.1",
-            "clin_her2__REPETICIÓN DE CORTES",
+            "clin_her2__REPETICION DE CORTES",
+        ],
+
+        # MSI status (AU endometrial)
+        "canon__msi_status": [
+            "clin_au_endo__MSI_STATUS_IHC",
+            "clin_au_endo__UA_MSI_STATUS_NGS",
+            "clin_au_endo__UA_MSI_STATUS_ddPCR",
+        ],
+
+        # Molecular classification (AU endometrial: POLE/MMRd/NSMP/P53)
+        "canon__molecular_class": [
+            "clin_au_endo__MOLECULAR CLASSIFICATION_according to IHC and/or NGS profile",
+            "clin_au_endo__POLAND MOLECULAR CLASSIFICATION",
+        ],
+
+        # TP53 IHC (AU endometrial)
+        "canon__tp53_ihc": [
+            "clin_au_endo__FFPE_TP53_IHC",
+            "clin_au_endo__FFPE_TP53_IHC POLAND RESULT",
+        ],
+
+        # Survival endpoints (AU endometrial)
+        "canon__os_months": [
+            "clin_au_endo__OS",
+        ],
+        "canon__pfs_months": [
+            "clin_au_endo__PFS",
+        ],
+
+        # Progression / exitus (AU endometrial)
+        "canon__pd_status": [
+            "clin_au_endo__PD_STATUS",
+        ],
+        "canon__exitus": [
+            "clin_au_endo__EXITUS",
         ],
     }
 
@@ -733,6 +780,63 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
     After coalescing canon columns, standardise types/encodings and add derived variables.
     """
     out = df.copy()
+
+    # --- Strip trailing/leading whitespace from key categorical columns ---
+    # These were found to have spurious spaces (e.g. 'IB ', 'Ca mama ') that
+    # cause silent mismatches in downstream mapping/derivation functions.
+    for _col in [
+        "clin_au_endo__FIGO_STAGE",
+        "clin_her2__DX",
+        "canon__msi_status",
+        "clin_au_endo__GRADE",
+        "clin_au_endo__LVSI",
+        "clin_au_endo__MYOMETRIAL_INFILTRATION",
+        "clin_au_endo__HISTOLOGY_GROUP",
+        "clin_au_endo__PD_STATUS",
+        "clin_au_endo__EXITUS",
+        "clin_au_endo__RISK_OF_RECURRENCE",
+        "clin_dcs__GRADO",
+        "clin_dcs__RE",
+        "clin_dcs__RP",
+        "clin_dcs__MTxDISTANCIA",
+        "clin_dcs__Exitus",
+    ]:
+        if _col in out.columns:
+            out[_col] = out[_col].apply(lambda x: x.strip() if isinstance(x, str) else x)
+
+    # --- Standardise canon__msi_status -> 'Stable' / 'Unstable' ---
+    if "canon__msi_status" in out.columns:
+        def _norm_msi(x):
+            if pd.isna(x): return x
+            s = str(x).strip().upper()
+            if s in ("MSS", "STABLE", "MS-STABLE"): return "Stable"
+            if s in ("MSI", "MSI-H", "UNSTABLE", "MSI-HIGH", "MSIH"): return "Unstable"
+            return x
+        out["canon__msi_status"] = out["canon__msi_status"].map(_norm_msi)
+
+    # --- Standardise canon__molecular_class -> POLE / MMRd / NSMP / P53 ---
+    if "canon__molecular_class" in out.columns:
+        def _norm_molclass(x):
+            if pd.isna(x): return x
+            s = str(x).strip().upper()
+            if "POLE" in s: return "POLE"
+            if "MMR" in s or "MMRD" in s: return "MMRd"
+            if "NSMP" in s or "NO SPECIFIC" in s: return "NSMP"
+            if "P53" in s or "TP53" in s: return "P53"
+            return x
+        out["canon__molecular_class"] = out["canon__molecular_class"].map(_norm_molclass)
+
+    # --- Numeric coercion for survival endpoints ---
+    for _surv_col in ("canon__os_months", "canon__pfs_months"):
+        if _surv_col in out.columns:
+            out[_surv_col] = pd.to_numeric(out[_surv_col], errors="coerce")
+
+    # --- Derived pd_flag (binary) from canon__pd_status ---
+    if "canon__pd_status" in out.columns:
+        out["canon__pd_flag"] = out["canon__pd_status"].map(
+            lambda x: 1 if str(x).strip().upper() == "PD" else (0 if str(x).strip().upper() == "NO PD" else pd.NA)
+            if pd.notna(x) else pd.NA
+        )
 
     # --- Numeric fields ---
     if "canon__age" in out.columns:
@@ -750,9 +854,22 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
         out["canon__menarche_age"] = out["canon__menarche_age"].apply(extract_first_number)
 
     # --- Menopause: keep original and add derived age + status ---
+    def _parse_menopause_age(x) -> Optional[float]:
+        """Extract plausible menopause age (20-65) from strings like '47 anos', '50 anos. No THS'."""
+        if pd.isna(x):
+            return None
+        s = _norm_text(x)
+        # Find all numbers in the string
+        nums = [float(m) for m in re.findall(r"\b(\d+(?:\.\d+)?)\b", s)]
+        # Return first number that looks like an age (20-65), not a year (>1900)
+        for n in nums:
+            if 20 <= n <= 65:
+                return n
+        return None
+
     if "canon__menopause_age_or_status" in out.columns:
         s = out["canon__menopause_age_or_status"]
-        out["canon__menopause_age"] = s.apply(extract_first_number)
+        out["canon__menopause_age"] = s.apply(_parse_menopause_age)
         out["canon__menopause_status"] = s.apply(lambda x: _norm_text(x) if _norm_text(x) else pd.NA)
 
     # --- Grade ---
@@ -763,19 +880,42 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
     if "canon__figo_stage" in out.columns:
         out["canon__figo_stage"] = out["canon__figo_stage"].apply(parse_figo_stage)
 
-    # --- AU receptors: numeric + derived status ---
-    # Threshold: >= 1 -> Positive (adjust if your project uses a different cutoff)
+    # --- AU endometrial ER/PR: numeric raw -> Positive/Negative (threshold >= 1%) ---
     if "canon__er_raw" in out.columns:
         out["canon__er_raw"] = pd.to_numeric(out["canon__er_raw"], errors="coerce")
         out["canon__er_status"] = out["canon__er_raw"].apply(
             lambda v: "Positive" if pd.notna(v) and v >= 1 else ("Negative" if pd.notna(v) else pd.NA)
         )
-
     if "canon__pr_raw" in out.columns:
         out["canon__pr_raw"] = pd.to_numeric(out["canon__pr_raw"], errors="coerce")
         out["canon__pr_status"] = out["canon__pr_raw"].apply(
             lambda v: "Positive" if pd.notna(v) and v >= 1 else ("Negative" if pd.notna(v) else pd.NA)
         )
+
+    # Ensure canon__er_status and canon__pr_status exist even if AU raw was missing
+    for _col in ("canon__er_status", "canon__pr_status"):
+        if _col not in out.columns:
+            out[_col] = pd.NA
+
+    # --- SP breast ER/PR: POSITIVO/NEGATIVO -> Positive/Negative, merged into canon__er/pr_status ---
+    _sp_er_map = {"POSITIVO": "Positive", "NEGATIVO": "Negative"}
+    if "canon__er_status_breast" in out.columns:
+        out["canon__er_status_breast"] = (
+            out["canon__er_status_breast"].astype(str).str.strip().str.upper().map(
+                lambda x: _sp_er_map.get(x, pd.NA)
+            )
+        )
+        mask = out["canon__er_status"].isna() & out["canon__er_status_breast"].notna()
+        out.loc[mask, "canon__er_status"] = out.loc[mask, "canon__er_status_breast"]
+
+    if "canon__pr_status_breast" in out.columns:
+        out["canon__pr_status_breast"] = (
+            out["canon__pr_status_breast"].astype(str).str.strip().str.upper().map(
+                lambda x: _sp_er_map.get(x, pd.NA)
+            )
+        )
+        mask = out["canon__pr_status"].isna() & out["canon__pr_status_breast"].notna()
+        out.loc[mask, "canon__pr_status"] = out.loc[mask, "canon__pr_status_breast"]
 
     # --- HER2 copies: parse numeric robustly ---
     if "canon__her2_copies" in out.columns:
@@ -795,9 +935,11 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
         ).map({True: "Yes", False: "No"})
         out.loc[out["canon__her2_copies_note"].isna(), "canon__triple_negative_flag"] = pd.NA
 
-    # --- Operational yes/no derived ---
+    # --- Operational: derive whether sample was processed (any non-null value = yes) ---
     if "canon__performed_or_cuts" in out.columns:
-        out["canon__performed_or_cuts__yesno"] = out["canon__performed_or_cuts"].apply(parse_yes_no)
+        out["canon__performed_or_cuts__yesno"] = out["canon__performed_or_cuts"].apply(
+            lambda x: "Yes" if pd.notna(x) and str(x).strip() not in ("", "nan") else pd.NA
+        )
 
     return out
 
