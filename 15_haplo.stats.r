@@ -480,7 +480,7 @@ tryCatch({
     scale_y_discrete(labels = ax_labels[snp_labels], limits = rev) +
     coord_fixed() +
     labs(
-      title    = "Linkage Disequilibrium Between GSDMB/GSDMA SNPs",
+      title    = "Linkage Disequilibrium Between GSDMB SNPs",
       subtitle = sprintf(
         "Pairwise r² from BEAGLE-phased haplotypes | %d samples (%d chromosomes) | Lower triangle | r² ≥ 0.10 labelled",
         length(common_samples), nrow(hap_mat)),
@@ -538,7 +538,7 @@ fig1a <- annotation_map %>%
   scale_y_continuous(expand = expansion(mult = c(0, 0.18)),
                      breaks = scales::pretty_breaks(5)) +
   labs(
-    title    = "Alt-Allele Carrier Counts per GSDMB/GSDMA SNP",
+    title    = "Alt-Allele Carrier Counts per GSDMB SNP",
     subtitle = "Number of samples carrying ≥1 alternate allele at each variant",
     x        = "Variant (rsID, Gene)", y = "Carriers (n)"
   ) +
