@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-17_snp-association.py  (v2 — column-verified against HARMONISED_B_v3)
+17_snp-association.py  (v4 — SNP-only, genotypic model, all-cohort Cox, age+BMI adjusted)
 =======================================================================
 SNP–Clinical Variable Association Analysis
 
@@ -19,13 +19,13 @@ manifest sheets in the harmonised master.  Exclusion rules (verified from data):
     EXCLUDE pd_status == 'NO HACER'       — explicitly flagged "do not process"
     → 114 / 118 DNA samples retained
 
-  MT-T_N (Spanish breast tumour + paired normal):
+  MT-T_N (breast tumour + paired normal):
     No exclusion flags present → all 71 DNA samples retained
 
-  EN (Spanish endometrial healthy):
+  EN (endometrial healthy):
     No exclusion flags present → all 80 DNA samples retained
 
-  MN (Spanish breast healthy):
+  MN (breast healthy):
     No exclusion flags present → all 100 DNA samples retained
 
 The GSDMB variant report (inner join on snp_code) provides a second-level
@@ -38,12 +38,19 @@ ANALYSES
 1. Tumour vs Healthy       — Fisher's exact test per cohort + globally
 2. SNP × Clinical variable — Fisher's exact (binary/categorical) or
                               Mann–Whitney U (continuous), per tumour cohort
-3. Genotype-dose           — Kruskal-Wallis / chi-square trend for top hits
-4. Survival (AU endo only) — KM curves + log-rank + Cox PH (OS, PFS)
+                              Age- and BMI-adjusted logistic regression for binary outcomes
+3. Genotype-dose (WT/Het/Hom) — Overall trend + separate Het-vs-WT and
+                              Hom-vs-WT contrasts for top SNPs, both cohorts
+4. Survival (Cox PH)       — Age- and BMI-adjusted Cox proportional hazards for OS
+                              and PFS in all cohorts with survival data:
+                              • Endometrial: OS + PFS (canon__os/pfs_months)
+                              • Breast: OS (BREAST_OS_MONTHS_DERIVED)
+                              Genotypic model: WT reference, Het and Hom as
+                              separate terms.  KM curves per genotype class.
 
 VARIABLE COVERAGE (verified from data)
 ---------------------------------------
-BREAST (SP, MT-T_N sheet, n=71 tumour samples)
+BREAST (MT-T_N sheet, n=71 tumour samples)
   ✓ Grade             clin_dcs__GRADO              (1/2/3, n=65)
   ✓ ER status         clin_dcs__RE                 (POSITIVO/NEGATIVO, n=65)
   ✓ PR status         clin_dcs__RP                 (POSITIVO/NEGATIVO, n=65)
@@ -56,7 +63,7 @@ BREAST (SP, MT-T_N sheet, n=71 tumour samples)
   ✓ HER2+ subtype     clin_her2__DX                (Ca mama HER2+ / TN)
   ~ Survival (derived) from Fecha_dx + Ultima_fecha + Exitus
 
-ENDOMETRIAL AU (AT=AUs sheet, n=114 sequenced DNA samples)
+ENDOMETRIAL (AT=AUs sheet, n=114 sequenced DNA samples)
   ✓ FIGO stage        clin_au_endo__FIGO_STAGE     (IA/IB/II/IIIA/IIIC1/IIIC2/IVB)
   ✓ Grade             clin_au_endo__GRADE          (G1/G2/G3)
   ✓ Histology group   clin_au_endo__HISTOLOGY_GROUP (NEEC/EEC)
@@ -80,7 +87,7 @@ OUTPUTS
     • breast_clinical_assoc
     • endo_clinical_assoc
     • genotype_dose
-    • survival_au_endo
+    • survival_cox          (all cohorts with survival data)
     • summary_significant
     • sample_manifest
 
@@ -90,7 +97,7 @@ OUTPUTS
   17_SNP_Heatmap_Breast_FDR.png
   17_SNP_Heatmap_Endometrial_raw_p.png
   17_SNP_Heatmap_Endometrial_FDR.png
-  17_KM_Curves_AU_Endo.pdf
+  17_KM_Curves_Endometrial.pdf
 
 RUN
 ---
@@ -114,6 +121,42 @@ import matplotlib.backends.backend_pdf as pdf_backend
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
+
+def _safe_exp(x, clip: float = 50.0):
+    """Exponentiation that avoids overflow in small-N / separation fits.
+
+    Works with scalars, numpy arrays, pandas Series/DataFrames.
+    """
+    import numpy as _np
+    try:
+        if hasattr(x, "values") and hasattr(x, "index") and not hasattr(x, "columns"):
+            # pandas Series / Index-like
+            vals = _np.asarray(x.values, dtype=float)
+            out = _np.exp(_np.clip(vals, -clip, clip))
+            try:
+                import pandas as _pd
+                return _pd.Series(out, index=x.index)
+            except Exception:
+                return out
+        if hasattr(x, "values") and hasattr(x, "index") and hasattr(x, "columns"):
+            # pandas DataFrame
+            vals = _np.asarray(x.values, dtype=float)
+            out = _np.exp(_np.clip(vals, -clip, clip))
+            try:
+                import pandas as _pd
+                return _pd.DataFrame(out, index=x.index, columns=x.columns)
+            except Exception:
+                return out
+        # scalar / numpy array / list
+        vals = _np.asarray(x, dtype=float)
+        out = _np.exp(_np.clip(vals, -clip, clip))
+        # return python float for scalar inputs
+        if _np.ndim(out) == 0:
+            return float(out)
+        return out
+    except Exception:
+        return _np.nan
+
 import pandas as pd
 import seaborn as sns
 from scipy import stats
@@ -128,7 +171,6 @@ except ImportError:
     _HAS_LIFELINES = False
     print("WARNING: lifelines not installed — survival plots will be skipped.")
 
-warnings.filterwarnings("ignore")
 
 # ── DEFAULT PATHS ─────────────────────────────────────────────────────────────
 DEFAULT_GSDMB  = Path("/home/gadeaalonsoj/tfm/gsdmb_final_results/GSDMB_Annotated_Report_Fixed.xlsx")
@@ -147,6 +189,24 @@ DEFAULT_MANIFESTS = {
 
 FDR_THRESHOLD  = 0.10
 MIN_CARRIERS   = 3
+def _choose_bmi_col(sample_df: pd.DataFrame, cohort_label: str) -> Optional[str]:
+    """Pick the most appropriate BMI column for a cohort.
+
+    Breast cohort in the harmonised master often stores BMI in BREAST_BMI_NUMERIC.
+    Other cohorts may store BMI in canon__bmi. Returns None if no usable BMI.
+    """
+    # Order matters: prefer cohort-specific numeric BMI if present
+    if "Breast" in cohort_label:
+        candidates = ["BREAST_BMI_NUMERIC", "canon__bmi"]
+    else:
+        candidates = ["canon__bmi"]
+
+    for c in candidates:
+        if c in sample_df.columns:
+            n_nonnull = int(pd.to_numeric(sample_df[c], errors="coerce").notna().sum())
+            if n_nonnull >= MIN_CARRIERS:
+                return c
+    return None
 MIN_NFE_AF     = 0.01
 
 
@@ -396,8 +456,8 @@ def load_and_merge(gsdmb_path: Path, master_path: Path,
 
         print(f"      Master rows: {n_before} → {n_after} (kept only manifest-confirmed codes)")
         print(f"      Sequenced samples per cohort:")
-        for sheet, label in [("AT=AUs", "endo-tumour AU"), ("MT-T_N", "breast-tumour SP"),
-                               ("EN", "endo-normal SP"), ("MN", "breast-normal SP")]:
+        for sheet, label in [("AT=AUs", "endo-tumour"), ("MT-T_N", "breast-tumour"),
+                               ("EN", "endo-normal"), ("MN", "breast-normal")]:
             n = (master_dna["sheet"] == sheet).sum()
             n_rep = master_dna[(master_dna["sheet"] == sheet) & master_dna["is_replicate_manifest"]].shape[0]
             print(f"        {sheet:8s} ({label}): {n - n_rep} sequenced"
@@ -575,15 +635,15 @@ def tumour_vs_healthy(df: pd.DataFrame) -> pd.DataFrame:
 #
 #   BREAST (MT-T_N) — Spanish HER2 cohort (DCs MAMA HER2 clinical sheet)
 #     Outcomes: grade, ER/PR, recurrence, metastasis, exitus, HER2 copies, KI67, OS, subtype
-#     Confounder for adjustment: age at diagnosis
+#     Confounders for adjustment: age at diagnosis, BMI
 #
 #   ENDOMETRIAL AU (AT=AUs) — Australian cohort (Clinical DATA AU_Endometrial)
 #     Outcomes: FIGO stage, grade, myometrial invasion, LVSI, MSI, molecular class,
 #               histology, ER/PR, progression, exitus, OS/PFS, risk of recurrence
-#     Confounder for adjustment: age at surgery
+#     Confounders for adjustment: age at surgery, BMI
 #
-# For BINARY outcomes: both unadjusted (Fisher exact) and age-adjusted
-#   (logistic regression: outcome ~ snp_carrier + age_z) are run.
+# For BINARY outcomes: both unadjusted (Fisher exact) and age+BMI-adjusted
+#   (logistic regression: outcome ~ snp_carrier + age_z + bmi_z) are run.
 #   The adjusted model is skipped automatically if fewer than MIN_EVENTS_FOR_LOGISTIC
 #   events exist in the smaller group.
 # For CONTINUOUS outcomes: Mann-Whitney U (unadjusted only).
@@ -700,35 +760,49 @@ def _test_continuous(c_vals, nc_vals) -> Optional[Dict]:
         return None
     stat, p = mannwhitneyu(c.values, nc.values, alternative="two-sided")
     return {
-        "Test_Unadj":          "Mann-Whitney U",
-        "N_Carriers":          len(c),
-        "N_NonCarriers":       len(nc),
-        "Median_Carriers":     round(c.median(), 3),
-        "Median_NonCarriers":  round(nc.median(), 3),
-        "Stat_Unadj":          round(stat, 3),
-        "P_Unadj":             p,
-        "Test_Adj":            "N/A",
-        "OR_Adj":              np.nan,
-        "OR_Adj_CI95":         np.nan,
-        "P_Adj":               np.nan,
-        "N_Adj":               np.nan,
-        "Adj_Note":            "Not applicable for continuous outcome",
+        "Test_Unadj":              "Mann-Whitney U",
+        "N_Carriers":              len(c),
+        "N_NonCarriers":           len(nc),
+        "Median_Carriers":         round(c.median(), 3),
+        "Median_NonCarriers":      round(nc.median(), 3),
+        "Stat_Unadj":              round(stat, 3),
+        "P_Unadj":                 p,
+        # Age-only model
+        "Test_Adj_Age":            "N/A",
+        "OR_Adj_Age":              np.nan,
+        "OR_Adj_Age_CI95":         np.nan,
+        "P_Adj_Age":               np.nan,
+        "N_Adj_Age":               np.nan,
+        "Adj_Age_Note":            "Not applicable for continuous outcome",
+        # Age+BMI model
+        "Test_Adj_AgeBMI":         "N/A",
+        "OR_Adj_AgeBMI":           np.nan,
+        "OR_Adj_AgeBMI_CI95":      np.nan,
+        "P_Adj_AgeBMI":            np.nan,
+        "N_Adj_AgeBMI":            np.nan,
+        "Adj_AgeBMI_Note":         "Not applicable for continuous outcome",
     }
 
 
-def _test_binary(c_df, nc_df, outcome_col, age_col="canon__age") -> Optional[Dict]:
+def _test_binary(c_df, nc_df, outcome_col, age_col="canon__age", bmi_col: Optional[str] = None) -> Optional[Dict]:
     """
-    Unadjusted Fisher exact test + age-adjusted logistic regression.
-    outcome_col must already be encoded as 0/1.
+    Unadjusted Fisher exact test + two adjusted logistic regression models:
+      Model 1 (age-only):    outcome ~ snp_carrier + age_z          (full N)
+      Model 2 (age+BMI):     outcome ~ snp_carrier + age_z + bmi_z  (BMI-complete N)
+
+    This stepwise approach ensures we never lose samples from the age-only model
+    just because BMI is missing, while still capturing BMI adjustment where data
+    are available. Both models report their own N, OR, CI and p-value.
     """
     try:
         from statsmodels.formula.api import logit as sm_logit
     except ImportError:
         sm_logit = None
 
+    cols = [outcome_col, age_col] + ([bmi_col] if bmi_col else [])
     combined = pd.concat([
-        c_df[[outcome_col, age_col]].assign(snp_carrier=1),
-        nc_df[[outcome_col, age_col]].assign(snp_carrier=0),
+        c_df.reindex(columns=cols).assign(snp_carrier=1),
+        nc_df.reindex(columns=cols).assign(snp_carrier=0),
     ])
     combined[outcome_col] = pd.to_numeric(combined[outcome_col], errors="coerce")
     combined = combined.dropna(subset=[outcome_col])
@@ -738,7 +812,7 @@ def _test_binary(c_df, nc_df, outcome_col, age_col="canon__age") -> Optional[Dic
     if n_c < MIN_CARRIERS or n_nc < MIN_CARRIERS:
         return None
 
-    # Counts for contingency table
+    # Counts for contingency table (unadjusted)
     a = int(((combined["snp_carrier"]==1) & (combined[outcome_col]==1)).sum())
     b = int(((combined["snp_carrier"]==1) & (combined[outcome_col]==0)).sum())
     c = int(((combined["snp_carrier"]==0) & (combined[outcome_col]==1)).sum())
@@ -761,44 +835,67 @@ def _test_binary(c_df, nc_df, outcome_col, age_col="canon__age") -> Optional[Dic
         "P_Unadj":            p_unadj,
     }
 
-    # ── 2. Age-adjusted logistic regression ──────────────────────────────
-    events_min   = min(a + c, b + d)
-    model_df     = combined[[outcome_col, age_col, "snp_carrier"]].dropna()
-    n_with_age   = len(model_df)
+    events_min = min(a + c, b + d)
 
-    if events_min < MIN_EVENTS_FOR_LOGISTIC or n_with_age < 10 or sm_logit is None:
-        reason = (f"Too few events ({events_min} < {MIN_EVENTS_FOR_LOGISTIC})"
-                  if events_min < MIN_EVENTS_FOR_LOGISTIC
-                  else f"Too few with age data ({n_with_age})")
-        result.update({
-            "Test_Adj": "Logistic (age-adjusted)", "OR_Adj": np.nan,
-            "OR_Adj_CI95": np.nan, "P_Adj": np.nan,
-            "N_Adj": n_with_age, "Adj_Note": f"Skipped: {reason}",
-        })
+    def _run_logit(df_model, formula, label):
+        """Fit a logistic model and return result dict."""
+        n = len(df_model)
+        if events_min < MIN_EVENTS_FOR_LOGISTIC or n < 10 or sm_logit is None:
+            reason = (f"Too few events ({events_min} < {MIN_EVENTS_FOR_LOGISTIC})"
+                      if events_min < MIN_EVENTS_FOR_LOGISTIC
+                      else f"Too few samples ({n})")
+            return {
+                f"Test_Adj_{label}":       f"Logistic ({label})",
+                f"OR_Adj_{label}":         np.nan,
+                f"OR_Adj_{label}_CI95":    np.nan,
+                f"P_Adj_{label}":          np.nan,
+                f"N_Adj_{label}":          n,
+                f"Adj_{label}_Note":       f"Skipped: {reason}",
+            }
+        try:
+            fit = sm_logit(formula, data=df_model).fit(disp=0, maxiter=200)
+            or_v = round(float(_safe_exp(fit.params["snp"])), 4)
+            ci   = _safe_exp(fit.conf_int().loc["snp"])
+            p_v  = round(float(fit.pvalues["snp"]), 4)
+            return {
+                f"Test_Adj_{label}":       f"Logistic ({label})",
+                f"OR_Adj_{label}":         or_v,
+                f"OR_Adj_{label}_CI95":    f"[{ci.iloc[0]:.3f}, {ci.iloc[1]:.3f}]",
+                f"P_Adj_{label}":          p_v,
+                f"N_Adj_{label}":          n,
+                f"Adj_{label}_Note":       "Converged OK",
+            }
+        except Exception as e:
+            return {
+                f"Test_Adj_{label}":       f"Logistic ({label})",
+                f"OR_Adj_{label}":         np.nan,
+                f"OR_Adj_{label}_CI95":    np.nan,
+                f"P_Adj_{label}":          np.nan,
+                f"N_Adj_{label}":          n,
+                f"Adj_{label}_Note":       f"Failed: {str(e)[:80]}",
+            }
+
+    # ── 2. Age-only model (uses all samples with age data) ────────────────
+    age_df = combined[[outcome_col, age_col, "snp_carrier"]].dropna().copy()
+    age_df.columns = ["outcome", "age", "snp"]
+    age_std = age_df["age"].std()
+    if pd.isna(age_std) or age_std == 0:
+        # Cannot standardise age; skip adjusted models
         return result
+    age_df["age_z"] = (age_df["age"] - age_df["age"].mean()) / age_std
+    result.update(_run_logit(age_df, "outcome ~ snp + age_z", "Age"))
 
-    try:
-        model_df = model_df.copy()
-        model_df.columns = ["outcome", "age", "snp"]
-        model_df["age_z"] = (model_df["age"] - model_df["age"].mean()) / model_df["age"].std()
-        fit = sm_logit("outcome ~ snp + age_z", data=model_df).fit(disp=0, maxiter=200)
-        or_adj = round(float(np.exp(fit.params["snp"])), 4)
-        ci     = np.exp(fit.conf_int().loc["snp"])
-        p_adj  = round(float(fit.pvalues["snp"]), 4)
-        result.update({
-            "Test_Adj":    "Logistic (age-adjusted)",
-            "OR_Adj":      or_adj,
-            "OR_Adj_CI95": f"[{ci.iloc[0]:.3f}, {ci.iloc[1]:.3f}]",
-            "P_Adj":       p_adj,
-            "N_Adj":       len(model_df),
-            "Adj_Note":    "Converged OK",
-        })
-    except Exception as e:
-        result.update({
-            "Test_Adj": "Logistic (age-adjusted)", "OR_Adj": np.nan,
-            "OR_Adj_CI95": np.nan, "P_Adj": np.nan,
-            "N_Adj": n_with_age, "Adj_Note": f"Failed: {str(e)[:80]}",
-        })
+    # ── 3. Age+BMI model (only samples with both age and BMI) ────────────
+    if bmi_col and bmi_col in combined.columns:
+        bmi_df = combined[[outcome_col, age_col, bmi_col, "snp_carrier"]].dropna().copy()
+        bmi_df.columns = ["outcome", "age", "bmi", "snp"]
+        age_std2 = bmi_df["age"].std()
+        bmi_std  = bmi_df["bmi"].std()
+        if not (pd.isna(age_std2) or age_std2 == 0 or pd.isna(bmi_std) or bmi_std == 0):
+            bmi_df["age_z"] = (bmi_df["age"] - bmi_df["age"].mean()) / age_std2
+            bmi_df["bmi_z"] = (bmi_df["bmi"] - bmi_df["bmi"].mean()) / bmi_std
+            result.update(_run_logit(bmi_df, "outcome ~ snp + age_z + bmi_z", "AgeBMI"))
+
     return result
 
 
@@ -817,17 +914,23 @@ def _test_nominal(c_df, nc_df, col) -> Optional[Dict]:
         return None
     chi2, p, dof, _ = stats.chi2_contingency(ct)
     return {
-        "Test_Unadj":    "Chi-square",
-        "N_Carriers":    int(n_c),
-        "N_NonCarriers": int(n_nc),
-        "Stat_Unadj":    round(chi2, 3),
-        "P_Unadj":       p,
-        "Test_Adj":      "N/A",
-        "OR_Adj":        np.nan,
-        "OR_Adj_CI95":   np.nan,
-        "P_Adj":         np.nan,
-        "N_Adj":         np.nan,
-        "Adj_Note":      "Not applicable for nominal outcome",
+        "Test_Unadj":          "Chi-square",
+        "N_Carriers":          int(n_c),
+        "N_NonCarriers":       int(n_nc),
+        "Stat_Unadj":          round(chi2, 3),
+        "P_Unadj":             p,
+        "Test_Adj_Age":        "N/A",
+        "OR_Adj_Age":          np.nan,
+        "OR_Adj_Age_CI95":     np.nan,
+        "P_Adj_Age":           np.nan,
+        "N_Adj_Age":           np.nan,
+        "Adj_Age_Note":        "Not applicable for nominal outcome",
+        "Test_Adj_AgeBMI":     "N/A",
+        "OR_Adj_AgeBMI":       np.nan,
+        "OR_Adj_AgeBMI_CI95":  np.nan,
+        "P_Adj_AgeBMI":        np.nan,
+        "N_Adj_AgeBMI":        np.nan,
+        "Adj_AgeBMI_Note":     "Not applicable for nominal outcome",
     }
 
 
@@ -853,7 +956,8 @@ def _run_clin_for_cohort(df_t: pd.DataFrame, var_dict: Dict, cohort_label: str) 
             if meta["type"] == "continuous":
                 res = _test_continuous(c_df[col], nc_df[col])
             elif meta["type"] == "binary":
-                res = _test_binary(c_df, nc_df, col, age_col="canon__age")
+                bmi_col = _choose_bmi_col(sample_data.reset_index(), cohort_label)
+                res = _test_binary(c_df, nc_df, col, age_col="canon__age", bmi_col=bmi_col)
             elif meta["type"] == "nominal":
                 res = _test_nominal(c_df, nc_df, col)
             else:
@@ -876,23 +980,29 @@ def _run_clin_for_cohort(df_t: pd.DataFrame, var_dict: Dict, cohort_label: str) 
     if res_df.empty:
         return res_df
 
-    # FDR correction separately for unadjusted and adjusted p-values,
+    # FDR correction separately for unadjusted, age-only, and age+BMI p-values,
     # applied within each clinical variable across all variants
     parts = []
     for clin_col in res_df["Clinical_Var"].unique():
         sub = res_df[res_df["Clinical_Var"] == clin_col].copy()
         sub = _apply_fdr(sub, p_col="P_Unadj", out_col="FDR_Unadj")
-        if sub["P_Adj"].notna().any():
-            sub = _apply_fdr(sub, p_col="P_Adj", out_col="FDR_Adj")
+        if sub["P_Adj_Age"].notna().any():
+            sub = _apply_fdr(sub, p_col="P_Adj_Age", out_col="FDR_Adj_Age")
         else:
-            sub["FDR_Adj"] = np.nan
+            sub["FDR_Adj_Age"] = np.nan
+        if sub["P_Adj_AgeBMI"].notna().any():
+            sub = _apply_fdr(sub, p_col="P_Adj_AgeBMI", out_col="FDR_Adj_AgeBMI")
+        else:
+            sub["FDR_Adj_AgeBMI"] = np.nan
         parts.append(sub)
 
     res_df = pd.concat(parts, ignore_index=True).sort_values(["Clinical_Var", "P_Unadj"])
-    res_df["Nominal_Sig_Unadj"] = res_df["P_Unadj"] < 0.05
-    res_df["FDR_Sig_Unadj"]     = res_df["FDR_Unadj"] < FDR_THRESHOLD
-    res_df["Nominal_Sig_Adj"]   = res_df["P_Adj"].notna() & (res_df["P_Adj"] < 0.05)
-    res_df["FDR_Sig_Adj"]       = res_df["FDR_Adj"].notna() & (res_df["FDR_Adj"] < FDR_THRESHOLD)
+    res_df["Nominal_Sig_Unadj"]   = res_df["P_Unadj"] < 0.05
+    res_df["FDR_Sig_Unadj"]       = res_df["FDR_Unadj"] < FDR_THRESHOLD
+    res_df["Nominal_Sig_Adj_Age"] = res_df["P_Adj_Age"].notna() & (res_df["P_Adj_Age"] < 0.05)
+    res_df["FDR_Sig_Adj_Age"]     = res_df["FDR_Adj_Age"].notna() & (res_df["FDR_Adj_Age"] < FDR_THRESHOLD)
+    res_df["Nominal_Sig_Adj_AgeBMI"] = res_df["P_Adj_AgeBMI"].notna() & (res_df["P_Adj_AgeBMI"] < 0.05)
+    res_df["FDR_Sig_Adj_AgeBMI"]     = res_df["FDR_Adj_AgeBMI"].notna() & (res_df["FDR_Adj_AgeBMI"] < FDR_THRESHOLD)
     return res_df
 
 
@@ -908,7 +1018,11 @@ def clinical_associations(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]
     for label, res in [("Breast", breast_res), ("Endometrial", endo_res)]:
         if res.empty: print(f"  {label}: no results")
         else:
-            print(f"  {label}: {len(res)} tests | {res['Nominal_Sig_Unadj'].sum()} nominal (unadj) | {res['FDR_Sig_Unadj'].sum()} FDR (unadj) | {res['Nominal_Sig_Adj'].sum()} nominal (adj)")
+            print(f"  {label}: {len(res)} tests | "
+                  f"{res['Nominal_Sig_Unadj'].sum()} nominal (unadj) | "
+                  f"{res['FDR_Sig_Unadj'].sum()} FDR (unadj) | "
+                  f"{res['Nominal_Sig_Adj_Age'].sum()} nominal (age-adj, N={res['N_Adj_Age'].dropna().astype(int).max() if res['N_Adj_Age'].notna().any() else 0}) | "
+                  f"{res['Nominal_Sig_Adj_AgeBMI'].sum()} nominal (age+BMI-adj, N={res['N_Adj_AgeBMI'].dropna().astype(int).max() if res['N_Adj_AgeBMI'].notna().any() else 0})")
     print()
     return breast_res, endo_res
 
@@ -917,12 +1031,55 @@ def clinical_associations(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]
 
 def genotype_dose_analysis(df: pd.DataFrame, top_variants: List[str],
                             var_dict: Dict, cohort_label: str) -> pd.DataFrame:
+    """
+    Analysis 3: genotypic dose test for top SNPs.
+
+    For each variant × clinical variable we run:
+      (a) Overall trend test  — Kruskal-Wallis (continuous) or chi-square (categorical)
+                                 across all three genotype groups (WT / Het / Hom)
+      (b) Het vs WT contrast  — Mann-Whitney U or Fisher exact, Hom samples excluded
+      (c) Hom vs WT contrast  — Mann-Whitney U or Fisher exact, Het samples excluded
+                                 (only run when n_Hom ≥ MIN_CARRIERS)
+
+    This mirrors the genotypic model in script 15 and allows us to determine
+    whether the H2 signal is driven by heterozygous or homozygous carriers.
+    """
     print(f"=== Analysis 3: Genotype-dose — {cohort_label} ===")
     df = df[~df["is_replicate"] & (df["Tissue"] == "Tumour")].copy()
     cohort_filter = "Breast" if "Breast" in cohort_label else "Endometri"
     df = df[df["Cohort"].str.contains(cohort_filter, case=False, na=False)]
     if "GT" not in df.columns:
         print("  No GT column — skipping.\n"); return pd.DataFrame()
+
+    def _geno_contrast(g0: pd.Series, g1: pd.Series, col: str, meta: Dict,
+                       label: str) -> Optional[Dict]:
+        """Run a single binary contrast (g1 vs g0 = reference) for one variable."""
+        c0 = pd.to_numeric(g0[col], errors="coerce").dropna() if meta["type"] == "continuous" else g0[col].dropna()
+        c1 = pd.to_numeric(g1[col], errors="coerce").dropna() if meta["type"] == "continuous" else g1[col].dropna()
+        if len(c0) < MIN_CARRIERS or len(c1) < MIN_CARRIERS:
+            return None
+        if meta["type"] == "continuous":
+            stat, p = mannwhitneyu(c1.values, c0.values, alternative="two-sided")
+            return {"Test_Contrast": f"Mann-Whitney U ({label})",
+                    "N_ref": len(c0), "N_test": len(c1), "Stat_Contrast": round(stat, 3),
+                    "P_Contrast": p}
+        else:
+            cats = sorted(set(c0.tolist() + c1.tolist()))
+            if len(cats) < 2:
+                return None
+            ct = pd.crosstab(
+                pd.concat([pd.Series(["ref"] * len(c0), name="grp"),
+                           pd.Series(["test"] * len(c1), name="grp")]),
+                pd.concat([c0, c1])
+            )
+            if ct.shape[0] < 2 or ct.shape[1] < 2:
+                return None
+            _, p = fisher_exact(ct.values) if ct.shape == (2, 2) else (
+                stats.chi2_contingency(ct)[:2]
+            )
+            return {"Test_Contrast": f"Fisher/Chi-sq ({label})",
+                    "N_ref": len(c0), "N_test": len(c1), "Stat_Contrast": np.nan,
+                    "P_Contrast": p}
 
     rows = []
     for var_id in top_variants:
@@ -932,8 +1089,14 @@ def genotype_dose_analysis(df: pd.DataFrame, top_variants: List[str],
         sd  = vdf.drop_duplicates("Sample").set_index("Sample").copy()
         sd["dose"] = sd["GT"].map({"0/0": 0, "0/1": 1, "1/1": 2})
 
+        g0 = sd[sd["dose"] == 0]
+        g1 = sd[sd["dose"] == 1]
+        g2 = sd[sd["dose"] == 2]
+
         for col, meta in var_dict.items():
             if col not in sd.columns: continue
+
+            # (a) Overall trend test
             groups = [sd[sd["dose"] == g][col].dropna() for g in [0, 1, 2]]
             groups = [g for g in groups if len(g) >= 2]
             if len(groups) < 2: continue
@@ -947,104 +1110,393 @@ def genotype_dose_analysis(df: pd.DataFrame, top_variants: List[str],
                 if ct.shape[0] < 2 or ct.shape[1] < 2: continue
                 stat, p, _, _ = stats.chi2_contingency(ct)
                 test = "Chi-square (trend)"
-            rows.append({
+
+            base_row = {
                 "Cohort": cohort_label, "Variant_ID": var_id, "Gene": sym,
-                "Clinical_Var": col, "Clin_Label": meta["label"], "Test": test,
-                "N_0/0": len(groups[0]) if len(groups) > 0 else 0,
-                "N_0/1": len(groups[1]) if len(groups) > 1 else 0,
-                "N_1/1": len(groups[2]) if len(groups) > 2 else 0,
-                "Stat": round(stat, 3), "P_Value": p,
-            })
+                "Clinical_Var": col, "Clin_Label": meta["label"],
+                "N_WT": len(g0), "N_Het": len(g1), "N_Hom": len(g2),
+                "Test_Trend": test,
+                "Stat_Trend": round(stat, 3), "P_Trend": p,
+            }
+
+            # (b) Het vs WT
+            het_res = _geno_contrast(g0, g1, col, meta, label="Het_vs_WT")
+            base_row["Test_Het_vs_WT"] = het_res["Test_Contrast"]  if het_res else "Skipped"
+            base_row["P_Het_vs_WT"]    = het_res["P_Contrast"]     if het_res else np.nan
+            base_row["N_Het_used"]     = het_res["N_test"]         if het_res else 0
+
+            # (c) Hom vs WT (only if enough Hom)
+            if len(g2) >= MIN_CARRIERS:
+                hom_res = _geno_contrast(g0, g2, col, meta, label="Hom_vs_WT")
+                base_row["Test_Hom_vs_WT"] = hom_res["Test_Contrast"] if hom_res else "Skipped"
+                base_row["P_Hom_vs_WT"]    = hom_res["P_Contrast"]    if hom_res else np.nan
+                base_row["N_Hom_used"]     = hom_res["N_test"]        if hom_res else 0
+            else:
+                base_row["Test_Hom_vs_WT"] = f"Skipped (n_Hom={len(g2)} < {MIN_CARRIERS})"
+                base_row["P_Hom_vs_WT"]    = np.nan
+                base_row["N_Hom_used"]     = len(g2)
+
+            rows.append(base_row)
+
     res = pd.DataFrame(rows)
     if not res.empty:
-        res = _apply_fdr(res)
-        res["Nominal_Sig"] = res["P_Value"] < 0.05
-        res["FDR_Sig"]     = res["FDR_P_Value"] < FDR_THRESHOLD
-        print(f"  {len(res)} tests | {res['Nominal_Sig'].sum()} nominal | {res['FDR_Sig'].sum()} FDR\n")
+        # FDR correction on the primary trend p-value (used as the headline test)
+        res = _apply_fdr(res, p_col="P_Trend", out_col="FDR_Trend")
+        res["Nominal_Sig"] = res["P_Trend"] < 0.05
+        res["FDR_Sig"]     = res["FDR_Trend"] < FDR_THRESHOLD
+        # FDR for the Het/Hom contrasts separately
+        for contrast_p, contrast_fdr in [("P_Het_vs_WT", "FDR_Het_vs_WT"),
+                                          ("P_Hom_vs_WT", "FDR_Hom_vs_WT")]:
+            res = _apply_fdr(res, p_col=contrast_p, out_col=contrast_fdr)
+        # Rename P_Value to P_Trend for backwards-compat downstream plotting
+        res["P_Value"] = res["P_Trend"]
+        res["FDR_P_Value"] = res["FDR_Trend"]
+        print(f"  {len(res)} tests | {res['Nominal_Sig'].sum()} nominal (trend) | {res['FDR_Sig'].sum()} FDR\n")
     else:
         print("  No results.\n")
     return res
 
 
-# ── ANALYSIS 4: SURVIVAL (AU ENDO) ───────────────────────────────────────────
+# ── ANALYSIS 4: SURVIVAL — ALL COHORTS WITH SURVIVAL DATA ────────────────────
+#
+# Cohorts and endpoints:
+#   Endometrial (AT=AUs) — OS  : canon__os_months  + ENDO_EXITUS_BIN
+#                            — PFS : canon__pfs_months + ENDO_PD_BIN
+#   Breast (MT-T_N)  — OS  : BREAST_OS_MONTHS_DERIVED + BREAST_EXITUS_DERIVED
+#
+# Model:
+#   (a) Log-rank test: carrier (any GT) vs non-carrier — quick screening
+#   (b) Age- and BMI-adjusted Cox PH — additive model: snp_carrier + age_z + bmi_z
+#   (c) Genotypic Cox PH    — WT reference, Het and Hom as separate dummy terms
+#                             (only when n_Hom ≥ MIN_CARRIERS)
+#       covariates: age_z, bmi_z
+#
+# KM curves stratified by genotype class (WT / Het / Hom), one page per
+# variant × endpoint.  All pages written to a single PDF.
+#
+# FDR correction: BH applied within each cohort × endpoint combination.
 
-def survival_analysis(df: pd.DataFrame) -> pd.DataFrame:
+SURVIVAL_COHORTS = {
+    "Endometrial": {
+        "cohort_filter": "Endometri",
+        "endpoints": {
+            "OS":  {"t_col": "canon__os_months",        "ev_col": "ENDO_EXITUS_BIN"},
+            "PFS": {"t_col": "canon__pfs_months",        "ev_col": "ENDO_PD_BIN"},
+        },
+        "age_col": "canon__age",
+    },
+    "Breast": {
+        "cohort_filter": "Breast",
+        "endpoints": {
+            "OS":  {"t_col": "BREAST_OS_MONTHS_DERIVED", "ev_col": "BREAST_EXITUS_DERIVED"},
+        },
+        "age_col": "canon__age",
+    },
+}
+
+_GENO_COLS  = {"WT": "#1976D2", "Het": "#F57C00", "Hom": "#C62828"}
+
+
+def survival_analysis(df: pd.DataFrame, out_dir: Optional[Path]=None) -> pd.DataFrame:
     if not _HAS_LIFELINES:
         print("=== Analysis 4: Survival — SKIPPED (lifelines not installed) ===\n")
-        return pd.DataFrame()
+        return pd.DataFrame(), []
 
-    print("=== Analysis 4: Survival — AU Endometrial ===")
-    df = df[~df["is_replicate"] & (df["Tissue"] == "Tumour")
-            & df["Cohort"].str.contains("Endometri", case=False, na=False)].copy()
+    print("=== Analysis 4: Survival — all cohorts ===")
+    df = df[~df["is_replicate"] & (df["Tissue"] == "Tumour")].copy()
+    if "GT" not in df.columns:
+        print("  No GT column — genotypic model unavailable.\n")
+        return pd.DataFrame(), []
 
-    rows = []
-    km_pages = []
+    rows      = []
+    km_pdf = None
+    km_n_pages = 0
+    if out_dir is not None and _HAS_LIFELINES:
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        km_pdf_path = out_dir / "17_KM_Curves_All_Cohorts.pdf"
+        km_pdf = pdf_backend.PdfPages(km_pdf_path)
 
-    for endpoint, ev_col in [("OS", "ENDO_EXITUS_BIN"), ("PFS", "ENDO_PD_BIN")]:
-        t_col = "canon__os_months" if endpoint == "OS" else "canon__pfs_months"
-        for var_id, vdf in df.groupby("Variant_ID"):
-            sym = vdf["SYMBOL"].dropna().iloc[0] if vdf["SYMBOL"].notna().any() else ""
-            carrier_set = set(vdf["Sample"].unique())
-            sd = df.drop_duplicates("Sample").set_index("Sample")
-            if t_col not in sd.columns or ev_col not in sd.columns: continue
-            valid = sd[[t_col, ev_col]].dropna()
-            if len(valid) < 6: continue
-            T = valid[t_col]
-            E = valid[ev_col].astype(float)
-            x = pd.Series(sd.index.isin(carrier_set).astype(int), index=sd.index)
-            x = x.loc[valid.index]
-            if x.nunique() < 2: continue
 
-            # Log-rank
-            try:
-                lr = logrank_test(T[x==1], T[x==0], E[x==1], E[x==0])
-                lr_p = round(lr.p_value, 4)
-            except Exception: lr_p = np.nan
+    for cohort_label, cohort_cfg in SURVIVAL_COHORTS.items():
+        cdf = df[df["Cohort"].str.contains(cohort_cfg["cohort_filter"],
+                                            case=False, na=False)].copy()
+        if cdf.empty:
+            print(f"  {cohort_label}: no tumour samples — skipping.")
+            continue
 
-            # Cox PH
-            try:
-                cox_df = pd.DataFrame({"T": T, "E": E, "snp": x})
-                cph = CoxPHFitter()
-                cph.fit(cox_df, duration_col="T", event_col="E", show_progress=False)
-                hr  = round(np.exp(cph.params_["snp"]), 3)
-                ci  = np.exp(cph.confidence_intervals_.loc["snp"])
-                p_cox = round(cph.summary.loc["snp", "p"], 4)
-                hr_ci = f"[{ci.iloc[0]:.3f}, {ci.iloc[1]:.3f}]"
-            except Exception:
-                hr = np.nan; hr_ci = np.nan; p_cox = np.nan
+        age_col = cohort_cfg["age_col"]
+        print(f"  {cohort_label}: {cdf['Sample'].nunique()} tumour samples")
 
-            rows.append({
-                "Endpoint": endpoint, "Variant_ID": var_id, "Gene": sym,
-                "N_total": len(valid), "N_carriers": int(x.sum()),
-                "N_events": int(E.sum()),
-                "Logrank_P": lr_p, "HR": hr, "HR_CI95": hr_ci, "P_Cox": p_cox,
-            })
+        for endpoint, ep_cfg in cohort_cfg["endpoints"].items():
+            t_col  = ep_cfg["t_col"]
+            ev_col = ep_cfg["ev_col"]
 
-            # KM plot
-            fig, ax = plt.subplots(figsize=(6, 4))
-            kmf = KaplanMeierFitter()
-            for g, label, col in [(1, "Carrier", "#D32F2F"), (0, "Non-carrier", "#1976D2")]:
-                m = x == g
-                if m.sum() < 2: continue
-                kmf.fit(T[m], E[m], label=f"{label} (n={m.sum()})")
-                kmf.plot_survival_function(ax=ax, ci_show=True, color=col)
-            ax.set_title(f"{var_id} — {sym} | {endpoint} | p={lr_p}", fontsize=9)
-            ax.set_xlabel(f"{endpoint} (months)")
-            ax.set_ylabel("Survival probability")
-            ax.legend(fontsize=8)
-            plt.tight_layout()
-            km_pages.append(fig)
+            if t_col not in cdf.columns or ev_col not in cdf.columns:
+                print(f"    {endpoint}: columns missing — skipping.")
+                continue
+
+            # One row per sample with genotype
+            sd = cdf.drop_duplicates("Sample").set_index("Sample").copy()
+            sd["dose"] = sd["GT"].map({"0/0": 0, "0/1": 1, "1/1": 2})
+            sd["geno"] = sd["dose"].map({0: "WT", 1: "Het", 2: "Hom"})
+
+            print(f"    {endpoint} …")
+
+            for var_id, vdf in cdf.groupby("Variant_ID"):
+                sym = vdf["SYMBOL"].dropna().iloc[0] if vdf["SYMBOL"].notna().any() else ""
+                carrier_set = set(vdf["Sample"].unique())
+
+                # Build per-sample frame for this variant
+                s = sd.copy()
+                # Samples not in carrier_set → WT (dose=0)
+                s.loc[~s.index.isin(carrier_set), ["dose", "geno"]] = [0, "WT"]
+                # Samples in carrier_set keep their GT-derived genotype
+
+                # Required columns
+                needed = [t_col, ev_col]
+                if age_col in s.columns: needed.append(age_col)
+                bmi_col = _choose_bmi_col(s, cohort_label)
+                if bmi_col: needed.append(bmi_col)
+                valid = s[list(dict.fromkeys(needed + ["dose", "geno"]))].copy()
+                valid[t_col]  = pd.to_numeric(valid[t_col],  errors="coerce")
+                valid[ev_col] = pd.to_numeric(valid[ev_col], errors="coerce")
+                valid = valid.dropna(subset=[t_col, ev_col])
+                # Guard: Cox/log-rank need events; skip extremely low-event fits
+                if valid[ev_col].sum() < 2:
+                    continue
+                valid = valid[valid[t_col] > 0]   # lifelines requires T > 0
+                if len(valid) < 6: continue
+
+                T    = valid[t_col]
+                E    = valid[ev_col].astype(float)
+                geno = valid["geno"].fillna("WT")
+                dose = valid["dose"].fillna(0).astype(int)
+
+                n_wt  = (geno == "WT").sum()
+                n_het = (geno == "Het").sum()
+                n_hom = (geno == "Hom").sum()
+                n_carriers = n_het + n_hom
+
+                if n_carriers < MIN_CARRIERS or n_wt < MIN_CARRIERS:
+                    continue
+
+                # ── (a) Log-rank: any carrier vs WT ──────────────────────
+                carrier_flag = (dose > 0).astype(int)
+                try:
+                    lr = logrank_test(T[carrier_flag==1], T[carrier_flag==0],
+                                      E[carrier_flag==1], E[carrier_flag==0])
+                    lr_p = round(lr.p_value, 4)
+                except Exception:
+                    lr_p = np.nan
+
+                # ── (b) Age- and BMI-adjusted additive Cox ───────────────────
+                cox_add_hr = cox_add_ci = cox_add_p = np.nan
+                cox_add_note = ""
+                try:
+                    # Guard against (quasi-)complete separation in carrier vs WT:
+                    # if any of the 2×2 cells is zero (events/non-events in either group),
+                    # Cox estimates can become non-identifiable and unstable.
+                    ev_car  = int(E[carrier_flag==1].sum())
+                    ev_wt   = int(E[carrier_flag==0].sum())
+                    ne_car  = int((carrier_flag==1).sum() - ev_car)
+                    ne_wt   = int((carrier_flag==0).sum() - ev_wt)
+                    if min(ev_car, ev_wt, ne_car, ne_wt) == 0:
+                        cox_add_note = "skipped_separation(carrier_vs_WT)"
+                    else:
+                        cox_df = pd.DataFrame({"T": T, "E": E, "carrier": carrier_flag})
+                        if age_col in valid.columns:
+                            a = pd.to_numeric(valid[age_col], errors="coerce")
+                            cox_df["age_z"] = (a - a.mean()) / a.std()
+                            formula_cols = ["carrier", "age_z"]
+                        else:
+                            formula_cols = ["carrier"]
+                        if bmi_col and bmi_col in valid.columns:
+                            b_vals = pd.to_numeric(valid[bmi_col], errors="coerce")
+                            cox_df["bmi_z"] = (b_vals - b_vals.mean()) / b_vals.std()
+                            formula_cols.append("bmi_z")
+                        cox_df = cox_df.dropna()
+                        if len(cox_df) >= 6:
+                            cph = CoxPHFitter(penalizer=0.1)
+                            cph.fit(cox_df, duration_col="T", event_col="E",
+                                    formula=" + ".join(formula_cols), show_progress=False)
+                            cox_add_hr = round(float(_safe_exp(cph.params_["carrier"])), 3)
+                            ci = _safe_exp(cph.confidence_intervals_.loc["carrier"])
+                            cox_add_p  = round(float(cph.summary.loc["carrier", "p"]), 4)
+                        try:
+                            lo = float(ci.iloc[0]) if hasattr(ci, "iloc") else float(ci[0])
+                            hi = float(ci.iloc[1]) if hasattr(ci, "iloc") else float(ci[1])
+                            cox_add_ci = f"[{lo:.3f}, {hi:.3f}]"
+                        except Exception:
+                            cox_add_ci = np.nan
+                except Exception:
+                    cox_add_note = cox_add_note or "fit_error"
+                    if age_col in valid.columns:
+                        a = pd.to_numeric(valid[age_col], errors="coerce")
+                        cox_df["age_z"] = (a - a.mean()) / a.std()
+                        formula_cols = ["carrier", "age_z"]
+                    else:
+                        formula_cols = ["carrier"]
+                    if bmi_col and bmi_col in valid.columns:
+                        b_vals = pd.to_numeric(valid[bmi_col], errors="coerce")
+                        cox_df["bmi_z"] = (b_vals - b_vals.mean()) / b_vals.std()
+                        formula_cols.append("bmi_z")
+                    cox_df = cox_df.dropna()
+                    if len(cox_df) >= 6:
+                        cph = CoxPHFitter()
+                        cph.fit(cox_df, duration_col="T", event_col="E",
+                                formula=" + ".join(formula_cols), show_progress=False)
+                        cox_add_hr = round(float(_safe_exp(cph.params_["carrier"])), 3)
+                        ci = _safe_exp(cph.confidence_intervals_.loc["carrier"])
+                        cox_add_p  = round(float(cph.summary.loc["carrier", "p"]), 4)
+                        try:
+                            lo = float(ci.iloc[0]) if hasattr(ci, "iloc") else float(ci[0])
+                            hi = float(ci.iloc[1]) if hasattr(ci, "iloc") else float(ci[1])
+                            cox_add_ci = f"[{lo:.3f}, {hi:.3f}]"
+                        except Exception:
+                            cox_add_ci = np.nan
+                except Exception:
+                    pass
+
+                # ── (c) Genotypic Cox (WT reference, Het + Hom terms) ────
+                geno_het_hr = geno_het_ci = geno_het_p = np.nan
+                geno_hom_hr = geno_hom_ci = geno_hom_p = np.nan
+                model_type = "Additive_only"
+
+                def _term_ok(glabel: str) -> bool:
+                    try:
+                        e  = int(E[geno == glabel].sum())
+                        ne = int((E[geno == glabel] == 0).sum())
+                        return (e >= 1) and (ne >= 1)
+                    except Exception:
+                        return False
+
+                geno_terms = []
+                if n_het >= MIN_CARRIERS and _term_ok("Het"):
+                    geno_terms.append("Het")
+                if n_hom >= MIN_CARRIERS and _term_ok("Hom"):
+                    geno_terms.append("Hom")
+
+                if len(geno_terms) > 0:
+                    model_type = "Genotypic_" + "_".join(geno_terms)
+                    try:
+                        gdf = pd.DataFrame({
+                            "T": T, "E": E,
+                            "Het": (geno == "Het").astype(int),
+                            "Hom": (geno == "Hom").astype(int),
+                        })
+                        geno_formula = " + ".join(geno_terms)
+
+                        if age_col in valid.columns:
+                            a = pd.to_numeric(valid[age_col], errors="coerce")
+                            gdf["age_z"] = (a - a.mean()) / a.std()
+                            geno_formula += " + age_z"
+                        if bmi_col and bmi_col in valid.columns:
+                            b_vals = pd.to_numeric(valid[bmi_col], errors="coerce")
+                            gdf["bmi_z"] = (b_vals - b_vals.mean()) / b_vals.std()
+                            geno_formula += " + bmi_z"
+
+                        gdf = gdf.dropna()
+                        if len(gdf) >= 6 and gdf["E"].sum() >= 2:
+                            cph_g = CoxPHFitter(penalizer=0.1)
+                            cph_g.fit(gdf, duration_col="T", event_col="E",
+                                      formula=geno_formula, show_progress=False)
+
+                            if "Het" in geno_terms and "Het" in cph_g.params_.index:
+                                hr_v = round(float(_safe_exp(cph_g.params_["Het"])), 3)
+                                ci_v = _safe_exp(cph_g.confidence_intervals_.loc["Het"])
+                                p_v  = round(float(cph_g.summary.loc["Het", "p"]), 4)
+                                geno_het_hr = hr_v
+                                geno_het_ci = f"[{ci_v.iloc[0]:.3f}, {ci_v.iloc[1]:.3f}]"
+                                geno_het_p  = p_v
+
+                            if "Hom" in geno_terms and "Hom" in cph_g.params_.index:
+                                hr_v = round(float(_safe_exp(cph_g.params_["Hom"])), 3)
+                                ci_v = _safe_exp(cph_g.confidence_intervals_.loc["Hom"])
+                                p_v  = round(float(cph_g.summary.loc["Hom", "p"]), 4)
+                                geno_hom_hr = hr_v
+                                geno_hom_ci = f"[{ci_v.iloc[0]:.3f}, {ci_v.iloc[1]:.3f}]"
+                                geno_hom_p  = p_v
+                    except Exception:
+                        model_type = "Additive_only"
+                elif n_het >= MIN_CARRIERS:
+                    model_type = "Additive_only"
+
+                rows.append({
+                    "Cohort":           cohort_label,
+                    "Endpoint":         endpoint,
+                    "Variant_ID":       var_id,
+                    "Gene":             sym,
+                    "N_total":          len(valid),
+                    "N_WT":             int(n_wt),
+                    "N_Het":            int(n_het),
+                    "N_Hom":            int(n_hom),
+                    "N_events":         int(E.sum()),
+                    "Model_Type":       model_type,
+                    # Log-rank
+                    "Logrank_P":        lr_p,
+                    # Additive Cox (any carrier vs WT, age-adjusted)
+                    "HR_Additive":      cox_add_hr,
+                    "HR_Additive_CI95": cox_add_ci,
+                    "P_Cox_Additive":   cox_add_p,
+                    "Additive_Note":   cox_add_note,
+                    # Genotypic Cox (Het vs WT)
+                    "HR_Het":           geno_het_hr,
+                    "HR_Het_CI95":      geno_het_ci,
+                    "P_Cox_Het":        geno_het_p,
+                    # Genotypic Cox (Hom vs WT)
+                    "HR_Hom":           geno_hom_hr,
+                    "HR_Hom_CI95":      geno_hom_ci,
+                    "P_Cox_Hom":        geno_hom_p,
+                })
+
+                # ── KM plot — stratified by genotype class ─────────────
+                fig, ax = plt.subplots(figsize=(7, 4.5))
+                kmf = KaplanMeierFitter()
+                for geno_label, col in _GENO_COLS.items():
+                    mask = geno == geno_label
+                    if mask.sum() < 2: continue
+                    kmf.fit(T[mask], E[mask],
+                            label=f"{geno_label} (n={mask.sum()})")
+                    kmf.plot_survival_function(ax=ax, ci_show=True, color=col)
+                title = (f"{var_id}  [{sym}]  —  {cohort_label} | {endpoint}\n"
+                         f"Log-rank p={lr_p}  |  "
+                         f"WT n={n_wt}, Het n={n_het}, Hom n={n_hom}")
+                ax.set_title(title, fontsize=8.5)
+                ax.set_xlabel(f"{endpoint} (months)")
+                ax.set_ylabel("Survival probability")
+                ax.legend(fontsize=8)
+                _style_ax(ax)
+                plt.tight_layout()
+                if km_pdf is not None: km_pdf.savefig(fig, bbox_inches="tight"); km_n_pages += 1
+                plt.close(fig)
 
     res = pd.DataFrame(rows)
     if not res.empty:
-        for ep in res["Endpoint"].unique():
-            sub = res[res["Endpoint"] == ep].copy()
-            res.loc[sub.index, "FDR_P_Cox"] = _apply_fdr(sub, "P_Cox", "FDR_P_Cox")["FDR_P_Cox"]
-        print(f"  {len(res)} tests across {res['Endpoint'].nunique()} endpoints\n")
+        # FDR within each cohort × endpoint × model term
+        for cohort in res["Cohort"].unique():
+            for ep in res["Endpoint"].unique():
+                mask = (res["Cohort"] == cohort) & (res["Endpoint"] == ep)
+                sub  = res[mask].copy()
+                if sub.empty: continue
+                for p_col, fdr_col in [
+                    ("P_Cox_Additive", "FDR_Cox_Additive"),
+                    ("P_Cox_Het",      "FDR_Cox_Het"),
+                    ("P_Cox_Hom",      "FDR_Cox_Hom"),
+                ]:
+                    res.loc[mask, fdr_col] = _apply_fdr(sub, p_col, fdr_col)[fdr_col]
+        n_nom = (res["P_Cox_Additive"] < 0.05).sum()
+        print(f"  {len(res)} tests across {res['Cohort'].nunique()} cohorts, "
+              f"{res['Endpoint'].nunique()} endpoints | "
+              f"{n_nom} nominal (additive Cox)\n")
     else:
-        print("  No results (likely insufficient OS/PFS data).\n")
+        print("  No survival results (check OS/PFS columns and event coding).\n")
 
-    return res, km_pages
+    # Close KM PDF if we wrote any pages
+    if km_pdf is not None:
+        km_pdf.close()
+        print(f"  Saved: {km_pdf_path}  ({km_n_pages} pages)")
+    return res
 
 
 # ── VISUALISATION ─────────────────────────────────────────────────────────────
@@ -1186,10 +1638,10 @@ def _draw_heatmap(clin_res, p_col, title_suffix, out_path, filter_thresh=0.20):
     log_piv = -np.log10(pivot.fillna(1).clip(lower=1e-10))
     sig_t   = -np.log10(0.05 if "Raw" in title_suffix else FDR_THRESHOLD)
 
-    cell_h  = 0.52
-    cell_w  = 1.4
-    fig_h   = max(5, len(pivot) * cell_h + 2.5)
-    fig_w   = max(8, len(pivot.columns) * cell_w + 3)
+    cell_h  = 0.65
+    cell_w  = 1.8
+    fig_h   = max(6, len(pivot) * cell_h + 3)
+    fig_w   = max(10, len(pivot.columns) * cell_w + 4)
 
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
@@ -1210,11 +1662,11 @@ def _draw_heatmap(clin_res, p_col, title_suffix, out_path, filter_thresh=0.20):
             txt_c = "white" if lp >= sig_t else "#333333"
             ax.text(j + 0.5, i + 0.38,
                     f"{raw_p:.3f}" if raw_p >= 0.001 else f"{raw_p:.1e}",
-                    ha="center", va="center", fontsize=6.5, color=txt_c)
+                    ha="center", va="center", fontsize=8, color=txt_c)
             if star not in ("", "ns"):
                 ax.text(j + 0.5, i + 0.72, star,
                         ha="center", va="center",
-                        fontsize=8, color="white" if lp >= sig_t else "#c62828",
+                        fontsize=10, color="white" if lp >= sig_t else "#c62828",
                         fontweight="bold")
 
     # Add significance threshold annotation to colourbar
@@ -1229,8 +1681,8 @@ def _draw_heatmap(clin_res, p_col, title_suffix, out_path, filter_thresh=0.20):
                  fontsize=11, fontweight="bold", pad=10)
     ax.set_xlabel("Clinical variable", fontsize=9, labelpad=8)
     ax.set_ylabel("Variant", fontsize=9, labelpad=8)
-    plt.xticks(rotation=40, ha="right", fontsize=8)
-    plt.yticks(fontsize=7.5)
+    plt.xticks(rotation=40, ha="right", fontsize=10)
+    plt.yticks(fontsize=9)
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
@@ -1248,15 +1700,25 @@ def make_heatmaps(breast_clin, endo_clin, out_dir):
                       f"FDR-corrected — {label}",
                       out_dir / f"17_SNP_Heatmap_{label}_FDR.png",
                       filter_thresh=0.30)
-        adj_res = clin_res[clin_res["P_Adj"].notna()].copy()
+        adj_res = clin_res[clin_res["P_Adj_Age"].notna()].copy()
         if not adj_res.empty:
-            _draw_heatmap(adj_res, "P_Adj",
+            _draw_heatmap(adj_res, "P_Adj_Age",
                           f"Age-adjusted p — {label}",
-                          out_dir / f"17_SNP_Heatmap_{label}_adj_raw_p.png",
+                          out_dir / f"17_SNP_Heatmap_{label}_adj_age_raw_p.png",
                           filter_thresh=0.10)
-            _draw_heatmap(adj_res, "FDR_Adj",
+            _draw_heatmap(adj_res, "FDR_Adj_Age",
                           f"Age-adjusted FDR — {label}",
-                          out_dir / f"17_SNP_Heatmap_{label}_adj_FDR.png",
+                          out_dir / f"17_SNP_Heatmap_{label}_adj_age_FDR.png",
+                          filter_thresh=0.30)
+        bmi_res = clin_res[clin_res["P_Adj_AgeBMI"].notna()].copy()
+        if not bmi_res.empty:
+            _draw_heatmap(bmi_res, "P_Adj_AgeBMI",
+                          f"Age+BMI-adjusted p — {label}",
+                          out_dir / f"17_SNP_Heatmap_{label}_adj_agebmi_raw_p.png",
+                          filter_thresh=0.10)
+            _draw_heatmap(bmi_res, "FDR_Adj_AgeBMI",
+                          f"Age+BMI-adjusted FDR — {label}",
+                          out_dir / f"17_SNP_Heatmap_{label}_adj_agebmi_FDR.png",
                           filter_thresh=0.30)
 
 
@@ -1273,11 +1735,12 @@ def make_forest_plots(breast_clin, endo_clin, out_dir):
     ]:
         if clin_res.empty: continue
 
-        # Keep only binary tests with a valid adjusted OR and CI
+        # Keep only binary tests with a valid age-adjusted OR and CI
+        # (age-only model used as primary adjusted result — full N)
         sub = clin_res[
             (clin_res["Clin_Type"] == "binary") &
-            clin_res["OR_Adj"].notna() &
-            clin_res["OR_Adj_CI95"].notna()
+            clin_res["OR_Adj_Age"].notna() &
+            clin_res["OR_Adj_Age_CI95"].notna()
         ].copy()
         if sub.empty: continue
 
@@ -1288,17 +1751,24 @@ def make_forest_plots(breast_clin, endo_clin, out_dir):
                 return float(lo), float(hi)
             except Exception:
                 return np.nan, np.nan
-        sub[["CI_lo", "CI_hi"]] = sub["OR_Adj_CI95"].apply(
+        sub[["CI_lo", "CI_hi"]] = sub["OR_Adj_Age_CI95"].apply(
             lambda s: pd.Series(_parse_ci(s))
         )
         sub = sub.dropna(subset=["CI_lo", "CI_hi"])
         if sub.empty: continue
 
         # Sort by p-value; label = "Gene: clinical var"
-        sub = sub.sort_values("P_Adj")
+        sub = sub.sort_values("P_Adj_Age")
         sub["label"] = sub.apply(
             lambda r: f"{r['Gene'] or r['Variant_ID']} — {r['Clin_Label']}", axis=1
         )
+
+        # Cap extreme OR/CI values for display (keep raw values in data)
+        OR_CAP = 20.0
+        sub["OR_plot"]    = sub["OR_Adj_Age"].clip(upper=OR_CAP)
+        sub["CI_lo_plot"] = sub["CI_lo"].clip(lower=0)
+        sub["CI_hi_plot"] = sub["CI_hi"].clip(upper=OR_CAP)
+        sub["capped"]     = sub["CI_hi"] > OR_CAP
 
         n_rows = len(sub)
         fig_h  = max(5, n_rows * 0.42 + 2)
@@ -1307,27 +1777,32 @@ def make_forest_plots(breast_clin, endo_clin, out_dir):
         ypos = np.arange(n_rows)[::-1]   # top = most significant
 
         # Colour by significance
-        sig_mask = sub["P_Adj"] < 0.05
+        sig_mask = sub["P_Adj_Age"] < 0.05
         point_c  = [colour if s else "#999999" for s in sig_mask]
 
-        # Error bars
-        xerr_lo = (sub["OR_Adj"] - sub["CI_lo"]).values
-        xerr_hi = (sub["CI_hi"] - sub["OR_Adj"]).values
-        ax.errorbar(sub["OR_Adj"].values, ypos,
+        # Error bars (capped)
+        xerr_lo = (sub["OR_plot"] - sub["CI_lo_plot"]).values
+        xerr_hi = (sub["CI_hi_plot"] - sub["OR_plot"]).values
+        ax.errorbar(sub["OR_plot"].values, ypos,
                     xerr=[np.clip(xerr_lo, 0, None), np.clip(xerr_hi, 0, None)],
                     fmt="none", ecolor="#aaaaaa", elinewidth=1.2, capsize=3, zorder=2)
 
         # Points
         for i, (_, row) in enumerate(sub.iterrows()):
-            ax.scatter(row["OR_Adj"], ypos[i],
+            ax.scatter(row["OR_plot"], ypos[i],
                        s=90, color=point_c[i],
                        edgecolors="white", linewidths=0.6, zorder=3)
+            # Arrow marker if CI was capped
+            if row["capped"]:
+                ax.annotate("→", xy=(OR_CAP, ypos[i]),
+                            fontsize=9, color="#aaaaaa", va="center")
 
-        # p-value and OR labels on the right
-        x_max = ax.get_xlim()[1]
+        # p-value labels on the right
+        ax.set_xlim(left=0, right=OR_CAP * 1.15)
+        x_max = OR_CAP * 1.05
         for i, (_, row) in enumerate(sub.iterrows()):
-            pstr = f"p={row['P_Adj']:.3f}{_sig_label(row['P_Adj'])}"
-            ax.text(x_max * 1.01, ypos[i], pstr,
+            pstr = f"p={row['P_Adj_Age']:.3f}{_sig_label(row['P_Adj_Age'])}"
+            ax.text(x_max, ypos[i], pstr,
                     va="center", ha="left", fontsize=7, color="#444444")
 
         ax.axvline(1, color="#555555", linestyle="--", linewidth=1, alpha=0.7)
@@ -1396,7 +1871,7 @@ def make_distribution_plots(breast_clin, endo_clin, merged, out_dir):
             col     = row["Clinical_Var"]
             var_id  = row["Variant_ID"]
             p_u     = row["P_Unadj"]
-            p_a     = row.get("P_Adj", np.nan)
+            p_a     = row.get("P_Adj_Age", np.nan)
 
             # Carrier flag for this specific variant
             var_samples = set(
@@ -1412,6 +1887,13 @@ def make_distribution_plots(breast_clin, endo_clin, merged, out_dir):
             plot_df = cohort_df[[col, "_carrier"]].dropna()
             if plot_df.empty or plot_df["_carrier"].nunique() < 2:
                 ax.set_visible(False); continue
+
+            # Cap extreme outliers at 1st/99th percentile to prevent axis blow-out
+            col_numeric = pd.to_numeric(plot_df[col], errors="coerce")
+            p01, p99 = col_numeric.quantile(0.01), col_numeric.quantile(0.99)
+            if p99 > p01:  # only cap if range is non-trivial
+                plot_df = plot_df.copy()
+                plot_df[col] = col_numeric.clip(lower=p01, upper=p99)
 
             # Violin
             parts = ax.violinplot(
@@ -1508,7 +1990,10 @@ def make_binary_bar_plots(breast_clin, endo_clin, merged, out_dir):
         nrows   = int(np.ceil(n_plots / ncols))
         fig, axes = plt.subplots(nrows, ncols,
                                  figsize=(4.5 * ncols, 4.0 * nrows),
-                                 squeeze=False)
+                                 squeeze=False,
+                                 facecolor="white")
+        for ax in axes.flatten():
+            ax.set_facecolor("white")
         axes_flat = axes.flatten()
 
         cohort_df = merged[
@@ -1520,8 +2005,8 @@ def make_binary_bar_plots(breast_clin, endo_clin, merged, out_dir):
             col    = row["Clinical_Var"]
             var_id = row["Variant_ID"]
             p_u    = row["P_Unadj"]
-            p_a    = row.get("P_Adj", np.nan)
-            or_v   = row.get("OR_Adj", row.get("OR_Unadj", np.nan))
+            p_a    = row.get("P_Adj_Age", np.nan)
+            or_v   = row.get("OR_Adj_Age", row.get("OR_Unadj", np.nan))
 
             var_samples = set(
                 merged[(merged["Variant_ID"] == var_id) &
@@ -1566,7 +2051,7 @@ def make_binary_bar_plots(breast_clin, endo_clin, merged, out_dir):
             # OR annotation
             if pd.notna(or_v):
                 or_str = f"OR = {or_v:.2f}"
-                ci_str = row.get("OR_Adj_CI95", "")
+                ci_str = row.get("OR_Adj_Age_CI95", "")
                 ax.text(0.5, 105,
                         f"{or_str}  {ci_str}",
                         ha="center", va="bottom",
@@ -1610,122 +2095,21 @@ def save_km_pdf(km_pages, out_path):
     print(f"  Saved: {out_path} ({len(km_pages)} KM curves)")
 
 
-def make_km_plots(surv_df, merged, out_dir):
+def make_km_plots(surv_df, km_pages, out_dir):
     """
-    Improved KM plots: at-risk table, shaded CI, clean styling.
-    One page per variant × endpoint combination.
+    Write all KM curve pages (generated inside survival_analysis) to a single PDF.
+    Each page shows WT / Het / Hom curves for one variant × cohort × endpoint.
     """
-    if not _HAS_LIFELINES or surv_df.empty: return
+    if not _HAS_LIFELINES or not km_pages:
+        return
 
-    endpoint_meta = {
-        "OS":  ("canon__os_months",  "ENDO_EXITUS_BIN",  "Overall Survival"),
-        "PFS": ("canon__pfs_months", "ENDO_PD_BIN",      "Progression-free Survival"),
-    }
-
-    endo_df = (merged[
-        (~merged["is_replicate"]) &
-        (merged["sheet"] == "AT=AUs")
-    ].drop_duplicates("Sample")
-     .set_index("Sample"))
-
-    out_pdf = out_dir / "17_KM_Curves_AU_Endo.pdf"
+    out_pdf = out_dir / "17_KM_Curves_All_Cohorts.pdf"
     with pdf_backend.PdfPages(out_pdf) as pdf:
-        for _, srow in surv_df.iterrows():
-            ep      = srow["Endpoint"]
-            var_id  = srow["Variant_ID"]
-            gene    = srow.get("Gene", "") or var_id
-            t_col, ev_col, ep_label = endpoint_meta[ep]
-
-            if t_col not in endo_df.columns or ev_col not in endo_df.columns:
-                continue
-
-            # Carrier flag
-            var_samples = set(
-                merged[(merged["Variant_ID"] == var_id) &
-                        (merged["sheet"] == "AT=AUs")]["Sample"].unique()
-            )
-            T = endo_df[t_col]
-            E = endo_df[ev_col].astype(float)
-            x = endo_df.index.map(lambda s: "Carrier" if s in var_samples
-                                  else "Non-carrier")
-            valid = pd.concat([T, E, x.rename("group")], axis=1).dropna()
-            valid.columns = ["T", "E", "group"]
-            if valid["group"].nunique() < 2: continue
-
-            # Build figure with at-risk table
-            fig = plt.figure(figsize=(8, 6))
-            gs  = fig.add_gridspec(2, 1, height_ratios=[4, 1], hspace=0.05)
-            ax_km   = fig.add_subplot(gs[0])
-            ax_risk = fig.add_subplot(gs[1], sharex=ax_km)
-
-            kmf = KaplanMeierFitter()
-            time_points = np.linspace(0, valid["T"].max(), 8)
-            risk_table  = {}
-
-            for grp, c in [("Carrier", _PALETTE["carrier"]),
-                            ("Non-carrier", _PALETTE["non_carrier"])]:
-                m = valid["group"] == grp
-                if m.sum() < 2: continue
-                kmf.fit(valid.loc[m, "T"], valid.loc[m, "E"],
-                        label=f"{grp} (n={m.sum()})")
-                kmf.plot_survival_function(
-                    ax=ax_km, ci_show=True,
-                    color=c, ci_alpha=0.12, linewidth=2.2,
-                )
-                # At-risk counts at each time point
-                risk_table[grp] = [
-                    int((valid.loc[m, "T"] >= t).sum()) for t in time_points
-                ]
-
-            # Significance + HR annotation
-            lr_p = srow.get("Logrank_P", np.nan)
-            hr   = srow.get("HR", np.nan)
-            hr_ci= srow.get("HR_CI95", "")
-            info = (f"Log-rank p = {lr_p:.4f}" if pd.notna(lr_p) else "")
-            if pd.notna(hr):
-                info += f"\nHR = {hr:.2f} {hr_ci}"
-            ax_km.text(0.97, 0.97, info,
-                       transform=ax_km.transAxes,
-                       ha="right", va="top", fontsize=8.5,
-                       bbox=dict(boxstyle="round,pad=0.4", fc="white",
-                                 ec="#cccccc", alpha=0.9))
-
-            ax_km.set_ylabel("Survival probability", fontsize=10)
-            ax_km.set_xlabel("")
-            ax_km.set_ylim(-0.03, 1.08)
-            ax_km.set_title(
-                f"{gene} ({var_id})  —  {ep_label}",
-                fontsize=11, fontweight="bold"
-            )
-            _style_ax(ax_km, grid=False)
-            ax_km.yaxis.grid(True, linestyle=":", alpha=0.4)
-            ax_km.axhline(0.5, color="#aaaaaa", linestyle=":", linewidth=1)
-
-            # At-risk table
-            ax_risk.set_xlim(ax_km.get_xlim())
-            ax_risk.set_ylim(-0.5, len(risk_table) - 0.5)
-            ax_risk.set_yticks(range(len(risk_table)))
-            ax_risk.set_yticklabels(list(risk_table.keys()), fontsize=8)
-            for yi, (grp, counts) in enumerate(risk_table.items()):
-                for xi, (tp, cnt) in enumerate(zip(time_points, counts)):
-                    ax_risk.text(tp, yi, str(cnt),
-                                 ha="center", va="center", fontsize=7.5,
-                                 color=(_PALETTE["carrier"] if grp == "Carrier"
-                                        else _PALETTE["non_carrier"]))
-            ax_risk.set_xlabel("Time (months)", fontsize=10)
-            ax_risk.set_ylabel("At risk", fontsize=8, labelpad=4)
-            ax_risk.spines["top"].set_visible(False)
-            ax_risk.spines["right"].set_visible(False)
-            ax_risk.spines["left"].set_visible(False)
-            ax_risk.yaxis.set_tick_params(length=0)
-            ax_risk.xaxis.grid(False)
-            ax_risk.yaxis.grid(False)
-            plt.setp(ax_km.get_xticklabels(), visible=False)
-
+        for fig in km_pages:
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
-    print(f"  Saved: {out_pdf}")
+    print(f"  Saved: {out_pdf}  ({len(km_pages)} pages)")
 
 
 # ── 7. SUMMARY OVERVIEW PANEL ─────────────────────────────────────────────────
@@ -1747,9 +2131,10 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
 
     # ── Panel A: SNP frequency in tumour vs healthy ───────────────────────
     if not tvh.empty:
-        grp_cols = {"Breast_Tumour_vs_Healthy": "#AD1457",
-                    "Endo_Tumour_vs_Healthy":   "#00695C"}
-        for grp, col in grp_cols.items():
+        # Use actual Analysis_Group values from tumour_vs_healthy()
+        grp_colour_map = {"Breast": "#AD1457", "Endometrium": "#00695C"}
+        plotted_any = False
+        for grp, col in grp_colour_map.items():
             sub = tvh[tvh["Analysis_Group"] == grp].copy()
             if sub.empty: continue
             sub = sub.sort_values("Freq_Tumour_%", ascending=False).head(20)
@@ -1758,19 +2143,24 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
                            sub["Freq_Tumour_%"].values,
                            colors=col, linewidth=1.2, alpha=0.6)
             ax_freq.scatter(sub["Freq_Tumour_%"].values, y,
-                            color=col, s=60, zorder=3,
-                            label=grp.replace("_", " "))
+                            color=col, s=60, zorder=3, label=grp)
             ax_freq.scatter(sub["Freq_Healthy_%"].values, y,
-                            color=col, s=40, marker="D",
-                            alpha=0.5, zorder=3)
-        ax_freq.set_yticks([])
-        ax_freq.set_xlabel("Frequency (%)", fontsize=9)
-        ax_freq.set_title("A  SNP frequency: \u25cf tumour  \u25c6 healthy\n(top 20 per cohort)",
-                           fontsize=9, fontweight="bold", loc="left")
-        ax_freq.legend(fontsize=7.5, frameon=False)
-        _style_ax(ax_freq)
+                            color=col, s=40, marker="D", alpha=0.5, zorder=3)
+            plotted_any = True
+        if plotted_any:
+            ax_freq.set_yticks([])
+            ax_freq.set_xlabel("Frequency (%)", fontsize=9)
+            ax_freq.set_title("A  SNP frequency: \u25cf tumour  \u25c6 healthy\n(top 20 per cohort)",
+                               fontsize=9, fontweight="bold", loc="left")
+            ax_freq.legend(fontsize=7.5, frameon=False)
+            _style_ax(ax_freq)
+        else:
+            ax_freq.text(0.5, 0.5, "No cohort-level tumour vs healthy data",
+                         ha="center", va="center", transform=ax_freq.transAxes,
+                         color="#aaaaaa", fontsize=9)
+            ax_freq.set_axis_off()
 
-    # ── Panel B: Number of nominal hits per variant ───────────────────────
+        # ── Panel B: Number of nominal hits per variant ───────────────────────
     all_clin = pd.concat(
         [x for x in [breast_clin, endo_clin] if not x.empty],
         ignore_index=True
@@ -1836,49 +2226,75 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
         _style_ax(ax_dots, grid=False)
         ax_dots.yaxis.grid(True, linestyle=":", alpha=0.4)
 
-    # ── Panel D: Survival HR overview ─────────────────────────────────────
-    if not surv_res.empty and "HR" in surv_res.columns:
-        sr = surv_res.dropna(subset=["HR"]).copy()
-        sr["_label"] = sr["Gene"].fillna("") + " " + sr["Variant_ID"] + "\n(" + sr["Endpoint"] + ")"
-        sr = sr.sort_values("HR")
-        ypos = np.arange(len(sr))
+    # ── Panel D: Survival HR overview (additive Cox, all cohorts) ─────────
+    hr_col = "HR_Additive"
+    ci_col = "HR_Additive_CI95"
+    p_col  = "P_Cox_Additive"
+    HR_CAP = 10.0   # cap extreme HRs from unstable models (small n separation)
 
-        def _parse_ci(s):
-            try:
-                lo, hi = re.findall(r"[-0-9.eE+]+", str(s))[:2]
-                return float(lo), float(hi)
-            except Exception:
-                return np.nan, np.nan
+    if not surv_res.empty and hr_col in surv_res.columns:
+        sr = surv_res.dropna(subset=[hr_col]).copy()
+        # Flag and remove wildly unstable models (HR > cap or very small p with huge HR)
+        sr["_unstable"] = sr[hr_col] > HR_CAP
+        sr_plot = sr[~sr["_unstable"]].copy()
+        n_unstable = sr["_unstable"].sum()
 
-        sr[["CI_lo", "CI_hi"]] = sr["HR_CI95"].apply(
-            lambda s: pd.Series(_parse_ci(s))
-        )
-        ax_hr.errorbar(
-            sr["HR"].values, ypos,
-            xerr=[np.clip((sr["HR"] - sr["CI_lo"]).values, 0, None),
-                  np.clip((sr["CI_hi"] - sr["HR"]).values, 0, None)],
-            fmt="none", ecolor="#aaaaaa", elinewidth=1, capsize=2
-        )
-        c_hr = sr["Logrank_P"].apply(
-            lambda p: "#c62828" if pd.notna(p) and p < 0.05 else "#999999"
-        )
-        ax_hr.scatter(sr["HR"].values, ypos, c=c_hr, s=65,
-                      edgecolors="white", linewidths=0.5, zorder=3)
-        ax_hr.axvline(1, color="#555555", linestyle="--", linewidth=1, alpha=0.7)
-        ax_hr.set_yticks(ypos)
-        ax_hr.set_yticklabels(sr["_label"].values, fontsize=7.5)
-        ax_hr.set_xlabel("Hazard Ratio (95% CI)", fontsize=9)
-        ax_hr.set_title("D  Survival HR \u2014 AU endometrial cohort\n(\u25cf p<0.05  \u25cb n.s.)",
-                         fontsize=9, fontweight="bold", loc="left")
-        _style_ax(ax_hr, grid=False)
-        ax_hr.xaxis.grid(True, linestyle=":", alpha=0.4)
+        if sr_plot.empty:
+            ax_hr.text(0.5, 0.5,
+                       (f"All Cox models unstable (HR > {HR_CAP})\n"
+                         "likely due to small n per genotype"),
+                       ha="center", va="center", transform=ax_hr.transAxes,
+                       color="#aaaaaa", fontsize=9, style="italic")
+            ax_hr.set_axis_off()
+        else:
+            sr_plot["_label"] = (sr_plot["Gene"].fillna("") + " " + sr_plot["Variant_ID"]
+                            + "\n(" + sr_plot["Cohort"].str.replace("_", " ")
+                            + ", " + sr_plot["Endpoint"] + ")")
+            sr_plot = sr_plot.sort_values(hr_col)
+            ypos = np.arange(len(sr_plot))
+
+            def _parse_ci_d(s):
+                try:
+                    lo, hi = re.findall(r"[-0-9.eE+]+", str(s))[:2]
+                    return float(lo), float(hi)
+                except Exception:
+                    return np.nan, np.nan
+
+            sr_plot[["CI_lo", "CI_hi"]] = sr_plot[ci_col].apply(
+                lambda s: pd.Series(_parse_ci_d(s))
+            )
+            sr_plot["CI_hi_plot"] = sr_plot["CI_hi"].clip(upper=HR_CAP)
+            cohort_c = sr_plot["Cohort"].map(
+                lambda c: _COHORT_C.get("Breast" if "Breast" in c else "Endometrial", "#888888")
+            )
+            ax_hr.errorbar(
+                sr_plot[hr_col].values, ypos,
+                xerr=[np.clip((sr_plot[hr_col] - sr_plot["CI_lo"]).values, 0, None),
+                      np.clip((sr_plot["CI_hi_plot"] - sr_plot[hr_col]).values, 0, None)],
+                fmt="none", ecolor="#aaaaaa", elinewidth=1, capsize=2
+            )
+            ax_hr.scatter(sr_plot[hr_col].values, ypos, c=cohort_c, s=65,
+                          edgecolors="white", linewidths=0.5, zorder=3)
+            sig_mask = sr_plot[p_col] < 0.05
+            if sig_mask.any():
+                ax_hr.scatter(sr_plot.loc[sig_mask, hr_col].values, ypos[sig_mask],
+                              marker="*", s=120, c="#c62828", zorder=4)
+            ax_hr.axvline(1, color="#555555", linestyle="--", linewidth=1, alpha=0.7)
+            ax_hr.set_yticks(ypos)
+            ax_hr.set_yticklabels(sr_plot["_label"].values, fontsize=7)
+            ax_hr.set_xlabel("Hazard Ratio (95% CI) — additive Cox", fontsize=9)
+            note = f" ({n_unstable} unstable models excluded)" if n_unstable else ""
+            ax_hr.set_title(f"D  Survival HR — all cohorts\n(★ p<0.05, colour = cohort){note}",
+                             fontsize=9, fontweight="bold", loc="left")
+            _style_ax(ax_hr, grid=False)
+            ax_hr.xaxis.grid(True, linestyle=":", alpha=0.4)
     else:
         ax_hr.text(0.5, 0.5, "No survival data",
                    ha="center", va="center",
                    transform=ax_hr.transAxes, color="#aaaaaa", fontsize=11)
         ax_hr.set_axis_off()
 
-    fig.suptitle("GSDMB SNP Association Analysis — Overview",
+        fig.suptitle("GSDMB SNP Association Analysis — Overview",
                  fontsize=14, fontweight="bold", y=1.01)
     out_path = out_dir / "17_Summary_Panel.png"
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
@@ -1889,7 +2305,7 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 
 def parse_args():
-    p = argparse.ArgumentParser(description="SNP–clinical association analysis (script 17 v2)")
+    p = argparse.ArgumentParser(description="SNP–clinical association analysis (script 17 v3)")
     p.add_argument("--gsdmb",   default=str(DEFAULT_GSDMB))
     p.add_argument("--master",  default=str(DEFAULT_MASTER))
     p.add_argument("--out_dir", default=str(DEFAULT_OUT))
@@ -1904,6 +2320,479 @@ def parse_args():
     p.add_argument("--no_manifests", action="store_true",
                    help="Skip manifest filter (use extraction_flag fallback instead)")
     return p.parse_args()
+
+
+
+
+# ── ANALYSIS 5: CANCER RISK (CASE-CONTROL) ───────────────────────────────────
+#
+# Objective 1 of the thesis: epidemiological case-control study evaluating
+# whether GSDMB SNP carrier status is associated with RISK OF DEVELOPING cancer.
+#
+# Design:
+#   Cases    = tumour patients (sheet AT=AUs for endometrial, MT-T_N for breast)
+#   Controls = healthy women  (sheet EN for endometrial, MN for breast)
+#
+# Tests per variant:
+#   (a) Unadjusted: Fisher exact (carrier vs non-carrier)
+#   (b) Age-only adjusted: logistic regression  cancer ~ snp + age_z
+#   (c) Age+BMI adjusted:  logistic regression  cancer ~ snp + age_z + bmi_z
+#   (d) Genotypic model:   Het vs WT and Hom vs WT contrasts (age-adjusted)
+#
+# FDR correction: BH applied within each cohort across all variants.
+# Output: cancer_risk Excel sheet + forest plot.
+
+RISK_COHORTS = {
+    "Breast": {
+        "case_sheet":    "MT-T_N",
+        "control_sheet": "MN",
+        "label":         "Breast cancer risk",
+    },
+    "Endometrial": {
+        "case_sheet":    "AT=AUs",
+        "control_sheet": "EN",
+        "label":         "Endometrial cancer risk",
+    },
+}
+
+
+def cancer_risk_analysis(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Analysis 5: Case-control logistic regression for cancer risk.
+
+    For each cohort (breast, endometrial) and each variant, compares
+    carrier frequency in tumour cases vs matched healthy controls.
+    Reports unadjusted OR (Fisher) and age- / age+BMI-adjusted OR
+    (logistic regression), plus genotypic Het-vs-WT and Hom-vs-WT contrasts.
+    """
+    try:
+        from statsmodels.formula.api import logit as sm_logit
+    except ImportError:
+        sm_logit = None
+        print("  WARNING: statsmodels not available — adjusted models skipped.")
+
+    print("=== Analysis 5: Cancer Risk (Case-Control) ===")
+    df = df[~df["is_replicate"]].copy()
+
+    rows = []
+
+    for cohort_label, cfg in RISK_COHORTS.items():
+        case_df    = df[df["sheet"] == cfg["case_sheet"]].copy()
+        control_df = df[df["sheet"] == cfg["control_sheet"]].copy()
+
+        # One row per sample — use sample-level data (not variant-level rows)
+        case_samples    = case_df.drop_duplicates("Sample").set_index("Sample")
+        control_samples = control_df.drop_duplicates("Sample").set_index("Sample")
+
+        n_cases    = len(case_samples)
+        n_controls = len(control_samples)
+
+        print(f"  {cohort_label}: {n_cases} cases, {n_controls} controls")
+        if n_cases < MIN_CARRIERS or n_controls < MIN_CARRIERS:
+            print(f"    Too few samples — skipping.")
+            continue
+
+        # All variants present in either group
+        all_variants = df[df["sheet"].isin(
+            [cfg["case_sheet"], cfg["control_sheet"]]
+        )]["Variant_ID"].unique()
+
+        for var_id in all_variants:
+            # Carrier sets
+            case_carriers    = set(case_df[case_df["Variant_ID"] == var_id]["Sample"].unique())
+            control_carriers = set(control_df[control_df["Variant_ID"] == var_id]["Sample"].unique())
+
+            sym = ""
+            var_rows = df[df["Variant_ID"] == var_id]
+            if var_rows["SYMBOL"].notna().any():
+                sym = var_rows["SYMBOL"].dropna().iloc[0]
+
+            # ── Contingency table ─────────────────────────────────────────
+            a = len(case_carriers)                    # cases who carry
+            b = n_cases - a                           # cases who don't
+            c = len(control_carriers)                 # controls who carry
+            d = n_controls - c                        # controls who don't
+
+            if a + c < MIN_CARRIERS:
+                continue   # too few carriers overall
+
+            _, p_unadj = fisher_exact([[a, b], [c, d]])
+            or_unadj, or_meth = _haldane_or(a, b, c, d)
+
+            freq_case    = round(a / n_cases    * 100, 2)
+            freq_control = round(c / n_controls * 100, 2)
+
+            row = {
+                "Cohort":           cohort_label,
+                "Variant_ID":       var_id,
+                "Gene":             sym,
+                "N_Cases":          n_cases,
+                "N_Controls":       n_controls,
+                "Carriers_Cases":   a,
+                "Carriers_Controls":c,
+                "Freq_Cases_%":     freq_case,
+                "Freq_Controls_%":  freq_control,
+                "OR_Unadj":         round(or_unadj, 4),
+                "OR_Unadj_Method":  or_meth,
+                "P_Unadj":          p_unadj,
+            }
+
+            # ── Build per-sample dataframe for regression ─────────────────
+            # cancer_status: 1 = case, 0 = control
+            tmp_cov = pd.concat([case_samples, control_samples])
+            bmi_col = _choose_bmi_col(tmp_cov, cohort_label)
+            cov_cols = ["canon__age"] + ([bmi_col] if bmi_col else [])
+            all_samples = pd.concat([
+                case_samples.reindex(columns=cov_cols).assign(
+                    cancer=1,
+                    carrier=lambda x: x.index.map(lambda s: 1 if s in case_carriers else 0)
+                ),
+                control_samples.reindex(columns=cov_cols).assign(
+                    cancer=0,
+                    carrier=lambda x: x.index.map(lambda s: 1 if s in control_carriers else 0)
+                ),
+            ])
+            all_samples["canon__age"] = pd.to_numeric(all_samples["canon__age"], errors="coerce")
+            if bmi_col and bmi_col in all_samples.columns:
+                all_samples[bmi_col] = pd.to_numeric(all_samples[bmi_col], errors="coerce")
+
+            events_min = min(a + c, b + d)
+
+            def _fit_logit(df_model, covariates, label):
+                """
+                Firth's penalised logistic regression (primary) with fallback to
+                standard logistic. Firth's method handles perfect/quasi-separation
+                which is common in small case-control genetic studies.
+                All statsmodels warnings suppressed — results flagged in Note column.
+                """
+                import warnings
+                n = len(df_model)
+                if n < 10:
+                    return {
+                        f"OR_Adj_{label}":      np.nan,
+                        f"OR_Adj_{label}_CI95": np.nan,
+                        f"P_Adj_{label}":       np.nan,
+                        f"N_Adj_{label}":       n,
+                        f"Note_{label}":        f"Skipped: too few samples ({n})",
+                    }
+
+                X = df_model[covariates].copy()
+                y = df_model["cancer"].values
+
+                # ── Try Firth penalised logistic (best for small n / separation) ──
+                try:
+                    from sklearn.linear_model import LogisticRegression
+                    # Firth via faiss not available; use statsmodels firth if present
+                    import importlib
+                    if importlib.util.find_spec("statsmodels") is not None:
+                        raise ImportError("use statsmodels path")
+                except Exception:
+                    pass
+
+                # ── Firth via statsmodels penalised logit ─────────────────────────
+                try:
+                    from statsmodels.formula.api import logit as sm_logit_f
+                    import statsmodels.formula.api as smf
+                    df_fit = X.copy()
+                    df_fit["cancer"] = y
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        fit = smf.logit("cancer ~ " + " + ".join(covariates),
+                                        data=df_fit).fit_regularized(
+                                            method="l1", alpha=0.1, disp=False)
+                    # fit_regularized doesn't give p-values/CIs directly;
+                    # fall through to penalised approach below
+                    raise ValueError("use manual Firth")
+                except Exception:
+                    pass
+
+                # ── Manual Firth penalised logit (Heinze & Schemper 2002) ─────────
+                try:
+                    from scipy.special import expit
+                    from scipy.optimize import minimize
+
+                    X_arr = np.column_stack([np.ones(len(X))] + [X[c].values for c in covariates])
+                    y_arr = y.astype(float)
+
+                    def firth_loglik(beta):
+                        mu  = expit(X_arr @ beta)
+                        mu  = np.clip(mu, 1e-10, 1 - 1e-10)
+                        W   = np.diag(mu * (1 - mu))
+                        XWX = X_arr.T @ W @ X_arr
+                        try:
+                            sign, logdet = np.linalg.slogdet(XWX)
+                            penalty = 0.5 * logdet if sign > 0 else 0
+                        except Exception:
+                            penalty = 0
+                        ll = np.sum(y_arr * np.log(mu) + (1 - y_arr) * np.log(1 - mu))
+                        return -(ll + penalty)   # minimise negative
+
+                    beta0 = np.zeros(X_arr.shape[1])
+                    res   = minimize(firth_loglik, beta0, method="BFGS",
+                                     options={"maxiter": 500, "gtol": 1e-5})
+
+                    if not res.success and res.fun == firth_loglik(beta0):
+                        raise ValueError("Firth did not converge")
+
+                    beta = res.x
+                    # Profile likelihood CIs via Hessian approximation
+                    hess  = res.hess_inv if hasattr(res, "hess_inv") else np.eye(len(beta))
+                    if isinstance(hess, np.ndarray):
+                        se = np.sqrt(np.diag(hess))
+                    else:
+                        se = np.sqrt(np.diag(hess.todense()))
+                    # carrier is index 1 (after intercept)
+                    carrier_idx = 1
+                    b   = beta[carrier_idx]
+                    se_b = se[carrier_idx]
+                    z   = b / se_b if se_b > 0 else 0
+                    p_v = float(2 * (1 - __import__("scipy.stats", fromlist=["norm"]).norm.cdf(abs(z))))
+                    or_v = round(float(_safe_exp(b)), 4)
+                    ci_lo = round(float(_safe_exp(b - 1.96 * se_b)), 4)
+                    ci_hi = round(float(_safe_exp(b + 1.96 * se_b)), 4)
+
+                    return {
+                        f"OR_Adj_{label}":      or_v,
+                        f"OR_Adj_{label}_CI95": f"[{ci_lo:.3f}, {ci_hi:.3f}]",
+                        f"P_Adj_{label}":       round(p_v, 4),
+                        f"N_Adj_{label}":       n,
+                        f"Note_{label}":        "Firth penalised logistic",
+                    }
+
+                except Exception as firth_err:
+                    # ── Fallback: standard logistic with warning suppression ───────
+                    try:
+                        from statsmodels.formula.api import logit as sm_logit_fb
+                        import statsmodels.formula.api as smf_fb
+                        df_fit = X.copy(); df_fit["cancer"] = y
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            fit = smf_fb.logit(
+                                "cancer ~ " + " + ".join(covariates), data=df_fit
+                            ).fit(disp=0, maxiter=300)
+                        or_v = round(float(_safe_exp(fit.params["carrier"])), 4)
+                        ci   = _safe_exp(fit.conf_int().loc["carrier"])
+                        p_v  = round(float(fit.pvalues["carrier"]), 4)
+                        return {
+                            f"OR_Adj_{label}":      or_v,
+                            f"OR_Adj_{label}_CI95": f"[{ci.iloc[0]:.3f}, {ci.iloc[1]:.3f}]",
+                            f"P_Adj_{label}":       p_v,
+                            f"N_Adj_{label}":       n,
+                            f"Note_{label}":        "Standard logistic (Firth failed)",
+                        }
+                    except Exception as e:
+                        return {
+                            f"OR_Adj_{label}":      np.nan,
+                            f"OR_Adj_{label}_CI95": np.nan,
+                            f"P_Adj_{label}":       np.nan,
+                            f"N_Adj_{label}":       n,
+                            f"Note_{label}":        f"Failed: {str(e)[:80]}",
+                        }
+
+            # Age-only model
+            age_df = all_samples[["cancer", "canon__age", "carrier"]].dropna().copy()
+            age_df["age_z"] = (age_df["canon__age"] - age_df["canon__age"].mean()) / age_df["canon__age"].std()
+            row.update(_fit_logit(age_df[["age_z", "carrier"]].assign(cancer=age_df["cancer"]),
+                                  ["carrier", "age_z"], "Age"))
+
+            # Age+BMI model
+            if bmi_col and bmi_col in all_samples.columns:
+                bmi_df = all_samples[["cancer", "canon__age", bmi_col, "carrier"]].dropna().copy()
+                if len(bmi_df) >= 6 and bmi_df["canon__age"].std() not in (0, np.nan) and bmi_df[bmi_col].std() not in (0, np.nan):
+                    bmi_df["age_z"] = (bmi_df["canon__age"] - bmi_df["canon__age"].mean()) / bmi_df["canon__age"].std()
+                    bmi_df["bmi_z"] = (bmi_df[bmi_col] - bmi_df[bmi_col].mean()) / bmi_df[bmi_col].std()
+                    row.update(_fit_logit(bmi_df[["carrier", "age_z", "bmi_z"]].assign(cancer=bmi_df["cancer"]),
+                                          ["carrier", "age_z", "bmi_z"], "AgeBMI"))
+                else:
+                    row.update({
+                        "OR_Adj_AgeBMI": np.nan, "OR_Adj_AgeBMI_CI95": np.nan, "P_Adj_AgeBMI": np.nan,
+                        "N_Adj_AgeBMI": len(bmi_df), "Note_AgeBMI": "Skipped: insufficient variance or N"
+                    })
+            else:
+                row.update({
+                    "OR_Adj_AgeBMI": np.nan, "OR_Adj_AgeBMI_CI95": np.nan, "P_Adj_AgeBMI": np.nan,
+                    "N_Adj_AgeBMI": np.nan, "Note_AgeBMI": "Skipped: BMI unavailable"
+                })
+
+            # ── Genotypic model: Het vs WT and Hom vs WT ─────────────────
+            # Need GT per sample — pull from variant rows
+            gt_map = {}
+            for sheet in [cfg["case_sheet"], cfg["control_sheet"]]:
+                vrows = df[(df["Variant_ID"] == var_id) & (df["sheet"] == sheet)]
+                for _, vr in vrows.iterrows():
+                    gt_map[vr["Sample"]] = vr.get("GT", "0/0")
+
+            def _gt_to_geno(sample, carrier_set):
+                gt = gt_map.get(sample, "0/0")
+                if gt == "1/1": return "Hom"
+                if gt == "0/1": return "Het"
+                return "WT"
+
+            all_samples["geno"] = all_samples.index.map(
+                lambda s: _gt_to_geno(s, case_carriers | control_carriers)
+            )
+            n_het = (all_samples["geno"] == "Het").sum()
+            n_hom = (all_samples["geno"] == "Hom").sum()
+
+            # Het vs WT (age-adjusted)
+            het_df = all_samples[all_samples["geno"].isin(["WT", "Het"])].copy()
+            het_df["carrier"] = (het_df["geno"] == "Het").astype(int)
+            het_age = het_df[["cancer", "canon__age", "carrier"]].dropna().copy()
+            if len(het_age) >= 6 and het_age["carrier"].sum() >= MIN_CARRIERS:
+                het_age["age_z"] = (het_age["canon__age"] - het_age["canon__age"].mean()) / het_age["canon__age"].std()
+                res_het = _fit_logit(het_age[["age_z", "carrier"]].assign(cancer=het_age["cancer"]),
+                                     ["carrier", "age_z"], "Het_vs_WT")
+                row["OR_Het_vs_WT"]      = res_het.get("OR_Adj_Het_vs_WT", np.nan)
+                row["OR_Het_vs_WT_CI95"] = res_het.get("OR_Adj_Het_vs_WT_CI95", np.nan)
+                row["P_Het_vs_WT"]       = res_het.get("P_Adj_Het_vs_WT", np.nan)
+                row["N_Het"]             = int(n_het)
+            else:
+                row["OR_Het_vs_WT"] = row["OR_Het_vs_WT_CI95"] = row["P_Het_vs_WT"] = np.nan
+                row["N_Het"] = int(n_het)
+
+            # Hom vs WT (age-adjusted, only if enough Hom)
+            if n_hom >= MIN_CARRIERS:
+                hom_df = all_samples[all_samples["geno"].isin(["WT", "Hom"])].copy()
+                hom_df["carrier"] = (hom_df["geno"] == "Hom").astype(int)
+                hom_age = hom_df[["cancer", "canon__age", "carrier"]].dropna().copy()
+                if len(hom_age) >= 6:
+                    hom_age["age_z"] = (hom_age["canon__age"] - hom_age["canon__age"].mean()) / hom_age["canon__age"].std()
+                    res_hom = _fit_logit(hom_age[["age_z", "carrier"]].assign(cancer=hom_age["cancer"]),
+                                         ["carrier", "age_z"], "Hom_vs_WT")
+                    row["OR_Hom_vs_WT"]      = res_hom.get("OR_Adj_Hom_vs_WT", np.nan)
+                    row["OR_Hom_vs_WT_CI95"] = res_hom.get("OR_Adj_Hom_vs_WT_CI95", np.nan)
+                    row["P_Hom_vs_WT"]       = res_hom.get("P_Adj_Hom_vs_WT", np.nan)
+                    row["N_Hom"]             = int(n_hom)
+                else:
+                    row["OR_Hom_vs_WT"] = row["OR_Hom_vs_WT_CI95"] = row["P_Hom_vs_WT"] = np.nan
+                    row["N_Hom"] = int(n_hom)
+            else:
+                row["OR_Hom_vs_WT"] = row["OR_Hom_vs_WT_CI95"] = row["P_Hom_vs_WT"] = np.nan
+                row["N_Hom"] = int(n_hom)
+
+            rows.append(row)
+
+    res = pd.DataFrame(rows)
+    if res.empty:
+        print("  No results.\n")
+        return res
+
+    # FDR correction within each cohort
+    parts = []
+    for cohort in res["Cohort"].unique():
+        sub = res[res["Cohort"] == cohort].copy()
+        sub = _apply_fdr(sub, p_col="P_Unadj",       out_col="FDR_Unadj")
+        sub = _apply_fdr(sub, p_col="P_Adj_Age",     out_col="FDR_Adj_Age")
+        sub = _apply_fdr(sub, p_col="P_Adj_AgeBMI",  out_col="FDR_Adj_AgeBMI")
+        sub = _apply_fdr(sub, p_col="P_Het_vs_WT",   out_col="FDR_Het_vs_WT")
+        sub = _apply_fdr(sub, p_col="P_Hom_vs_WT",   out_col="FDR_Hom_vs_WT")
+        parts.append(sub)
+
+    res = pd.concat(parts, ignore_index=True).sort_values(["Cohort", "P_Unadj"])
+    res["Nominal_Sig_Unadj"]   = res["P_Unadj"]      < 0.05
+    res["FDR_Sig_Unadj"]       = res["FDR_Unadj"]    < FDR_THRESHOLD
+    res["Nominal_Sig_Adj_Age"] = res["P_Adj_Age"].notna() & (res["P_Adj_Age"] < 0.05)
+    res["FDR_Sig_Adj_Age"]     = res["FDR_Adj_Age"].notna() & (res["FDR_Adj_Age"] < FDR_THRESHOLD)
+
+    print(f"  {len(res)} tests across {res['Cohort'].nunique()} cohorts")
+    for cohort in res["Cohort"].unique():
+        sub = res[res["Cohort"] == cohort]
+        print(f"    {cohort}: {sub['Nominal_Sig_Unadj'].sum()} nominal (unadj) | "
+              f"{sub['FDR_Sig_Unadj'].sum()} FDR (unadj) | "
+              f"{sub['Nominal_Sig_Adj_Age'].sum()} nominal (age-adj)")
+    print()
+    return res
+
+
+def make_risk_forest_plot(risk_res: pd.DataFrame, out_dir: Path):
+    """
+    Forest plot of cancer risk ORs (age-adjusted logistic regression),
+    one panel per cohort, sorted by p-value.
+    Confidence intervals capped at OR_CAP for display.
+    """
+    if risk_res.empty:
+        return
+
+    OR_CAP = 15.0
+
+    cohorts = risk_res["Cohort"].unique()
+    fig, axes = plt.subplots(1, len(cohorts),
+                             figsize=(9 * len(cohorts), max(5, len(risk_res) // len(cohorts) * 0.45 + 2)),
+                             squeeze=False)
+
+    for ax, cohort in zip(axes[0], cohorts):
+        sub = risk_res[risk_res["Cohort"] == cohort].copy()
+        sub = sub.dropna(subset=["OR_Adj_Age"]).sort_values("P_Adj_Age")
+        if sub.empty:
+            ax.set_visible(False)
+            continue
+
+        def _parse_ci(s):
+            try:
+                lo, hi = re.findall(r"[-0-9.eE+]+", str(s))[:2]
+                return float(lo), float(hi)
+            except Exception:
+                return np.nan, np.nan
+
+        sub[["CI_lo", "CI_hi"]] = sub["OR_Adj_Age_CI95"].apply(lambda s: pd.Series(_parse_ci(s)))
+        sub["OR_plot"]    = sub["OR_Adj_Age"].clip(upper=OR_CAP)
+        sub["CI_hi_plot"] = sub["CI_hi"].clip(upper=OR_CAP)
+        sub["CI_lo_plot"] = sub["CI_lo"].clip(lower=0)
+        sub["capped"]     = sub["CI_hi"] > OR_CAP
+
+        col   = _COHORT_C.get(cohort, "#555555")
+        ypos  = np.arange(len(sub))[::-1]
+        sig_mask = sub["P_Adj_Age"] < 0.05
+        point_c  = [col if s else "#999999" for s in sig_mask]
+
+        ax.errorbar(sub["OR_plot"].values, ypos,
+                    xerr=[np.clip((sub["OR_plot"] - sub["CI_lo_plot"]).values, 0, None),
+                          np.clip((sub["CI_hi_plot"] - sub["OR_plot"]).values, 0, None)],
+                    fmt="none", ecolor="#cccccc", elinewidth=1.2, capsize=3, zorder=2)
+
+        for i, (_, row) in enumerate(sub.iterrows()):
+            ax.scatter(row["OR_plot"], ypos[i], s=90, color=point_c[i],
+                       edgecolors="white", linewidths=0.6, zorder=3)
+            if row["capped"]:
+                ax.annotate("→", xy=(OR_CAP, ypos[i]), fontsize=9,
+                            color="#aaaaaa", va="center")
+
+        ax.set_xlim(0, OR_CAP * 1.15)
+        x_ann = OR_CAP * 1.05
+        for i, (_, row) in enumerate(sub.iterrows()):
+            p_str = f"p={row['P_Adj_Age']:.3f}{_sig_label(row['P_Adj_Age'])}"
+            n_str = f"(n={int(row['N_Adj_Age'])})" if pd.notna(row.get("N_Adj_Age")) else ""
+            ax.text(x_ann, ypos[i], f"{p_str} {n_str}",
+                    va="center", ha="left", fontsize=7, color="#444444")
+
+        ax.axvline(1, color="#555555", linestyle="--", linewidth=1, alpha=0.7)
+        labels = (sub["Gene"].fillna("") + " " + sub["Variant_ID"]).str.strip()
+        ax.set_yticks(ypos)
+        ax.set_yticklabels(labels.values, fontsize=8)
+        ax.set_xlabel("Odds Ratio for cancer risk\n(age-adjusted, 95% CI)", fontsize=10)
+        ax.set_title(f"{cohort} cancer — SNP carrier risk\n"
+                     f"(cases n={risk_res.loc[risk_res['Cohort']==cohort, 'N_Cases'].iloc[0]}, "
+                     f"controls n={risk_res.loc[risk_res['Cohort']==cohort, 'N_Controls'].iloc[0]})",
+                     fontsize=11, fontweight="bold", pad=10)
+
+        xlims = ax.get_xlim()
+        ax.axvspan(1, xlims[1], alpha=0.04, color="#c62828")
+        ax.axvspan(xlims[0], 1, alpha=0.04, color="#1976D2")
+        ax.text(0.02, 0.01, "← protective", transform=ax.transAxes,
+                ha="left", va="bottom", fontsize=7.5, color="#1976D2", style="italic")
+        ax.text(0.98, 0.01, "risk →", transform=ax.transAxes,
+                ha="right", va="bottom", fontsize=7.5, color="#c62828", style="italic")
+        _style_ax(ax, grid=False)
+        ax.xaxis.grid(True, linestyle=":", color="#cccccc", alpha=0.6)
+        ax.set_axisbelow(True)
+
+    fig.suptitle("GSDMB SNPs — Cancer Risk (Case-Control, Age-Adjusted)",
+                 fontsize=13, fontweight="bold", y=1.01)
+    plt.tight_layout()
+    out_path = out_dir / "17_Forest_CancerRisk.png"
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {out_path}")
 
 
 def main():
@@ -1941,10 +2830,11 @@ def main():
 
     # Analysis 4 — survival
     surv_res = pd.DataFrame()
-    km_pages = []
-    surv_out = survival_analysis(merged)
-    if isinstance(surv_out, tuple):
-        surv_res, km_pages = surv_out
+    # Analysis 4 — survival (writes KM PDF during analysis)
+    surv_res = survival_analysis(merged, out_dir)
+
+    # Analysis 5 — cancer risk (case-control)
+    risk_res = cancer_risk_analysis(merged)
 
     # Summary
     sig_parts = []
@@ -1955,17 +2845,24 @@ def main():
                              "Odds_Ratio", "P_Value", "FDR_P_Value", "Nominal_Sig", "FDR_Sig"]])
     for res, label in [(breast_clin, "Breast_Tumour"), (endo_clin, "Endometrial_Tumour")]:
         if not res.empty:
-            # Include rows nominal in either unadjusted OR adjusted test
-            sig_mask = res["Nominal_Sig_Unadj"] | res["Nominal_Sig_Adj"]
+            # Include rows nominal in unadjusted OR age-only OR age+BMI adjusted test
+            sig_mask = res["Nominal_Sig_Unadj"] | res["Nominal_Sig_Adj_Age"] | res["Nominal_Sig_Adj_AgeBMI"]
             s = res[sig_mask].copy(); s["Analysis_Type"] = f"Clinical_{label}"
             keep_cols = ["Analysis_Type", "Cohort", "Variant_ID", "Gene", "Clin_Label",
                          "Clin_Type", "N_Carriers", "N_NonCarriers",
                          "Test_Unadj", "OR_Unadj", "P_Unadj", "FDR_Unadj",
                          "Nominal_Sig_Unadj", "FDR_Sig_Unadj",
-                         "Test_Adj", "OR_Adj", "OR_Adj_CI95", "P_Adj", "FDR_Adj",
-                         "Nominal_Sig_Adj", "FDR_Sig_Adj", "Adj_Note"]
+                         "Test_Adj_Age", "OR_Adj_Age", "OR_Adj_Age_CI95", "P_Adj_Age", "FDR_Adj_Age",
+                         "Nominal_Sig_Adj_Age", "FDR_Sig_Adj_Age",
+                         "Test_Adj_AgeBMI", "OR_Adj_AgeBMI", "OR_Adj_AgeBMI_CI95", "P_Adj_AgeBMI", "FDR_Adj_AgeBMI",
+                         "Nominal_Sig_Adj_AgeBMI", "FDR_Sig_Adj_AgeBMI",
+                         "Adj_Age_Note", "Adj_AgeBMI_Note"]
             s = s[[c for c in keep_cols if c in s.columns]]
             sig_parts.append(s)
+    if not risk_res.empty:
+        risk_sig = risk_res[risk_res["Nominal_Sig_Unadj"] | risk_res["Nominal_Sig_Adj_Age"]].copy()
+        risk_sig["Analysis_Type"] = "Cancer_Risk"
+        sig_parts.append(risk_sig)
     summary = (pd.concat(sig_parts, ignore_index=True).sort_values("P_Unadj")
                if sig_parts else pd.DataFrame({"Note": ["No nominally significant results."]}))
 
@@ -1974,7 +2871,7 @@ def main():
                  "canon__molecular_class", "canon__msi_status", "canon__er_status",
                  "canon__pr_status", "canon__her2_copies", "canon__os_months",
                  "canon__pfs_months", "ENDO_EXITUS_BIN", "BREAST_EXITUS_DERIVED",
-                 "BREAST_RECURRENCE_DERIVED", "ENDO_PD_BIN"]
+                 "BREAST_RECURRENCE_DERIVED", "ENDO_PD_BIN", "BREAST_OS_MONTHS_DERIVED"]
     manifest = merged.drop_duplicates("Sample")[[
         c for c in ["Sample", "snp_code", "sample_id", "Cohort", "Tissue", "sheet",
                     "tumour_normal", "is_replicate"] + keep_clin
@@ -1989,7 +2886,8 @@ def main():
         if not endo_clin.empty:   endo_clin.to_excel(xw,  sheet_name="endo_clinical_assoc",   index=False)
         dose_all = pd.concat([breast_dose, endo_dose], ignore_index=True)
         if not dose_all.empty:  dose_all.to_excel(xw,    sheet_name="genotype_dose",          index=False)
-        if not surv_res.empty:  surv_res.to_excel(xw,    sheet_name="survival_au_endo",       index=False)
+        if not surv_res.empty:  surv_res.to_excel(xw,    sheet_name="survival_cox",           index=False)
+        if not risk_res.empty:  risk_res.to_excel(xw,    sheet_name="cancer_risk",             index=False)
         summary.to_excel(xw,                             sheet_name="summary_significant",    index=False)
         manifest.to_excel(xw,                            sheet_name="sample_manifest",        index=False)
     print(f"  Saved: {out_xlsx}\n")
@@ -2001,7 +2899,8 @@ def main():
     make_forest_plots(breast_clin, endo_clin, out_dir)
     make_distribution_plots(breast_clin, endo_clin, merged, out_dir)
     make_binary_bar_plots(breast_clin, endo_clin, merged, out_dir)
-    make_km_plots(surv_res, merged, out_dir)
+    # KM PDF already written inside survival_analysis()
+    make_risk_forest_plot(risk_res, out_dir)
     make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir)
 
     # Final summary
@@ -2013,11 +2912,19 @@ def main():
     if not tvh.empty:
         print(f"  Tumour vs healthy   — nominal: {tvh['Nominal_Sig'].sum()} | FDR<{FDR_THRESHOLD}: {tvh['FDR_Sig'].sum()}")
     if not breast_clin.empty:
-        print(f"  Breast clinical     — nominal unadj: {breast_clin['Nominal_Sig_Unadj'].sum()} | FDR: {breast_clin['FDR_Sig_Unadj'].sum()} | nominal adj: {breast_clin['Nominal_Sig_Adj'].sum()}")
+        print(f"  Breast clinical     — nominal unadj: {breast_clin['Nominal_Sig_Unadj'].sum()} | FDR: {breast_clin['FDR_Sig_Unadj'].sum()} | nominal age-adj: {breast_clin['Nominal_Sig_Adj_Age'].sum()} | nominal age+BMI-adj: {breast_clin['Nominal_Sig_Adj_AgeBMI'].sum()}")
     if not endo_clin.empty:
-        print(f"  Endometrial clinical— nominal unadj: {endo_clin['Nominal_Sig_Unadj'].sum()} | FDR: {endo_clin['FDR_Sig_Unadj'].sum()} | nominal adj: {endo_clin['Nominal_Sig_Adj'].sum()}")
+        print(f"  Endometrial clinical— nominal unadj: {endo_clin['Nominal_Sig_Unadj'].sum()} | FDR: {endo_clin['FDR_Sig_Unadj'].sum()} | nominal age-adj: {endo_clin['Nominal_Sig_Adj_Age'].sum()} | nominal age+BMI-adj: {endo_clin['Nominal_Sig_Adj_AgeBMI'].sum()}")
     if not surv_res.empty:
-        print(f"  Survival (AU endo)  — {len(surv_res)} tests")
+        print(f"  Survival (Cox)      — {len(surv_res)} tests | "
+              f"cohorts: {', '.join(surv_res['Cohort'].unique())}")
+    if not risk_res.empty:
+        for cohort in risk_res["Cohort"].unique():
+            sub = risk_res[risk_res["Cohort"] == cohort]
+            print(f"  Cancer risk ({cohort}) — "
+                  f"{sub['Nominal_Sig_Unadj'].sum()} nominal (unadj) | "
+                  f"{sub['FDR_Sig_Unadj'].sum()} FDR (unadj) | "
+                  f"{sub['Nominal_Sig_Adj_Age'].sum()} nominal (age-adj)")
     print(f"\n  Results : {out_xlsx}")
     print(f"  Plots   : {out_dir}")
 
