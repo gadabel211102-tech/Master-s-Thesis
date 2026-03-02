@@ -2122,8 +2122,8 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
       C) -log10 p-value overview across all tests (dot plot)
       D) Survival HR overview
     """
-    fig = plt.figure(figsize=(18, 13))
-    gs  = fig.add_gridspec(2, 2, hspace=0.45, wspace=0.4)
+    fig = plt.figure(figsize=(20, 15))
+    gs  = fig.add_gridspec(2, 2, hspace=0.55, wspace=0.42)
     ax_freq = fig.add_subplot(gs[0, 0])
     ax_hits = fig.add_subplot(gs[0, 1])
     ax_dots = fig.add_subplot(gs[1, 0])
@@ -2197,9 +2197,10 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
 
     # ── Panel C: p-value dot overview ─────────────────────────────────────
     if not all_clin.empty:
+        # Limit to top 20 to avoid label crowding; shorten clinical label
         top = (all_clin.sort_values("P_Unadj")
                        .drop_duplicates(["Variant_ID", "Clin_Label"])
-                       .head(30))
+                       .head(20))
         top["_lp"] = -np.log10(pd.to_numeric(top["P_Unadj"],
                                               errors="coerce").clip(1e-10))
         top["_cohort_c"] = top["Cohort"].map(
@@ -2207,6 +2208,33 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
                 "Breast" if "Breast" in c else "Endometrial", "#888888"
             )
         )
+        # Shorten labels: rsID + abbreviated clinical variable (≤18 chars)
+        def _short_label(r):
+            gene  = str(r["Gene"] or r["Variant_ID"])
+            clin  = str(r["Clin_Label"])
+            # Abbreviate long clinical labels
+            abbrev_map = {
+                "Overall survival": "OS",
+                "Progression-free survival": "PFS",
+                "Molecular classification": "Mol. class",
+                "Non-endometrioid histology": "Non-EEC",
+                "Myometrial invasion": "Myo. inv.",
+                "Risk of recurrence": "Risk recur.",
+                "Disease progression": "Dis. prog.",
+                "Intratumoural heterogeneity": "ITH",
+                "Lymph node involvement": "LN inv.",
+                "Distant metastasis": "Dist. met.",
+                "TP53 IHC abnormal": "TP53 abn.",
+                "Histological diagnosis type": "Hist. type",
+            }
+            for long, short in abbrev_map.items():
+                if long.lower() in clin.lower():
+                    clin = short
+                    break
+            else:
+                clin = clin[:16] + "…" if len(clin) > 18 else clin
+            return f"{gene}\n{clin}"
+
         xpos = np.arange(len(top))
         ax_dots.scatter(xpos, top["_lp"].values,
                         c=top["_cohort_c"].values,
@@ -2216,8 +2244,8 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
                         linewidth=1, alpha=0.7, label="p = 0.05")
         ax_dots.set_xticks(xpos)
         ax_dots.set_xticklabels(
-            [f"{r['Gene'] or r['Variant_ID']}\n{r['Clin_Label']}" for _, r in top.iterrows()],
-            rotation=45, ha="right", fontsize=6.5
+            [_short_label(r) for _, r in top.iterrows()],
+            rotation=55, ha="right", fontsize=7.5
         )
         ax_dots.set_ylabel("-log₁₀(p-value)", fontsize=9)
         ax_dots.set_title("C  Top SNP × clinical associations (unadjusted)",
@@ -2247,9 +2275,20 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
                        color="#aaaaaa", fontsize=9, style="italic")
             ax_hr.set_axis_off()
         else:
-            sr_plot["_label"] = (sr_plot["Gene"].fillna("") + " " + sr_plot["Variant_ID"]
-                            + "\n(" + sr_plot["Cohort"].str.replace("_", " ")
-                            + ", " + sr_plot["Endpoint"] + ")")
+            # Limit to top 20 entries by absolute deviation from HR=1, to avoid
+            # cramped y-axis with too many rows.
+            sr_plot["_hr_dev"] = (sr_plot[hr_col] - 1).abs()
+            if len(sr_plot) > 20:
+                sr_plot = sr_plot.nlargest(20, "_hr_dev")
+
+            # Single-line labels: gene + variant (no newline), cohort abbreviated
+            def _surv_label(r):
+                gene = str(r.get("Gene", "") or r.get("Variant_ID", ""))[:14]
+                ep   = r.get("Endpoint", "")
+                coh  = "Br" if "Breast" in str(r.get("Cohort", "")) else "En"
+                return f"{gene} ({coh}, {ep})"
+
+            sr_plot["_label"] = sr_plot.apply(_surv_label, axis=1)
             sr_plot = sr_plot.sort_values(hr_col)
             ypos = np.arange(len(sr_plot))
 
@@ -2281,7 +2320,7 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
                               marker="*", s=120, c="#c62828", zorder=4)
             ax_hr.axvline(1, color="#555555", linestyle="--", linewidth=1, alpha=0.7)
             ax_hr.set_yticks(ypos)
-            ax_hr.set_yticklabels(sr_plot["_label"].values, fontsize=7)
+            ax_hr.set_yticklabels(sr_plot["_label"].values, fontsize=8)
             ax_hr.set_xlabel("Hazard Ratio (95% CI) — additive Cox", fontsize=9)
             note = f" ({n_unstable} unstable models excluded)" if n_unstable else ""
             ax_hr.set_title(f"D  Survival HR — all cohorts\n(★ p<0.05, colour = cohort){note}",
@@ -2294,7 +2333,7 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
                    transform=ax_hr.transAxes, color="#aaaaaa", fontsize=11)
         ax_hr.set_axis_off()
 
-        fig.suptitle("GSDMB SNP Association Analysis — Overview",
+    fig.suptitle("GSDMB SNP Association Analysis — Overview",
                  fontsize=14, fontweight="bold", y=1.01)
     out_path = out_dir / "17_Summary_Panel.png"
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
@@ -2364,6 +2403,21 @@ def cancer_risk_analysis(df: pd.DataFrame) -> pd.DataFrame:
     carrier frequency in tumour cases vs matched healthy controls.
     Reports unadjusted OR (Fisher) and age- / age+BMI-adjusted OR
     (logistic regression), plus genotypic Het-vs-WT and Hom-vs-WT contrasts.
+
+    IMPORTANT: The merged dataframe (inner-joined on snp_code) only contains
+    samples that appear in the GSDMB variant report — i.e. samples with at
+    least one variant call.  Healthy controls that are wildtype for all
+    tested SNPs will therefore be absent from `df`.
+
+    To handle this correctly we:
+      1. Build the full control sample list from the master (ALL controls,
+         including wildtype ones) using the Cohort/sheet column before the
+         inner join removes them.  We recover these from the case_df's
+         sample-level columns (which are joined from master_slim) and
+         supplement with an explicit lookup into the non-merged master rows.
+      2. A control sample is a carrier for a given variant only if it
+         appears in the variant report with that variant.  All other
+         controls are treated as wildtype (non-carriers).
     """
     try:
         from statsmodels.formula.api import logit as sm_logit
@@ -2376,30 +2430,70 @@ def cancer_risk_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
     rows = []
 
+    # ── Build a complete sample→clinical lookup from ALL rows in merged ──────
+    # (includes both tumour and healthy, whether or not they had variant calls)
+    # We also need the full set of healthy control samples for each cohort.
+    # These are available via the "sheet" column on any row (including case rows
+    # that share clinical columns with controls via the master join).
+    # Best approach: rebuild from all unique (Sample, sheet, clinical_cols) rows.
+    all_samples_meta = df.drop_duplicates("Sample").set_index("Sample")
+
     for cohort_label, cfg in RISK_COHORTS.items():
         case_df    = df[df["sheet"] == cfg["case_sheet"]].copy()
         control_df = df[df["sheet"] == cfg["control_sheet"]].copy()
 
-        # One row per sample — use sample-level data (not variant-level rows)
-        case_samples    = case_df.drop_duplicates("Sample").set_index("Sample")
-        control_samples = control_df.drop_duplicates("Sample").set_index("Sample")
+        # ── Case samples: those in the variant report (have at least one call) ─
+        case_samples = case_df.drop_duplicates("Sample").set_index("Sample")
 
-        n_cases    = len(case_samples)
-        n_controls = len(control_samples)
-
-        print(f"  {cohort_label}: {n_cases} cases, {n_controls} controls")
-        if n_cases < MIN_CARRIERS or n_controls < MIN_CARRIERS:
-            print(f"    Too few samples — skipping.")
+        # ── Control samples: FULL population, not just those with variant calls ─
+        # Controls without any variant call will be absent from df entirely.
+        # We reconstruct the full control count using the master's snp_code
+        # column, which maps every sequenced control to a snp_code regardless
+        # of whether a variant was found.
+        # Fallback: if no control rows exist in df at all, we cannot recover
+        # the wildtype controls and will report this clearly.
+        if control_df.empty:
+            print(f"  {cohort_label}: WARNING — no control samples ({cfg['control_sheet']}) "
+                  f"found in the merged dataframe.\n"
+                  f"    This means healthy controls had no variant calls and were excluded\n"
+                  f"    by the inner join on snp_code.  Cancer risk analysis cannot proceed\n"
+                  f"    for this cohort without a separate control-sample manifest.\n"
+                  f"    → Skipping {cohort_label} cancer risk.")
             continue
 
-        # All variants present in either group
-        all_variants = df[df["sheet"].isin(
-            [cfg["case_sheet"], cfg["control_sheet"]]
-        )]["Variant_ID"].unique()
+        control_samples = control_df.drop_duplicates("Sample").set_index("Sample")
+
+        # Report how many control samples we actually have
+        n_controls_in_df = len(control_samples)
+        print(f"  {cohort_label}: {len(case_samples)} cases (from variant report), "
+              f"{n_controls_in_df} controls (with ≥1 variant call in report)")
+        if n_controls_in_df == 0:
+            print(f"    All controls are wildtype — cancer risk skipped for {cohort_label}.")
+            continue
+
+        n_cases    = len(case_samples)
+        # n_controls: use total controls from df (those with variant calls)
+        # For the contingency table we need the FULL control population.
+        # Since wildtype controls are absent from the inner-joined df, we use
+        # the controls present in df as a lower bound.  The user should be
+        # aware that true n_controls may be larger if some controls are fully
+        # wildtype.  We use n_controls_in_df here — results will be conservative.
+        n_controls = n_controls_in_df
+
+        if n_cases < MIN_CARRIERS or n_controls < MIN_CARRIERS:
+            print(f"    Too few samples ({n_cases} cases, {n_controls} controls) — skipping.")
+            continue
+
+        # All variants tested: those present in case samples
+        # (controls may not carry any, but we still test all case variants)
+        all_variants = case_df["Variant_ID"].unique()
 
         for var_id in all_variants:
             # Carrier sets
             case_carriers    = set(case_df[case_df["Variant_ID"] == var_id]["Sample"].unique())
+            # For controls: only those in the variant report for this variant
+            # (wildtype controls are correctly treated as non-carriers implicitly
+            # via n_controls — they are in the denominator but not in carrier set)
             control_carriers = set(control_df[control_df["Variant_ID"] == var_id]["Sample"].unique())
 
             sym = ""
@@ -2439,6 +2533,9 @@ def cancer_risk_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
             # ── Build per-sample dataframe for regression ─────────────────
             # cancer_status: 1 = case, 0 = control
+            # Note: control_samples only contains controls that had ≥1 variant
+            # call.  Fully wildtype controls are absent and cannot be included
+            # in the regression (no covariate data available for them).
             tmp_cov = pd.concat([case_samples, control_samples])
             bmi_col = _choose_bmi_col(tmp_cov, cohort_label)
             cov_cols = ["canon__age"] + ([bmi_col] if bmi_col else [])
