@@ -19,6 +19,7 @@ This pipeline performs:
 - Haplotype phasing and association testing  
 - Clinical data integration and harmonisation  
 - SNP–clinical association modelling  
+- Haplotype–clinical association modelling  
 - Survival analysis (Kaplan–Meier + Cox proportional hazards)  
 - Interactive visualisation outputs  
 
@@ -52,10 +53,11 @@ The workflow integrates sequencing QC, genomic annotation, and multivariable sta
 ├── 15_haplo.stats.r
 ├── 16_excel_making.py
 ├── 16b_excel_harmonisation.py
-└── 17_snp-association.py
+├── 17_snp-association.py
+└── 18_haplotype-association.py
 ```
 
-Scripts are intended to be executed sequentially (`01` → `17`).
+Scripts are intended to be executed sequentially (`01` → `18`).
 
 ---
 
@@ -104,6 +106,7 @@ Used for all Python-based processing and modelling:
 - `16_excel_making.py`
 - `16b_excel_harmonisation.py`
 - `17_snp-association.py`
+- `18_haplotype-association.py`
 
 ### Installation
 
@@ -282,7 +285,9 @@ MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx
 
 ## 17_snp-association.py
 
-Performs:
+Performs SNP-level association analysis using individual variant genotypes as the
+exposure variable. Mirrors the statistical framework of script 18 but operates at
+single-variant resolution rather than haplotype level.
 
 ### Pre-processing
 - DNA-only filtering  
@@ -291,33 +296,109 @@ Performs:
 - Technical replicate removal  
 
 ### Statistical Analyses
-- Tumour vs Healthy — Fisher + Odds Ratio  
+- Tumour vs Healthy — Fisher's exact test + Odds Ratio  
 - SNP × Clinical variables:
   - Continuous → Mann–Whitney U  
-  - Binary → Fisher + age-adjusted logistic regression  
+  - Binary → Fisher's exact + age- and BMI-adjusted logistic regression  
   - Nominal → Chi-square  
-- Genotype-dose trend testing  
-- Survival analysis (Kaplan–Meier + Cox PH)  
+- Genotype-dose trend testing (heterozygous / homozygous contrasts)  
+- Survival analysis (Kaplan–Meier + age-adjusted Cox PH) for OS and PFS  
+- Cancer risk — case-control logistic regression (tumour vs healthy)  
 
 ### Multiple Testing
 Benjamini–Hochberg False Discovery Rate (default: FDR < 0.10)
 
 ### Outputs
-- Multi-sheet Excel results  
-- Volcano plots  
-- Clinical heatmaps  
-- Kaplan–Meier curves  
+- `17_SNP_Clinical_Association_Results.xlsx` — multi-sheet results workbook  
+- Volcano plots (raw p and log₂ OR)  
+- Clinical association heatmaps (raw p and FDR)  
+- Forest plots (binary outcomes, cancer risk)  
+- Kaplan–Meier curves (PDF)  
+- Summary panel figure  
 - Sample manifest audit  
+
+### Run
+
+```bash
+python 17_snp-association.py \
+  --gsdmb   /path/to/GSDMB_Annotated_Report_Fixed.xlsx \
+  --master  /path/to/MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx \
+  --out_dir /path/to/output/
+```
+
+---
+
+# Haplotype–Clinical Association Modelling
+
+## 18_haplotype-association.py
+
+Mirrors script 17 but uses **BEAGLE-phased haplotype carrier status** as the
+exposure variable instead of individual SNP genotypes. Haplotype strings are
+constructed from the established SNP positions (gnomAD NFE AF > 1%) identified
+in script 11; each sample carries two haplotype strings (one per chromosome)
+and is classified as a carrier of a given haplotype if it appears on at least
+one chromosome (dosage ≥ 1). Only haplotypes with a global frequency ≥ 2% are
+tested.
+
+### Data Sources
+- `phased_genotypes.tsv` — BEAGLE output from `15_haplotypes.sh`  
+- `MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx` — harmonised clinical master  
+- `GSDMB_Annotated_Report_Fixed.xlsx` — source of established SNP positions  
+
+### Statistical Analyses
+- Tumour vs Healthy — Fisher's exact test per haplotype  
+- Haplotype × Clinical variables (per cohort):
+  - Continuous → Mann–Whitney U  
+  - Binary → Fisher's exact + age- and BMI-adjusted logistic regression  
+  - Nominal → Chi-square  
+- Haplotype-dose trend testing (dosage 0 / 1 / 2) for nominally significant hits  
+- Survival analysis (Kaplan–Meier + age-adjusted Cox PH) for OS and PFS  
+- Cancer risk — case-control logistic regression (tumour vs healthy)  
+
+### Multiple Testing
+Benjamini–Hochberg False Discovery Rate (default: FDR < 0.10)
+
+### Outputs
+- `18_Haplo_Clinical_Association_Results.xlsx` — multi-sheet results workbook:
+  - `haplotype_frequencies`
+  - `tumour_vs_healthy`
+  - `breast_clinical_assoc`
+  - `endo_clinical_assoc`
+  - `haplotype_dose`
+  - `survival_cox`
+  - `cancer_risk`
+  - `summary_significant`
+  - `sample_manifest`
+- `18_Haplo_Volcano_raw_p.png` — tumour vs healthy volcano plot  
+- `18_Haplo_Heatmap_Breast.png` — dual-panel heatmap (−log₁₀p + effect size), breast cohort  
+- `18_Haplo_Heatmap_Endometrial.png` — dual-panel heatmap, endometrial cohort (raw p)  
+- `18_Haplo_Heatmap_Endometrial_FDR.png` — dual-panel heatmap, endometrial cohort (FDR)  
+- `18_Haplo_Forest_Breast.png` — forest plot, breast binary outcomes  
+- `18_Haplo_Forest_Endometrial.png` — forest plot, endometrial binary outcomes  
+- `18_Haplo_Forest_CancerRisk.png` — cancer risk forest plot with 95% CI whiskers  
+- `18_KM_Curves_All_Cohorts.pdf` — Kaplan–Meier curves for all haplotypes and endpoints  
+
+### Run
+
+```bash
+python 18_haplotype-association.py \
+  --phased   /path/to/phased_genotypes.tsv \
+  --master   /path/to/MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx \
+  --annot    /path/to/GSDMB_Annotated_Report_Fixed.xlsx \
+  --out_dir  /path/to/output/ \
+  --min_freq 0.02
+```
 
 ---
 
 # Statistical Framework
 
-- Fisher’s exact test  
+- Fisher's exact test  
 - Mann–Whitney U  
 - Chi-square  
-- Logistic regression (age-adjusted)  
-- Cox proportional hazards  
+- Logistic regression (age-adjusted and age+BMI-adjusted)  
+- Cox proportional hazards (age-adjusted)  
+- Kaplan–Meier survival estimation  
 - Benjamini–Hochberg FDR correction  
 
 ---
@@ -337,4 +418,4 @@ Benjamini–Hochberg False Discovery Rate (default: FDR < 0.10)
 
 # Author
 
-Research conducted as part of a Master's Thesis, February 2026.
+Research conducted as part of a Master's Thesis
