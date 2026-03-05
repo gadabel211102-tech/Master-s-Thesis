@@ -3,12 +3,8 @@
 ================================================================================
 Script 08 — Genomic Variant Landscape Map
 ================================================================================
-Author      : [Your Name]
-Institution : [Your University / Department]
-Thesis      : Characterisation of GSDMB genetic variation across cancer cohorts
 Pipeline    : Step 08 of 17 — runs AFTER variant QC (07b) and COSMIC
               integration (07c), and BEFORE GSDMB-specific analysis (09)
-Last updated: 2025
 
 --------------------------------------------------------------------------------
 PURPOSE
