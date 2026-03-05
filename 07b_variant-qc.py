@@ -3,12 +3,8 @@
 ================================================================================
 Script 07b — Variant-Level Quality Control
 ================================================================================
-Author      : [Your Name]
-Institution : [Your University / Department]
-Thesis      : Characterisation of GSDMB genetic variation across cancer cohorts
 Pipeline    : Step 07b of 17 — runs AFTER annotation merge (07) and BEFORE
               genomic mapping (08)
-Last updated: 2025
 
 --------------------------------------------------------------------------------
 PURPOSE
