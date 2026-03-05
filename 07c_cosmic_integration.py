@@ -3,12 +3,8 @@
 ================================================================================
 Script 07c — COSMIC Cancer Gene Census Integration
 ================================================================================
-Author      : [Your Name]
-Institution : [Your University / Department]
-Thesis      : Characterisation of GSDMB genetic variation across cancer cohorts
 Pipeline    : Step 07c of 17 — runs AFTER variant QC (07b) and BEFORE
               genomic mapping (08)
-Last updated: 2025
 
 --------------------------------------------------------------------------------
 PURPOSE
