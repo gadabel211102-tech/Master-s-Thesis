@@ -19,9 +19,9 @@ A significant enrichment in tumour tissue could suggest that the variant
 confers a cancer risk or plays a role in tumour development at the GSDMB locus.
 
 Three parallel analyses are run:
-  - Global     : all samples combined, regardless of cancer type
-  - Breast     : breast cancer cohort only
-  - Endometrium: endometrial cancer cohort only
+  - Global      : all samples combined, regardless of cancer type
+  - Breast      : breast cancer cohort only
+  - Endometrium : endometrial cancer cohort only
 
 --------------------------------------------------------------------------------
 STATISTICAL METHOD: FISHER'S EXACT TEST
@@ -79,55 +79,74 @@ controlled at 5% (q < 0.05). This is less conservative than the Bonferroni
 correction and better suited to exploratory genomic analyses where some false
 positives are acceptable.
 
-Results are reported with both the raw p-value and the BH-adjusted FDR
-q-value. Statistical significance in this analysis requires FDR q < 0.05.
+FDR correction is applied within each cohort separately — the multiple testing
+burden is defined by the number of SNPs tested within a single analysis, not
+across all cohorts combined.
 
 --------------------------------------------------------------------------------
-VOLCANO PLOT
+TWO VOLCANO PLOTS: RAW vs FDR-ADJUSTED
 --------------------------------------------------------------------------------
-The volcano plot is the standard visualisation for association analyses of
-this kind. Each dot represents one SNP:
-  - X-axis: Odds Ratio (log scale) — magnitude and direction of association
-  - Y-axis: −log10(p-value) — statistical significance
-            (higher = more significant; −log10(0.05) ≈ 1.3 is the threshold)
+This script produces two volcano plots using the same layout but different
+Y-axis values:
 
-The plot is divided into four quadrants by reference lines:
-  - Horizontal dashed red line at −log10(0.05): significance threshold
-  - Vertical dashed blue line at OR = 1: line of no effect
+  Plot 1 — Raw p-value volcano  (12_SNP_Volcano_Plots_RAW.png)
+    Y-axis = −log10(raw Fisher p-value)
+    Threshold line at −log10(0.05) ≈ 1.30
+    Shows all nominally significant SNPs before multiple testing correction.
+    Useful for exploratory screening — more sensitive but less specific.
 
-Quadrant interpretation:
-  Upper-right : significant enrichment in tumour (high OR, low p) → risk SNPs
-  Upper-left  : significant depletion in tumour (low OR, low p)   → protective SNPs
-  Lower half  : non-significant (above p = 0.05 threshold)
+  Plot 2 — FDR-adjusted volcano  (12_SNP_Volcano_Plots_FDR.png)
+    Y-axis = −log10(BH-corrected FDR q-value)
+    Threshold line at −log10(0.05) ≈ 1.30
+    Shows only SNPs that remain significant after correcting for the number
+    of tests performed. More stringent — the primary result for reporting.
 
-The top 5 most significant SNPs per cohort are labelled with their rsID or
-gene:protein identifiers.
+Presenting both plots allows the reader to assess how many nominally
+significant results survive multiple testing correction — an important
+transparency measure in genomic association studies.
 
-Two output figures are saved. Both currently use OR on the log scale; the
-second (suffixed _log2OR.png) is reserved for potential future use of log2(OR)
-on the X-axis if a linear-symmetric scale is preferred.
+Within each plot, panels are arranged in the order: Breast | Endometrium |
+Global. Both X and Y axes are shared across panels to facilitate direct
+visual comparison between cohorts.
+
+--------------------------------------------------------------------------------
+VOLCANO PLOT INTERPRETATION
+--------------------------------------------------------------------------------
+Each dot in the volcano plot represents one SNP:
+  - X-axis : Odds Ratio on a log scale — direction and magnitude of association
+  - Y-axis : −log10(p-value) — statistical significance (higher = more significant)
+
+Reference elements:
+  - Horizontal dashed red line  : significance threshold (p = 0.05)
+  - Vertical dashed blue line   : OR = 1 (no association)
+  - Blue left shading           : OR < 1 region (SNP depleted in tumour → protective)
+  - Red right shading           : OR > 1 region (SNP enriched in tumour → risk)
+  - Red top shading             : significant region (above threshold line)
+
+The top 5 most significant SNPs per panel are labelled with their rsID or
+GENE:HGVSp identifier.
 
 --------------------------------------------------------------------------------
 INPUT
 --------------------------------------------------------------------------------
   GSDMB_Annotated_Report_Fixed.xlsx
     └── Sheet: "Biological_Annotations"
-        Required columns: SYMBOL, IMPACT, CONSEQUENCE, TISSUE, SAMPLE,
+        Required columns: SYMBOL, IMPACT, TISSUE, SAMPLE,
                           Existing_variation, HGVSp, COHORT, gnomADe_NFE_AF
 
 --------------------------------------------------------------------------------
 OUTPUT FILES
 --------------------------------------------------------------------------------
   12_SNP_Enrichment_Results.xlsx
-    Multi-sheet workbook, one sheet per analysis group (Global, Breast,
-    Endometrium). Each row is one SNP with: frequencies, OR, raw p-value,
-    BH-corrected FDR q-value, and correction method used.
+    Multi-sheet workbook (Global | Breast | Endometrium). Each row is one SNP
+    with: carrier counts, frequencies, OR, raw p-value, BH FDR q-value,
+    and correction method used.
 
-  12_SNP_Volcano_Plots.png
-    Three-panel volcano plot (one panel per cohort), OR on log scale.
+  12_SNP_Volcano_Plots_RAW.png
+    Three-panel volcano plot using raw Fisher p-values (300 dpi).
 
-  12_SNP_Volcano_Plots_log2OR.png
-    Identical figure, reserved for log2(OR) X-axis variant.
+  12_SNP_Volcano_Plots_FDR.png
+    Three-panel volcano plot using BH-adjusted FDR q-values (300 dpi).
 
 --------------------------------------------------------------------------------
 REFERENCES
@@ -169,12 +188,11 @@ import os  # File path construction and existence checks
 # THIRD-PARTY IMPORTS
 # ──────────────────────────────────────────────────────────────────────────────
 
-import matplotlib.pyplot as plt                        # Figure and axis creation
-import numpy as np                                     # Numerical operations, log transforms
+import matplotlib.pyplot as plt                        # Figure creation
+import numpy as np                                     # Numerical operations
 import pandas as pd                                    # Data loading and manipulation
 import scipy.stats as stats                            # Fisher's exact test
 import seaborn as sns                                  # FacetGrid volcano plots
-from scipy.stats import chi2_contingency               # Available but not used (kept for reference)
 from statsmodels.stats.multitest import multipletests  # Benjamini-Hochberg FDR correction
 
 
@@ -182,19 +200,22 @@ from statsmodels.stats.multitest import multipletests  # Benjamini-Hochberg FDR 
 # CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-base_path    = "/home/gadeaalonsoj/tfm/gsdmb_final_results/"
-input_file   = os.path.join(base_path, "GSDMB_Annotated_Report_Fixed.xlsx")
-output_xlsx  = os.path.join(base_path, "12_SNP_Enrichment_Results.xlsx")
-output_plot  = os.path.join(base_path, "12_SNP_Volcano_Plots.png")
+base_path   = "/home/gadeaalonsoj/tfm/gsdmb_final_results/"
+input_file  = os.path.join(base_path, "GSDMB_Annotated_Report_Fixed.xlsx")
+output_xlsx = os.path.join(base_path, "12_SNP_Enrichment_Results.xlsx")
 
-# The minimum gnomAD NFE allele frequency for a variant to be considered a SNP.
-# Consistent with script 11.
+# Two separate volcano plot outputs: one for raw p-values, one for FDR q-values
+output_plot_raw = os.path.join(base_path, "12_SNP_Volcano_Plots_RAW.png")
+output_plot_fdr = os.path.join(base_path, "12_SNP_Volcano_Plots_FDR.png")
+
+# Minimum gnomAD NFE allele frequency to classify a variant as a SNP.
+# Consistent with scripts 11 and 13.
 SNP_AF_THRESHOLD = 0.01
 
-# FDR significance threshold applied to BH-corrected q-values
-FDR_THRESHOLD = 0.05
+# Significance threshold applied to both raw and FDR-adjusted p-values.
+SIG_THRESHOLD = 0.05
 
-# Number of top significant SNPs to label per volcano plot panel
+# Number of top significant SNPs to label per volcano panel.
 N_LABELS = 5
 
 
@@ -224,88 +245,186 @@ def find_col(df: pd.DataFrame, target: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# VOLCANO PLOT DECORATION HELPER
+# VOLCANO PLOT HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def add_volcano_decorations(
     ax,
-    group_name: str,
-    data: pd.DataFrame,
-    x_col: str,
-    use_log_scale: bool = True,
+    group_name:  str,
+    data:        pd.DataFrame,
+    y_col:       str,
+    label_col:   str,
+    threshold_p: float,
+    y_label:     str,
 ):
     """
-    Add reference lines, shading, significance labels, and formatting to a
-    single volcano plot axis.
+    Add reference lines, shading, SNP labels, and axis formatting to one
+    volcano plot panel.
 
     Elements added
     --------------
-    Horizontal dashed red line  — p = 0.05 significance threshold
-                                  (at y = −log10(0.05) ≈ 1.30)
-    Vertical dashed blue line   — OR = 1, the line of no effect
-    Blue shading (left half)    — OR < 1 region: SNPs less common in tumour
-                                  (potentially protective)
-    Red shading (right half)    — OR > 1 region: SNPs more common in tumour
-                                  (potentially associated with cancer risk)
-    Red horizontal shading      — significant region above the p = 0.05 line
-    Annotation labels           — rsID or GENE:HGVSp labels for the top N
-                                  most significant SNPs in this group
+    Horizontal dashed red line  — significance threshold at −log10(threshold_p)
+    Vertical dashed blue line   — OR = 1 (no association)
+    Blue left shading           — OR < 1 region (protective direction)
+    Red right shading           — OR > 1 region (risk direction)
+    Red top shading             — significant region above the threshold line
+    SNP labels                  — annotated text boxes for pre-selected top SNPs
 
     Parameters
     ----------
-    ax           : matplotlib Axes — the axis to decorate
-    group_name   : str             — cohort label (e.g. "Breast") for filtering
-    data         : pd.DataFrame    — full results table with 'Analysis_Group',
-                                     '-log10_p', 'Label', and x_col columns
-    x_col        : str             — column name for the X-axis (Odds_Ratio)
-    use_log_scale: bool            — True if X-axis is on a log scale
+    ax          : matplotlib Axes — the panel to decorate
+    group_name  : str             — cohort name (e.g. "Breast") for data filtering
+    data        : pd.DataFrame    — full results table
+    y_col       : str             — column name for the Y-axis values
+    label_col   : str             — column containing label text (empty = unlabelled)
+    threshold_p : float           — p-value threshold (e.g. 0.05)
+    y_label     : str             — Y-axis label string
     """
-    # Horizontal threshold line at p = 0.05
+    y_thresh = -np.log10(threshold_p)
+
+    # Significance threshold line (horizontal)
     ax.axhline(
-        -np.log10(0.05),
-        color="red", linestyle="--", alpha=0.6, linewidth=2,
-        label="p = 0.05 threshold",
+        y_thresh,
+        color="red", linestyle="--", alpha=0.7, linewidth=2,
+        label=f"threshold = {threshold_p}",
     )
 
-    # Vertical reference line at OR = 1 (no effect)
+    # Line of no effect: OR = 1 means tumour and healthy frequencies are equal
     ax.axvline(
-        1, color="blue", linestyle="--", alpha=0.6, linewidth=2,
+        1,
+        color="blue", linestyle="--", alpha=0.7, linewidth=2,
         label="OR = 1 (no effect)",
     )
 
-    # Background shading to indicate direction of effect
+    # Background shading indicating direction of association
     xlim = ax.get_xlim()
-    ax.axvspan(xlim[0], 1,      alpha=0.05, color="blue",
-               label="Protective (OR < 1)")
-    ax.axvspan(1,       xlim[1], alpha=0.05, color="red",
-               label="Risk factor (OR > 1)")
+    ylim = ax.get_ylim()
+    ax.axvspan(xlim[0], 1,       alpha=0.05, color="blue", label="Protective (OR < 1)")
+    ax.axvspan(1,       xlim[1], alpha=0.05, color="red",  label="Risk factor (OR > 1)")
 
-    # Horizontal shading for the significant region (above the p threshold)
-    ax.axhspan(
-        -np.log10(FDR_THRESHOLD), ax.get_ylim()[1],
-        alpha=0.10, color="red", label=f"Significant (FDR < {FDR_THRESHOLD})",
-    )
+    # Horizontal shading for the region above the significance threshold
+    ax.axhspan(y_thresh, ylim[1], alpha=0.08, color="red", label="Above threshold")
 
-    # Label top N significant SNPs with their Variant_ID
+    # Annotate pre-selected significant SNPs with labelled text boxes.
+    # Labels were assigned before plotting (in the main function) to the top
+    # N_LABELS most significant SNPs per cohort.
     group_data = data[data["Analysis_Group"] == group_name]
-    labeled_rows = group_data[group_data["Label"] != ""]
-    for _, row in labeled_rows.iterrows():
+    labelled   = group_data[group_data[label_col] != ""]
+    for _, row in labelled.iterrows():
         ax.annotate(
-            row["Label"],
-            xy=(row[x_col], row["-log10_p"]),
-            xytext=(10, 10),
+            row[label_col],
+            xy=(row["Odds_Ratio_Plot"], row[y_col]),
+            xytext=(8, 8),
             textcoords="offset points",
             fontsize=8, fontweight="bold",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7),
-            arrowprops=dict(
-                arrowstyle="->", connectionstyle="arc3,rad=0",
-                color="black", lw=1,
-            ),
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="yellow", alpha=0.7),
+            arrowprops=dict(arrowstyle="->", color="black", lw=0.8),
         )
 
-    ax.set_ylabel("−log10(p-value)", fontweight="bold")
+    ax.set_ylabel(y_label, fontweight="bold")
+    ax.set_xlabel("Odds Ratio (log scale)", fontweight="bold")
     ax.grid(True, linestyle=":", alpha=0.4)
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="lower left", fontsize=8, frameon=True)
+
+
+def make_volcano_plot(
+    data:        pd.DataFrame,
+    y_col:       str,
+    label_col:   str,
+    threshold_p: float,
+    y_label:     str,
+    title:       str,
+    output_path: str,
+):
+    """
+    Build and save a three-panel volcano plot (one panel per cohort).
+
+    Layout
+    ------
+    Panels are ordered: Breast | Endometrium | Global — placing the two
+    disease-specific cohorts first and the combined global analysis last.
+    Both X and Y axes are shared across panels (sharex=True, sharey=True)
+    so that relative effect sizes and significance levels can be visually
+    compared directly between cohorts.
+
+    The X-axis uses a log scale so that OR = 0.1 and OR = 10 are equidistant
+    from OR = 1, providing a symmetric visual representation of protective and
+    risk associations.
+
+    This function is called twice: once for the raw p-value plot and once for
+    the FDR-adjusted plot. The y_col and label_col parameters control which
+    Y-axis values and SNP labels are used in each case.
+
+    Parameters
+    ----------
+    data        : pd.DataFrame — full results table
+    y_col       : str          — Y-axis column ("neglog10_raw_p" or "neglog10_fdr_p")
+    label_col   : str          — label column ("Label_RAW" or "Label_FDR")
+    threshold_p : float        — significance threshold for the horizontal line
+    y_label     : str          — Y-axis label string
+    title       : str          — overall figure title
+    output_path : str          — full path for the saved PNG file
+    """
+    group_order = ["Breast", "Endometrium", "Global"]
+
+    # Restrict to the three expected cohorts and enforce panel ordering
+    plot_data = data[data["Analysis_Group"].isin(group_order)].copy()
+    plot_data["Analysis_Group"] = pd.Categorical(
+        plot_data["Analysis_Group"],
+        categories=group_order,
+        ordered=True,
+    )
+    plot_data = plot_data.sort_values("Analysis_Group")
+
+    # FacetGrid creates one subplot per Analysis_Group value.
+    # hue=Impact colours dots by VEP impact category (HIGH/MODERATE/MODIFIER/LOW).
+    g = sns.FacetGrid(
+        plot_data,
+        col      = "Analysis_Group",
+        hue      = "Impact",
+        col_order= group_order,
+        palette  = "Set1",
+        height   = 5.8,
+        aspect   = 1.15,
+        despine  = False,
+        sharex   = True,   # Shared X-axis: OR scale consistent across cohorts
+        sharey   = True,   # Shared Y-axis: significance scale consistent across cohorts
+    )
+
+    g.map_dataframe(
+        sns.scatterplot,
+        x         = "Odds_Ratio_Plot",
+        y         = y_col,
+        s         = 120,
+        edgecolor = "black",
+        alpha     = 0.8,
+    )
+
+    # Add decorations and log scale to each panel
+    for ax, group_name in zip(g.axes.flat, group_order):
+        ax.set_xscale("log")  # Log scale: OR = 0.1 and OR = 10 equidistant from OR = 1
+        add_volcano_decorations(
+            ax          = ax,
+            group_name  = group_name,
+            data        = plot_data,
+            y_col       = y_col,
+            label_col   = label_col,
+            threshold_p = threshold_p,
+            y_label     = y_label,
+        )
+
+    # Place the VEP Impact colour legend to the right of the figure
+    g.add_legend(title="VEP Impact")
+    if g._legend is not None:
+        g._legend.set_bbox_to_anchor((1.02, 0.5))
+        g._legend._loc = 6  # Centre-left anchor point
+
+    g.fig.subplots_adjust(top=0.82, right=0.86, wspace=0.08)
+    g.fig.suptitle(title, fontsize=16, fontweight="bold", y=0.98)
+
+    g.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(g.fig)
+    print(f"  Volcano plot saved: {output_path}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -318,26 +437,31 @@ def run_snp_association_analysis():
 
     Execution order
     ---------------
-    1.  Load and filter the annotated variant table to SNPs (AF > 1%).
-    2.  Standardise tissue and cohort labels; construct Variant IDs.
-    3.  For each cohort (Global, Breast, Endometrium):
-          a. Count tumour and healthy carrier samples per SNP.
-          b. Build the 2×2 contingency table.
-          c. Run Fisher's exact test to obtain a p-value.
-          d. Calculate the Odds Ratio, applying the Haldane-Anscombe
-             correction (+0.5) when any cell count is zero.
-    4.  Apply Benjamini-Hochberg FDR correction within each cohort.
-    5.  Save all results to a multi-sheet Excel workbook.
-    6.  Compute plot-ready columns (−log10 p, log2 OR, significance flags).
-    7.  Label the top N most significant SNPs per cohort for annotation.
-    8.  Generate and save two volcano plot figures.
+    1.  Load and validate the annotated variant table.
+    2.  Filter to SNPs (gnomAD NFE AF > 1%) and standardise tissue labels.
+    3.  Remove rows with unexpected tissue labels (anything other than
+        "Tumour" or "Healthy" after standardisation).
+    4.  Construct Variant IDs (rsID where available, else GENE:HGVSp).
+    5.  For each cohort (Global, Breast, Endometrium):
+          For each unique SNP:
+            a. Build the 2×2 contingency table.
+            b. Run Fisher's exact test (raw p-value).
+            c. Compute the Odds Ratio with Haldane-Anscombe correction if
+               any cell count is zero.
+    6.  Apply Benjamini-Hochberg FDR correction within each cohort.
+    7.  Compute plot-ready columns (−log10 p for raw and FDR, safe OR for
+        log scale, significance flags, SNP labels).
+    8.  Save results to a multi-sheet Excel workbook.
+    9.  Generate and save the raw p-value volcano plot.
+    10. Generate and save the FDR-adjusted volcano plot.
     """
     print("=" * 65)
     print("SCRIPT 12 — SNP Statistical Enrichment Analysis")
     print("=" * 65)
     print(f"Input : {input_file}")
     print(f"Output: {output_xlsx}")
-    print(f"        {output_plot}\n")
+    print(f"        {output_plot_raw}")
+    print(f"        {output_plot_fdr}\n")
 
     if not os.path.exists(input_file):
         print(f"ERROR: Input file not found: {input_file}")
@@ -348,10 +472,9 @@ def run_snp_association_analysis():
     df = pd.read_excel(input_file, sheet_name="Biological_Annotations")
     print(f"Loaded {len(df)} rows from sheet 'Biological_Annotations'")
 
-    # ── Step 2: Identify columns (case-insensitive) ───────────────────────────
+    # ── Step 2: Identify required columns ────────────────────────────────────
     sym_c = find_col(df, "SYMBOL")
     imp_c = find_col(df, "IMPACT")
-    con_c = find_col(df, "CONSEQUENCE")
     tis_c = find_col(df, "TISSUE")
     sam_c = find_col(df, "SAMPLE")
     var_c = find_col(df, "Existing_variation")
@@ -359,81 +482,91 @@ def run_snp_association_analysis():
     coh_c = find_col(df, "COHORT")
     nfe_c = find_col(df, "gnomADe_NFE_AF")
 
-    # ── Step 3: Filter to SNPs and standardise labels ─────────────────────────
-    # Retain only common variants (gnomAD NFE AF > 1%), consistent with script 11
-    df = df[df[nfe_c] > SNP_AF_THRESHOLD].copy()
-    print(f"Variants retained after SNP filter (AF > {SNP_AF_THRESHOLD}): {len(df)}")
+    # Validate that all required columns were found before proceeding.
+    # Printing the full mapping helps diagnose which column name is missing
+    # rather than crashing with an unhelpful AttributeError later.
+    required = [sym_c, imp_c, tis_c, sam_c, var_c, hgv_c, coh_c, nfe_c]
+    if any(c is None for c in required):
+        print("ERROR: One or more required columns could not be found.")
+        print("       Column mapping found:")
+        print(f"         SYMBOL={sym_c}, IMPACT={imp_c}, TISSUE={tis_c}, SAMPLE={sam_c}")
+        print(f"         Existing_variation={var_c}, HGVSp={hgv_c}, "
+              f"COHORT={coh_c}, gnomADe_NFE_AF={nfe_c}")
+        return
 
+    # ── Step 3: Filter to SNPs and standardise labels ─────────────────────────
+    df = df[df[nfe_c] > SNP_AF_THRESHOLD].copy()
+    print(f"Variants after SNP filter (AF > {SNP_AF_THRESHOLD}): {len(df)}")
+
+    # Harmonise tissue label variants to the two canonical labels used
+    # throughout this pipeline: "Tumour" and "Healthy"
     df[tis_c] = (
         df[tis_c].astype(str).str.strip()
-        .replace({"Tumor": "Tumour", "Normal": "Healthy", "Control": "Healthy"})
+        .replace({
+            "Tumor":   "Tumour",
+            "Tumour":  "Tumour",
+            "Normal":  "Healthy",
+            "Healthy": "Healthy",
+            "Control": "Healthy",
+        })
     )
     df[coh_c] = df[coh_c].astype(str).str.strip()
 
+    # Remove any rows that did not resolve to one of the two expected labels.
+    # This prevents unexpected tissue values from silently distorting counts.
+    df = df[df[tis_c].isin(["Tumour", "Healthy"])].copy()
+
     # ── Step 4: Construct Variant IDs ─────────────────────────────────────────
-    # Use rsID where available; fall back to GENE:HGVSp for unregistered variants
     df["rsID"]       = df[var_c].astype(str).str.extract(r"(rs\d+)")
     df["Variant_ID"] = df["rsID"].fillna(
         df[sym_c].astype(str) + ":" + df[hgv_c].astype(str)
     )
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Step 5: Fisher's exact test with Haldane-Anscombe correction
+    # Step 5: Fisher's exact test with Haldane-Anscombe OR correction
     # ══════════════════════════════════════════════════════════════════════════
     cohort_list = ["Global", "Breast", "Endometrium"]
     all_results = []
 
     for cohort_name in cohort_list:
 
-        # Subset data for the current cohort
-        # "Global" includes all samples; named cohorts filter by cohort label
-        if cohort_name == "Global":
-            cohort_df = df.copy()
-        else:
-            cohort_df = df[
-                df[coh_c].str.contains(cohort_name, case=False, na=False)
-            ].copy()
+        cohort_df = (
+            df.copy() if cohort_name == "Global"
+            else df[df[coh_c].str.contains(cohort_name, case=False, na=False)].copy()
+        )
 
         if cohort_df.empty:
-            print(f"  Cohort '{cohort_name}': no data found, skipping.")
+            print(f"  Cohort '{cohort_name}': no data, skipping.")
             continue
 
-        # Count total unique samples in each tissue group for this cohort.
-        # These are the denominators for frequency calculations.
         n_tumour  = cohort_df[cohort_df[tis_c] == "Tumour"][sam_c].nunique()
         n_healthy = cohort_df[cohort_df[tis_c] == "Healthy"][sam_c].nunique()
 
         if n_tumour == 0 or n_healthy == 0:
-            print(f"  Cohort '{cohort_name}': missing tumour or healthy samples, skipping.")
+            print(f"  Cohort '{cohort_name}': missing tissue group, skipping.")
             continue
 
+        unique_snps = cohort_df["Variant_ID"].dropna().unique()
         print(f"\n  Cohort '{cohort_name}': "
               f"{n_tumour} tumour samples, {n_healthy} healthy samples, "
-              f"{cohort_df['Variant_ID'].nunique()} unique SNPs")
+              f"{len(unique_snps)} unique SNPs")
 
-        for variant_id in cohort_df["Variant_ID"].unique():
+        for variant_id in unique_snps:
 
-            # Get all rows for this SNP in this cohort
-            var_data = cohort_df[cohort_df["Variant_ID"] == variant_id]
-
-            # Count how many unique samples carry this SNP in each tissue
+            var_data      = cohort_df[cohort_df["Variant_ID"] == variant_id]
             count_tumour  = var_data[var_data[tis_c] == "Tumour"][sam_c].nunique()
             count_healthy = var_data[var_data[tis_c] == "Healthy"][sam_c].nunique()
 
-            # Build the 2×2 contingency table:
-            #   a = tumour carriers      b = tumour non-carriers
-            #   c = healthy carriers     d = healthy non-carriers
-            a = count_tumour
-            b = max(0, n_tumour  - count_tumour)
-            c = count_healthy
-            d = max(0, n_healthy - count_healthy)
+            # 2×2 contingency table cells (cast to int for scipy)
+            a = int(count_tumour)
+            b = int(max(0, n_tumour  - count_tumour))   # tumour non-carriers
+            c = int(count_healthy)
+            d = int(max(0, n_healthy - count_healthy))  # healthy non-carriers
 
-            # Fisher's exact test — always uses raw counts (no correction)
-            _, p_value = stats.fisher_exact([[int(a), int(b)], [int(c), int(d)]])
+            # Fisher's exact test on raw (uncorrected) counts
+            _, p_value = stats.fisher_exact([[a, b], [c, d]])
 
-            # Odds Ratio calculation:
-            # If any cell is 0, apply the Haldane-Anscombe correction (+0.5)
-            # to avoid division by zero or infinite OR values.
+            # Odds Ratio — apply Haldane-Anscombe +0.5 if any cell is zero
             if a == 0 or b == 0 or c == 0 or d == 0:
                 or_val = ((a + 0.5) * (d + 0.5)) / ((b + 0.5) * (c + 0.5))
                 note   = "Corrected (+0.5)"
@@ -446,6 +579,10 @@ def run_snp_association_analysis():
                 "SNP_ID":             variant_id,
                 "Symbol":             var_data[sym_c].iloc[0],
                 "Impact":             var_data[imp_c].iloc[0],
+                "Tumour_Carriers":    count_tumour,
+                "Healthy_Carriers":   count_healthy,
+                "Tumour_Total":       n_tumour,
+                "Healthy_Total":      n_healthy,
                 "Tumour_Freq_%":      (count_tumour  / n_tumour)  * 100,
                 "Healthy_Freq_%":     (count_healthy / n_healthy) * 100,
                 "Odds_Ratio":         or_val,
@@ -453,31 +590,71 @@ def run_snp_association_analysis():
                 "Calculation_Method": note,
             })
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # Step 6: Benjamini-Hochberg FDR correction (per cohort)
-    # ══════════════════════════════════════════════════════════════════════════
-    # FDR correction is applied within each cohort separately, not globally.
-    # This is the standard practice: the multiple testing burden is defined
-    # by the number of SNPs tested within a single analysis, not across all
-    # cohorts combined (which would be an overly conservative correction since
-    # the same SNP tested in Breast and Endometrium is an independent question).
-    res_df = pd.DataFrame(all_results)
+    if not all_results:
+        print("No SNP association results generated — check input data and filters.")
+        return
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # Step 6: Benjamini-Hochberg FDR correction (within each cohort)
+    # ══════════════════════════════════════════════════════════════════════════
+    res_df = pd.DataFrame(all_results)
     corrected_dfs = []
+
     for group in res_df["Analysis_Group"].unique():
         sub = res_df[res_df["Analysis_Group"] == group].copy()
-
-        # multipletests returns: reject array, corrected p-values, alphacSidak, alphaBonf
         _, sub["FDR_P_Value"], _, _ = multipletests(sub["P_Value"], method="fdr_bh")
         corrected_dfs.append(sub)
 
     final_res = (
-        pd.concat(corrected_dfs)
+        pd.concat(corrected_dfs, ignore_index=True)
         .sort_values(["Analysis_Group", "P_Value"])
-        .reset_index(drop=True)
     )
 
-    # ── Step 7: Save results to Excel ────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # Step 7: Compute plot-ready derived columns
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # Replace exact zero p-values with a very small positive value before the
+    # log transform to avoid log(0) = −∞. 1e-300 is effectively zero for any
+    # practical interpretation but avoids a numerical error.
+    final_res["P_Value_Safe"]     = final_res["P_Value"].replace(0, 1e-300)
+    final_res["FDR_P_Value_Safe"] = final_res["FDR_P_Value"].replace(0, 1e-300)
+
+    final_res["neglog10_raw_p"] = -np.log10(final_res["P_Value_Safe"])
+    final_res["neglog10_fdr_p"] = -np.log10(final_res["FDR_P_Value_Safe"])
+
+    # Replace zero and infinite OR values with finite substitutes for log-scale
+    # plotting. These edge cases arise where the Haldane correction was applied.
+    final_res["Odds_Ratio_Plot"] = (
+        final_res["Odds_Ratio"]
+        .replace(0,      1e-6)   # Near-zero OR → plots at far left of log scale
+        .replace(np.inf, 1e6)    # Infinite OR  → plots at far right of log scale
+    )
+
+    # Significance flags — separate for raw p and FDR q
+    final_res["Raw_Significant"] = final_res["P_Value"]     < SIG_THRESHOLD
+    final_res["FDR_Significant"] = final_res["FDR_P_Value"] < SIG_THRESHOLD
+
+    # Pre-assign SNP labels for the top N_LABELS significant variants per cohort.
+    # Separate label columns are used for the two volcano plots so that each
+    # figure labels only its own relevant significant SNPs.
+    final_res["Label_RAW"] = ""
+    final_res["Label_FDR"] = ""
+
+    for group in final_res["Analysis_Group"].unique():
+        group_mask = final_res["Analysis_Group"] == group
+
+        raw_sig = final_res[group_mask & final_res["Raw_Significant"]]
+        if not raw_sig.empty:
+            top_raw = raw_sig.nsmallest(N_LABELS, "P_Value").index
+            final_res.loc[top_raw, "Label_RAW"] = final_res.loc[top_raw, "SNP_ID"]
+
+        fdr_sig = final_res[group_mask & final_res["FDR_Significant"]]
+        if not fdr_sig.empty:
+            top_fdr = fdr_sig.nsmallest(N_LABELS, "FDR_P_Value").index
+            final_res.loc[top_fdr, "Label_FDR"] = final_res.loc[top_fdr, "SNP_ID"]
+
+    # ── Step 8: Save results to Excel ────────────────────────────────────────
     with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
         for group in cohort_list:
             if group in final_res["Analysis_Group"].unique():
@@ -486,109 +663,39 @@ def run_snp_association_analysis():
                 )
     print(f"\nResults saved: {output_xlsx}")
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # Step 8: Prepare columns for plotting
-    # ══════════════════════════════════════════════════════════════════════════
-
-    # −log10(p-value): transforms p-values so that more significant results
-    # plot higher on the Y-axis. p = 0 is replaced with a small positive value
-    # (1e-10) to avoid log(0) = −∞.
-    final_res["-log10_p"] = -np.log10(
-        final_res["P_Value"].replace(0, 1e-10)
+    # ── Step 9: Raw p-value volcano plot ─────────────────────────────────────
+    make_volcano_plot(
+        data        = final_res,
+        y_col       = "neglog10_raw_p",
+        label_col   = "Label_RAW",
+        threshold_p = SIG_THRESHOLD,
+        y_label     = "−log10(raw p-value)",
+        title       = ("SNP Association Analysis: Tumour vs. Healthy\n"
+                       "Raw Fisher p-values  |  Threshold: p < 0.05"),
+        output_path = output_plot_raw,
     )
 
-    # log2(OR): not used on the current X-axis but pre-computed for reference.
-    # Zero and infinite OR values are replaced with small/large finite values
-    # before the log transform to avoid NaN or ±∞.
-    final_res["log2_OR"] = np.log2(
-        final_res["Odds_Ratio"].replace([0, np.inf], [0.001, 1000])
+    # ── Step 10: FDR-adjusted volcano plot ───────────────────────────────────
+    make_volcano_plot(
+        data        = final_res,
+        y_col       = "neglog10_fdr_p",
+        label_col   = "Label_FDR",
+        threshold_p = SIG_THRESHOLD,
+        y_label     = "−log10(FDR-adjusted q-value)",
+        title       = ("SNP Association Analysis: Tumour vs. Healthy\n"
+                       "Benjamini-Hochberg FDR-adjusted q-values  |  Threshold: q < 0.05"),
+        output_path = output_plot_fdr,
     )
-
-    # Flag SNPs that pass the FDR significance threshold
-    final_res["Is_Significant"] = final_res["FDR_P_Value"] < FDR_THRESHOLD
-
-    # Prepare label column: by default empty; filled for the top N significant
-    # SNPs per cohort so they are annotated on the volcano plot.
-    final_res["Label"] = ""
-    for group in final_res["Analysis_Group"].unique():
-        group_mask = final_res["Analysis_Group"] == group
-        sig_mask   = (final_res["FDR_P_Value"] < FDR_THRESHOLD) & group_mask
-
-        if sig_mask.any():
-            # Label only the N most significant (smallest FDR q-value) SNPs
-            top_indices = final_res[sig_mask].nsmallest(N_LABELS, "FDR_P_Value").index
-            final_res.loc[top_indices, "Label"] = final_res.loc[top_indices, "SNP_ID"]
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # Step 9: Volcano Plot 1 — OR on log scale
-    # ══════════════════════════════════════════════════════════════════════════
-    # One panel per cohort (Global / Breast / Endometrium).
-    # Dots coloured by VEP Impact category; X-axis on logarithmic scale so
-    # OR = 0.1 and OR = 10 are equidistant from OR = 1.
-    plt.figure(figsize=(18, 10))
-    g = sns.FacetGrid(
-        final_res,
-        col="Analysis_Group", hue="Impact", palette="Set1",
-        height=6, aspect=1.3, despine=False,
-    )
-    g.map(sns.scatterplot, "Odds_Ratio", "-log10_p",
-          s=150, edgecolor="black", alpha=0.8)
-
-    for ax, group_name in zip(g.axes.flat, final_res["Analysis_Group"].unique()):
-        ax.set_xscale("log")  # Log scale: symmetric around OR = 1
-        add_volcano_decorations(ax, group_name, final_res, "Odds_Ratio",
-                                use_log_scale=True)
-        ax.set_xlabel("Odds Ratio (log scale)", fontweight="bold")
-
-    g.add_legend(title="VEP Impact", bbox_to_anchor=(1.02, 0.5), loc="center left")
-    plt.subplots_adjust(top=0.90, right=0.95)
-    g.fig.suptitle(
-        "SNP Association Analysis: Tumour vs. Healthy\n"
-        "Fisher's Exact Test with Benjamini-Hochberg FDR Correction",
-        fontsize=16, fontweight="bold",
-    )
-    plt.savefig(output_plot, dpi=300, bbox_inches="tight")
-    plt.close()
-    print(f"Volcano plot saved: {output_plot}")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # Step 10: Volcano Plot 2 — second version (currently identical to plot 1;
-    # X-axis uses OR on log scale, reserved for log2(OR) if preferred)
-    # ══════════════════════════════════════════════════════════════════════════
-    output_plot_log2 = output_plot.replace(".png", "_log2OR.png")
-    plt.figure(figsize=(18, 10))
-    g2 = sns.FacetGrid(
-        final_res,
-        col="Analysis_Group", hue="Impact", palette="Set1",
-        height=6, aspect=1.3, despine=False,
-    )
-    g2.map(sns.scatterplot, "Odds_Ratio", "-log10_p",
-           s=150, edgecolor="black", alpha=0.8)
-
-    for ax, group_name in zip(g2.axes.flat, final_res["Analysis_Group"].unique()):
-        ax.set_xscale("log")
-        add_volcano_decorations(ax, group_name, final_res, "Odds_Ratio",
-                                use_log_scale=True)
-        ax.set_xlabel("Odds Ratio (log scale)", fontweight="bold")
-
-    g2.add_legend(title="VEP Impact", bbox_to_anchor=(1.02, 0.5), loc="center left")
-    plt.subplots_adjust(top=0.90, right=0.95)
-    g2.fig.suptitle(
-        "SNP Association Analysis: Tumour vs. Healthy\n"
-        "Fisher's Exact Test with Benjamini-Hochberg FDR Correction",
-        fontsize=16, fontweight="bold",
-    )
-    plt.savefig(output_plot_log2, dpi=300, bbox_inches="tight")
-    plt.close()
-    print(f"Volcano plot (log2OR variant) saved: {output_plot_log2}")
 
     # ── Completion summary ────────────────────────────────────────────────────
-    n_sig = final_res["Is_Significant"].sum()
+    n_raw_sig = final_res["Raw_Significant"].sum()
+    n_fdr_sig = final_res["FDR_Significant"].sum()
+
     print(f"\n{'=' * 65}")
     print("Script 12 complete.")
     print(f"  Total SNP × cohort tests run : {len(final_res)}")
-    print(f"  Significant after FDR correction: {n_sig} "
-          f"(FDR < {FDR_THRESHOLD})")
+    print(f"  Nominally significant        : {n_raw_sig}  (raw p < {SIG_THRESHOLD})")
+    print(f"  After FDR correction         : {n_fdr_sig}  (FDR q < {SIG_THRESHOLD})")
     print(f"{'=' * 65}")
 
 
