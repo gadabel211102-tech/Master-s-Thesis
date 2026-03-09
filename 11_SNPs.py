@@ -9,104 +9,156 @@ Pipeline    : Step 11 of 17 — runs AFTER variant statistics (10) and BEFORE
 --------------------------------------------------------------------------------
 PURPOSE
 --------------------------------------------------------------------------------
-This script identifies Single Nucleotide Polymorphisms (SNPs) within the
-GSDMB locus and compares their observed frequencies in this study cohort
-against published population reference frequencies from gnomAD.
+This script identifies which of the detected variants are common single
+nucleotide polymorphisms (SNPs) — genetic variants that are present at
+meaningful frequency in the general population — and calculates how often
+each SNP is observed (as a carrier) in each cohort × tissue group in this
+study.
 
-A SNP, in the context used here, is a common genetic variant present at a
-frequency greater than 1% in the general population. This distinguishes SNPs
-from rare pathogenic mutations, which typically occur at much lower frequencies.
-SNPs are important in this study because:
-
-  1. They help characterise the baseline genetic diversity of the GSDMB locus
-     across the cancer cohorts studied.
-  2. SNPs shared with known population databases (gnomAD) confirm that the
-     detected variants are genuine germline polymorphisms rather than
-     sequencing artefacts.
-  3. Differences in SNP frequencies between tumour and healthy tissue, or
-     between cancer types, may point to population stratification effects or
-     locus-specific selection pressures.
+The results serve two purposes:
+  1. Descriptive: characterise the SNP landscape at the GSDMB locus across
+     breast and endometrial cancer cohorts compared to healthy controls.
+  2. Preparatory: produce the SNP summary table used by scripts 12, 13, and
+     14 for statistical enrichment analysis, permutation testing, and the
+     interactive dashboard.
 
 --------------------------------------------------------------------------------
-WHAT IS gnomAD NFE FREQUENCY?
+WHAT IS A SNP?
 --------------------------------------------------------------------------------
-gnomAD (Genome Aggregation Database) is the largest publicly available
-reference database of human genetic variation, aggregating sequencing data
-from over 125,000 exomes and 15,000 genomes across diverse populations
-(Karczewski et al., 2020).
+A Single Nucleotide Polymorphism (SNP) is a position in the genome where a
+single DNA base differs between individuals in a population. By convention, a
+variant is classified as a SNP when it is present in ≥ 1% of the population
+(allele frequency ≥ 0.01). Variants below this threshold are considered rare
+mutations rather than common polymorphisms.
 
-The "NFE" subpopulation refers to Non-Finnish Europeans — a large, relatively
-homogeneous reference group commonly used as a comparator in European-ancestry
-cancer cohort studies.
-
-The gnomAD NFE allele frequency (gnomADe_NFE_AF) for a variant is the
-proportion of NFE chromosomes in the gnomAD database that carry that variant.
-A value of 0.01 (1%) is the conventional threshold separating:
-  - Common variants / SNPs  (AF ≥ 0.01) — the focus of this script
-  - Rare variants           (AF < 0.01) — analysed elsewhere in the pipeline
-
-Comparing study frequency (how often we observe a SNP in our cohort) to
-gnomAD NFE frequency (the population baseline) reveals whether our cohort
-is enriched or depleted for that variant relative to the general population.
+This 1% threshold is applied here using gnomAD NFE allele frequencies (see
+below). A higher allele frequency means the variant is more common in the
+general population and is therefore more likely to represent a neutral
+polymorphism rather than a disease-causing rare mutation — though population
+frequency alone does not determine pathogenicity.
 
 --------------------------------------------------------------------------------
-POPULATION BENCHMARKING PLOT (Identity Plot)
+GNOMAD AND THE NFE SUBPOPULATION
 --------------------------------------------------------------------------------
-The "identity plot" (scatter plot) for each cohort places each SNP as a dot:
-  - X-axis: gnomAD NFE population frequency (the expected value)
-  - Y-axis: observed frequency in our study cohort (the measured value)
-  - Diagonal reference line: the line of identity (y = x × 100), representing
-    perfect agreement between our cohort and the population baseline
+gnomAD (Genome Aggregation Database) is a large-scale public database
+aggregating exome and genome sequencing data from tens of thousands of
+individuals. It provides allele frequency estimates for virtually every known
+variant, stratified by continental ancestry group.
 
-Points falling on or near the diagonal indicate SNPs that behave as expected
-for a random sample of the European population. Points above the diagonal
-indicate variants more common in our cohort than in the general population —
-potentially of biological or clinical interest.
+NFE (Non-Finnish European) is the ancestry subpopulation used in this analysis.
+The breast and endometrial cancer cohorts in this study are predominantly of
+European ancestry, so comparing to the NFE subpopulation provides the most
+relevant baseline. Using a matched ancestry reference avoids confounding by
+known allele frequency differences between continental populations.
+
+gnomAD provides two separate databases:
+  gnomADe — Exome database (protein-coding regions only; largest sample size)
+  gnomADg — Genome database (whole genome; includes non-coding regions)
 
 --------------------------------------------------------------------------------
-VARIANT ID CONSTRUCTION
+COMBINED NFE AF: EXOME + GENOME FALLBACK LOGIC
 --------------------------------------------------------------------------------
-Where a variant has a known rsID (the standard identifier format for SNPs in
-public databases, e.g. rs2305480), that rsID is used as the Variant_ID for
-clarity and cross-referencing with external databases.
+This script builds a combined allele frequency column using both gnomAD sources:
 
-Where no rsID is available (novel or unregistered variants), a fallback
-identifier is constructed as "GENE:HGVSp" (e.g. "GSDMB:p.Arg12Gln"),
-providing a human-readable unique identifier from information already in
-the table.
+  Priority 1: gnomADe_NFE_AF (exome database)
+    Use if available. The exome database has the largest sample size for
+    coding variants and is the primary reference for protein-coding SNPs.
+
+  Priority 2: gnomADg_NFE_AF (genome database)
+    Use if exome frequency is missing (NaN). The genome database covers
+    introns, UTRs, and intergenic regions that are absent from exome capture.
+    Without this fallback, common non-coding variants would be incorrectly
+    excluded because their exome frequency is blank — not because they are rare.
+
+  Missing: if both sources are NaN, the variant is excluded.
+
+This two-source strategy ensures that non-coding SNPs (e.g. intronic variants,
+UTR variants) are retained when the genome database has a frequency entry but
+the exome database does not. The source used for each variant is recorded in
+the gnomAD_NFE_Source column of the output for full transparency.
+
+This is an update from earlier pipeline versions that used only
+gnomADe_NFE_AF, which caused some genuine non-coding SNPs to be missed.
+
+--------------------------------------------------------------------------------
+CARRIER FREQUENCY CALCULATION
+--------------------------------------------------------------------------------
+For each SNP × cohort × tissue group, the script counts:
+  - Carrier_Count       : unique samples carrying at least one copy of the SNP
+  - Total_Group_Samples : total unique samples in that cohort × tissue group
+  - Frequency_%         : Carrier_Count / Total_Group_Samples × 100
+
+This is CARRIER frequency (presence/absence per sample), not allele frequency.
+A sample is counted as a carrier regardless of whether it carries one copy
+(heterozygous) or two copies (homozygous) of the SNP.
+
+The frequency is calculated per cohort × tissue group so that, for example,
+the frequency in "Breast Tumour" can be compared with "Breast Healthy" and
+with the gnomAD population reference in scripts 12–13.
+
+--------------------------------------------------------------------------------
+PIVOT TABLE OUTPUT
+--------------------------------------------------------------------------------
+The long-format summary (one row per SNP × group) is reshaped into a wide-
+format pivot table where each row is one unique SNP and each column is the
+frequency in one group (e.g. "Breast_Tumour_Frequency_%"). Gaps are filled
+with 0 rather than NaN because an undetected SNP has a frequency of 0%,
+not "unknown". This wide-format table is the input to scripts 12, 13, and 14.
+
+--------------------------------------------------------------------------------
+FOUR OUTPUT FIGURES
+--------------------------------------------------------------------------------
+Figure 1 — Bar plot: unique SNPs per gene  (11_BarPlot_SNPs_Per_Gene.png)
+  Count of unique SNPs per gene. Shows which gene in the locus contributes
+  the most common polymorphisms.
+
+Figure 2 — Identity/benchmarking scatter  (11_IdentityPlot_{Cohort}.png)
+  One figure per cancer cohort. X = gnomAD NFE population frequency;
+  Y = observed carrier frequency in this study (%).
+  Diagonal reference line = y = x × 100 (perfect agreement with population).
+  Points above the line are enriched; points below are depleted.
+  Colour = tissue (tumour/healthy); shape = gnomAD annotation source.
+
+Figure 3 — SNP consequence distribution  (11_SNP_Consequences_Distribution.png)
+  Top 10 VEP consequence types among identified SNPs.
+
+Figure 4 — gnomAD source QC bar chart  (11_SNP_gnomAD_Source_Distribution.png)
+  How many SNPs used the exome vs. genome source. A substantial "Genome_NFE"
+  bar confirms the fallback logic recovered variants that would otherwise
+  have been discarded.
 
 --------------------------------------------------------------------------------
 INPUT
 --------------------------------------------------------------------------------
   GSDMB_Annotated_Report_Fixed.xlsx
     └── Sheet: "Biological_Annotations"
-        Required columns: gnomADe_NFE_AF, Existing_variation, SYMBOL, HGVSp,
-                          Cohort, Tissue, Sample, Consequence, IMPACT
+        Required columns: Existing_variation, SYMBOL, HGVSp, Cohort, Tissue,
+                          Sample, Consequence, IMPACT,
+                          gnomADe_NFE_AF, gnomADg_NFE_AF
 
 --------------------------------------------------------------------------------
 OUTPUT FILES
 --------------------------------------------------------------------------------
   11_Master_Unique_SNP_Summary.xlsx
-    One row per unique SNP, with observed frequency columns for each
-    cohort × tissue combination, gnomAD NFE reference frequency,
-    consequence type, and impact category.
+    Wide-format pivot: one row per unique SNP; columns include Variant_ID,
+    SYMBOL, Consequence, IMPACT, gnomAD_NFE_AF, gnomAD_NFE_Source, and one
+    Frequency_% column per cohort × tissue group.
 
   11_BarPlot_SNPs_Per_Gene.png
-    Bar chart showing the number of unique SNPs identified per gene.
-
-  11_IdentityPlot_<Cohort>.png  (one per cohort)
-    Scatter plot benchmarking observed SNP frequencies against gnomAD NFE
-    population baseline, coloured by tissue type.
-
+  11_IdentityPlot_{Cohort}.png
   11_SNP_Consequences_Distribution.png
-    Horizontal bar chart of the top 10 most common SNP consequence types.
+  11_SNP_gnomAD_Source_Distribution.png
 
 --------------------------------------------------------------------------------
 REFERENCES
 --------------------------------------------------------------------------------
-  Karczewski KJ, et al. (2020). The mutational constraint spectrum quantified
+  Karczewski KJ et al. (2020). The mutational constraint spectrum quantified
     from variation in 141,456 humans. Nature, 581:434–443.
-    https://doi.org/10.1038/s41586-020-2308-7
+    (gnomAD v2 exome database)
+
+  Chen S et al. (2024). A genomic mutational constraint map using variation in
+    76,156 human genomes. Nature, 625:92–100.
+    (gnomAD v4 genome database)
 
 --------------------------------------------------------------------------------
 USAGE
@@ -119,9 +171,9 @@ USAGE
 DEPENDENCIES
 --------------------------------------------------------------------------------
   Python ≥ 3.8
-  pandas, matplotlib, seaborn, numpy, openpyxl
+  pandas, numpy, matplotlib, seaborn, openpyxl
 
-  Install: pip install pandas matplotlib seaborn numpy openpyxl
+  Install: pip install pandas numpy matplotlib seaborn openpyxl
 ================================================================================
 """
 
@@ -135,25 +187,27 @@ import os  # File path construction and existence checks
 # THIRD-PARTY IMPORTS
 # ──────────────────────────────────────────────────────────────────────────────
 
-import matplotlib.pyplot as plt  # Figure creation and formatting
-import numpy as np               # Numerical operations (available for downstream use)
-import pandas as pd              # Data loading, grouping, pivot tables
-import seaborn as sns            # Statistical bar and scatter plots
+import matplotlib.pyplot as plt  # Figure creation and saving
+import numpy as np               # np.where() for conditional column assignment
+import pandas as pd              # Data loading, groupby, pivot
+import seaborn as sns            # Statistical plot styling
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
-# Update base_path to match your working directory before running.
 
 base_path  = "/home/gadeaalonsoj/tfm/gsdmb_final_results/"
 input_file = os.path.join(base_path, "GSDMB_Annotated_Report_Fixed.xlsx")
 output_dir = base_path
 
-# The minimum population allele frequency threshold for a variant to be
-# classified as a SNP in this analysis. 0.01 = 1%, the conventional boundary
-# between common variants (SNPs) and rare variants.
+# Minimum combined gnomAD NFE allele frequency to classify a variant as a SNP.
+# The conventional population genetics threshold: variants present in ≥ 1% of
+# the NFE population are considered common polymorphisms.
 SNP_AF_THRESHOLD = 0.01
+
+# Top N consequence types to display in the consequence distribution bar chart
+TOP_N_CONSEQUENCES = 10
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -162,259 +216,324 @@ SNP_AF_THRESHOLD = 0.01
 
 def identify_snps_pipeline():
     """
-    Identify SNPs, calculate cohort frequencies, benchmark against gnomAD,
-    and generate summary tables and figures.
+    Identify common SNPs and calculate per-cohort carrier frequencies.
 
-    Execution steps
+    Execution order
     ---------------
-    1.  Load the annotated variant table.
-    2.  Filter to common variants: gnomADe_NFE_AF > 1% (SNP threshold).
-    3.  Construct human-readable Variant IDs (rsID where available, else
-        GENE:HGVSp as fallback).
-    4.  Standardise cohort and tissue labels.
-    5.  Calculate observed carrier frequency for each SNP within each
+    1.  Load the annotated variant table and validate required columns.
+    2.  Build the combined gnomAD NFE AF column (exome first, genome fallback).
+    3.  Record the annotation source (Exome_NFE / Genome_NFE / Missing) for
+        each variant for downstream transparency.
+    4.  Filter to SNPs: variants with combined NFE AF > SNP_AF_THRESHOLD.
+    5.  Construct Variant IDs (rsID where available, else GENE:HGVSp).
+    6.  Standardise tissue and cohort labels.
+    7.  Calculate per-SNP carrier counts and carrier frequencies for each
         cohort × tissue group.
-    6.  Build a pivot table with one row per SNP and frequency columns for
-        each cohort × tissue combination.
-    7.  Save the pivot table as an Excel workbook.
-    8.  Generate three figure types:
-          a. Bar chart: unique SNP count per gene
-          b. Identity plot per cohort: observed vs gnomAD frequency
-          c. Consequence distribution bar chart
+    8.  Pivot to wide format and save the master SNP summary to Excel.
+    9.  Generate four figures:
+          Figure 1 — unique SNP count per gene (bar chart)
+          Figure 2 — benchmarking scatter per cohort (identity plots)
+          Figure 3 — top consequence types (horizontal bar chart)
+          Figure 4 — gnomAD annotation source QC (bar chart)
     """
-    print("=" * 65)
-    print("SCRIPT 11 — SNP Identification and Population Frequency Analysis")
-    print("=" * 65)
-    print(f"Input : {input_file}")
-    print(f"Output: {output_dir}\n")
-
-    # ── Guard: check input file exists ───────────────────────────────────────
     if not os.path.exists(input_file):
         print(f"ERROR: Input file not found: {input_file}")
         print("       Please update 'base_path' in the CONFIGURATION block.")
         return
 
-    # ── Step 1: Load annotated variant table ─────────────────────────────────
+    print("=" * 65)
+    print("SCRIPT 11 — SNP Identification and Population Frequency Analysis")
+    print("=" * 65)
+
+    # ── Step 1: Load and validate ─────────────────────────────────────────────
     df = pd.read_excel(input_file, sheet_name="Biological_Annotations")
     print(f"Loaded {len(df)} rows from sheet 'Biological_Annotations'")
 
-    # ── Step 2: Filter to SNPs (gnomAD NFE AF > 1%) ───────────────────────────
-    # Only variants with a population allele frequency above the SNP threshold
-    # are retained. Variants below this threshold are rare and handled
-    # separately elsewhere in the pipeline.
-    df_snps = df[df["gnomADe_NFE_AF"] > SNP_AF_THRESHOLD].copy()
-    print(f"Variants passing SNP threshold (AF > {SNP_AF_THRESHOLD}): {len(df_snps)} rows")
+    required_cols = [
+        "Existing_variation", "SYMBOL", "HGVSp", "Cohort", "Tissue",
+        "Sample", "Consequence", "IMPACT",
+        "gnomADe_NFE_AF",   # gnomAD exome NFE allele frequency (primary source)
+        "gnomADg_NFE_AF",   # gnomAD genome NFE allele frequency (fallback source)
+    ]
+    missing_cols = [c for c in required_cols if c not in df.columns]
+    if missing_cols:
+        print(f"ERROR: Missing required columns: {missing_cols}")
+        print("       Verify column names in the input Excel file.")
+        return
 
-    # ── Step 3: Construct Variant IDs ─────────────────────────────────────────
-    # Primary ID: extract rsID from the Existing_variation column using a
-    # regular expression. rsIDs follow the format "rs" followed by digits
-    # (e.g. rs2305480). A single cell may contain multiple IDs separated by
-    # commas or semicolons; the regex captures only the first rsID found.
-    df_snps["rsID"] = (
-        df_snps["Existing_variation"]
-        .astype(str)
-        .str.extract(r"(rs\d+)")
+    # ══════════════════════════════════════════════════════════════════════════
+    # Step 2: Build the combined gnomAD NFE AF column
+    # ══════════════════════════════════════════════════════════════════════════
+    # pandas combine_first() fills NaN values in the primary series with the
+    # corresponding value from the secondary series. This implements the rule:
+    #   "use exome AF if available; otherwise use genome AF".
+    # The result is never NaN when at least one source has a value.
+    df["gnomAD_NFE_AF_combined"] = df["gnomADe_NFE_AF"].combine_first(
+        df["gnomADg_NFE_AF"]
     )
 
-    # Fallback ID: for variants without a registered rsID, construct a
-    # descriptive identifier from the gene symbol and protein-level change.
-    # Example: "GSDMB:p.Arg12Gln"
+    # ── Step 3: Record annotation source per variant ──────────────────────────
+    # np.where() evaluates conditions in order, assigning the first matching
+    # label. This creates a human-readable audit trail carried through to the
+    # output Excel file so that reviewers can verify the source logic.
+    df["gnomAD_NFE_Source"] = np.where(
+        df["gnomADe_NFE_AF"].notna(),   "Exome_NFE",
+        np.where(
+            df["gnomADg_NFE_AF"].notna(), "Genome_NFE",
+            "Missing"   # Both sources absent: variant will fail the AF filter below
+        )
+    )
+
+    source_summary = df["gnomAD_NFE_Source"].value_counts()
+    print(f"\n  gnomAD NFE annotation source breakdown (all variants):")
+    for src, n in source_summary.items():
+        print(f"    {src}: {n:,} rows")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Step 4: Filter to SNPs (combined NFE AF > 1%)
+    # ══════════════════════════════════════════════════════════════════════════
+    df_snps = df[df["gnomAD_NFE_AF_combined"] > SNP_AF_THRESHOLD].copy()
+
+    if df_snps.empty:
+        print(f"\nWARNING: No variants passed the combined gnomAD NFE AF > "
+              f"{SNP_AF_THRESHOLD} filter.")
+        print("         Check that gnomADe_NFE_AF / gnomADg_NFE_AF columns "
+              "are populated in the input file.")
+        return
+
+    print(f"\n  Variants retained after SNP filter (combined AF > {SNP_AF_THRESHOLD}): "
+          f"{len(df_snps):,}")
+
+    # ── Step 5: Construct Variant IDs ─────────────────────────────────────────
+    # rsID is the standardised identifier for known SNPs in public databases.
+    # The regex extracts the first "rs" accession from the Existing_variation
+    # field, which may contain multiple pipe- or semicolon-delimited IDs
+    # (e.g. "rs12345;COSV98765"). For variants without an rsID (e.g. novel
+    # variants not yet in dbSNP), the fallback GENE:HGVSp notation is used.
+    df_snps["rsID"] = (
+        df_snps["Existing_variation"].astype(str)
+        .str.extract(r"(rs\d+)")
+    )
     df_snps["Variant_ID"] = df_snps["rsID"].fillna(
         df_snps["SYMBOL"].astype(str) + ":" + df_snps["HGVSp"].astype(str)
     )
 
-    # ── Step 4: Standardise cohort and tissue labels ──────────────────────────
-    # Normalise any alternative spellings to the two canonical tissue labels
-    # used throughout this pipeline: "Tumour" and "Healthy".
+    # ── Step 6: Standardise labels ────────────────────────────────────────────
     df_snps["Cohort"] = df_snps["Cohort"].astype(str).str.strip()
     df_snps["Tissue"] = (
-        df_snps["Tissue"]
-        .astype(str)
-        .str.strip()
+        df_snps["Tissue"].astype(str).str.strip()
         .replace({"Tumor": "Tumour", "Normal": "Healthy", "Control": "Healthy"})
     )
 
-    # ── Step 5: Calculate observed carrier frequency per group ────────────────
-    # For each cohort × tissue combination, count the total number of unique
-    # samples. This denominator is needed to express SNP counts as percentages.
+    # ══════════════════════════════════════════════════════════════════════════
+    # Step 7: Calculate carrier frequencies
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # Denominator: total unique samples per cohort × tissue group.
+    # Stored as a dict for efficient row-wise lookup.
     total_samples_dict = (
-        df_snps
-        .groupby(["Cohort", "Tissue"])["Sample"]
+        df_snps.groupby(["Cohort", "Tissue"])["Sample"]
         .nunique()
         .to_dict()
     )
 
-    # Aggregate: for each (SNP × cohort × tissue) combination, count how many
-    # unique samples carry that SNP. Including Consequence and IMPACT in the
-    # groupby key ensures these annotations are preserved in the output table.
+    # Numerator: unique samples carrying each SNP per cohort × tissue group.
+    # nunique() on Sample avoids double-counting a sample that appears in
+    # multiple rows due to VEP transcript expansion (one row per transcript
+    # per variant — see script 10).
     summary = (
-        df_snps
-        .groupby([
-            "Variant_ID", "Cohort", "Tissue",
-            "SYMBOL", "Consequence", "IMPACT", "gnomADe_NFE_AF",
+        df_snps.groupby([
+            "Variant_ID", "Cohort", "Tissue", "SYMBOL",
+            "Consequence", "IMPACT",
+            "gnomAD_NFE_AF_combined",
+            "gnomAD_NFE_Source",
         ])
-        .agg(Carrier_Count=("Sample", "nunique"))
+        .agg({"Sample": "nunique"})
         .reset_index()
+        .rename(columns={"Sample": "Carrier_Count"})
     )
 
-    # Add the total sample count for each group and compute frequency
+    # Look up the group denominator for each row
     summary["Total_Group_Samples"] = summary.apply(
-        lambda row: total_samples_dict.get((row["Cohort"], row["Tissue"]), 0),
-        axis=1,
+        lambda x: total_samples_dict.get((x["Cohort"], x["Tissue"]), 0), axis=1
     )
+
     summary["Frequency_%"] = (
         summary["Carrier_Count"] / summary["Total_Group_Samples"]
     ) * 100
 
-    print(f"Unique SNPs identified: "
-          f"{summary['Variant_ID'].nunique()} across "
-          f"{summary['SYMBOL'].nunique()} genes")
-
-    # ── Step 6: Build pivot table ─────────────────────────────────────────────
-    # Reshape the summary table so that each SNP occupies one row, and the
-    # observed frequency in each cohort × tissue group becomes its own column.
-    # This format is more readable and suitable for the Excel output.
+    # ══════════════════════════════════════════════════════════════════════════
+    # Step 8: Pivot to wide format and save to Excel
+    # ══════════════════════════════════════════════════════════════════════════
+    # Reshape from long (one row per SNP × group) to wide (one row per SNP).
+    # Each cohort × tissue group becomes a separate frequency column.
     master_pivot = summary.pivot_table(
-        index=["Variant_ID", "SYMBOL", "Consequence", "IMPACT", "gnomADe_NFE_AF"],
-        columns=["Cohort", "Tissue"],
-        values="Frequency_%",
-        aggfunc="first",
+        index=[
+            "Variant_ID", "SYMBOL", "Consequence", "IMPACT",
+            "gnomAD_NFE_AF_combined", "gnomAD_NFE_Source",
+        ],
+        columns  = ["Cohort", "Tissue"],
+        values   = "Frequency_%",
+        aggfunc  = "first",   # One unique value per SNP × group — no aggregation needed
     )
 
-    # Flatten the multi-level column index into descriptive string labels
-    # e.g. ("Breast", "Tumour") → "Breast_Tumour_Frequency_%"
+    # Flatten the multi-level column headers produced by pivot_table:
+    # ("Breast", "Tumour") → "Breast_Tumour_Frequency_%"
     master_pivot.columns = [
-        f"{col[0]}_{col[1]}_Frequency_%" for col in master_pivot.columns
+        f"{col[0]}_{col[1]}_Frequency_%" for col in master_pivot.columns.values
     ]
 
-    # Fill missing frequency values with 0.
-    # A missing value means no sample in that group carried the SNP, so 0% is
-    # the correct value (not "unknown").
-    master_pivot = master_pivot.fillna(0).reset_index()
+    # Fill NaN with 0: a SNP absent from a group has 0% frequency, not unknown
+    master_pivot = master_pivot.fillna(0)
+    master_pivot.reset_index(inplace=True)
 
-    # Rename the gnomAD column to a cleaner label for the Excel output
-    master_pivot = master_pivot.rename(columns={"gnomADe_NFE_AF": "gnomAD_NFE_AF"})
+    # Rename combined AF column to a cleaner output name
+    master_pivot.rename(columns={"gnomAD_NFE_AF_combined": "gnomAD_NFE_AF"}, inplace=True)
 
-    # Reorder columns to place Consequence immediately after SYMBOL
-    # for logical reading order in the Excel output
-    cols = master_pivot.columns.tolist()
-    if "SYMBOL" in cols and "Consequence" in cols:
-        symbol_idx = cols.index("SYMBOL")
-        cols.remove("Consequence")
-        cols.insert(symbol_idx + 1, "Consequence")
-        master_pivot = master_pivot[cols]
+    # Place metadata columns first, then frequency columns
+    preferred_order = [
+        "Variant_ID", "SYMBOL", "Consequence", "IMPACT",
+        "gnomAD_NFE_AF", "gnomAD_NFE_Source",
+    ]
+    freq_cols    = [c for c in master_pivot.columns if c not in preferred_order]
+    master_pivot = master_pivot[preferred_order + freq_cols]
 
-    # ── Step 7: Save Excel summary ────────────────────────────────────────────
-    excel_path = os.path.join(output_dir, "11_Master_Unique_SNP_Summary.xlsx")
-    master_pivot.to_excel(excel_path, index=False)
-    print(f"SNP summary table saved: {excel_path}")
+    output_excel = os.path.join(output_dir, "11_Master_Unique_SNP_Summary.xlsx")
+    master_pivot.to_excel(output_excel, index=False)
+    print(f"\n  Master SNP summary saved: {output_excel}")
 
     # ══════════════════════════════════════════════════════════════════════════
-    # FIGURE A: Unique SNPs per gene (bar chart)
+    # Step 9: Four output figures
     # ══════════════════════════════════════════════════════════════════════════
-    # Counts distinct Variant_IDs per gene symbol to show which genes in the
-    # locus harbour the most common polymorphisms.
+    sns.set_style("whitegrid")
+
+    # ── Figure 1: Unique SNPs per gene ────────────────────────────────────────
     gene_counts = (
-        master_pivot
-        .groupby("SYMBOL")["Variant_ID"]
+        master_pivot.groupby("SYMBOL")["Variant_ID"]
         .nunique()
         .sort_values(ascending=False)
         .reset_index()
     )
 
     plt.figure(figsize=(10, 6))
-    sns.barplot(data=gene_counts, x="SYMBOL", y="Variant_ID", palette="viridis")
-    plt.title("Total Unique SNPs Identified per Gene", fontsize=14, fontweight="bold")
-    plt.xlabel("Gene Symbol")
+    sns.barplot(
+        data    = gene_counts,
+        x       = "SYMBOL",
+        y       = "Variant_ID",
+        hue     = "SYMBOL",
+        palette = "viridis",
+        legend  = False,
+    )
+    plt.title("Total Unique SNPs Identified per Gene",
+              fontsize=14, fontweight="bold")
     plt.ylabel("Unique SNP Count")
-    plt.xticks(rotation=45, ha="right")
+    plt.xlabel("Gene Symbol")
+    plt.xticks(rotation=45)
     plt.tight_layout()
-    fig_a_path = os.path.join(output_dir, "11_BarPlot_SNPs_Per_Gene.png")
-    plt.savefig(fig_a_path, dpi=300, bbox_inches="tight")
+    fig1_path = os.path.join(output_dir, "11_BarPlot_SNPs_Per_Gene.png")
+    plt.savefig(fig1_path, dpi=300)
     plt.close()
-    print(f"Figure saved: {fig_a_path}")
+    print(f"  Figure 1 saved: {fig1_path}")
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # FIGURE B: Identity plots — observed frequency vs gnomAD NFE baseline
-    # (one plot per cohort)
-    # ══════════════════════════════════════════════════════════════════════════
-    # For each cancer cohort, plot observed study frequency (Y) against
-    # gnomAD NFE reference frequency (X). The diagonal line represents the
-    # line of identity — where our cohort perfectly matches the population
-    # baseline. Deviations from the diagonal indicate enrichment or depletion
-    # relative to the European reference population.
-    for cohort in summary["Cohort"].unique():
-        df_cohort = summary[summary["Cohort"] == cohort]
-
+    # ── Figure 2: Benchmarking / identity scatter (one per cohort) ────────────
+    # X = gnomAD NFE population allele frequency
+    # Y = observed carrier frequency in this study (%)
+    # Diagonal line = population baseline (y = x × 100)
+    #   Points above: enriched in our cohort relative to the general population
+    #   Points below: depleted in our cohort relative to the general population
+    # Marker shape encodes annotation source (exome vs. genome) so any
+    # systematic differences introduced by the fallback logic are visible.
+    for cohort in summary["Cohort"].dropna().unique():
         plt.figure(figsize=(10, 8))
+        df_c = summary[summary["Cohort"] == cohort].copy()
+
         sns.scatterplot(
-            data    = df_cohort,
-            x       = "gnomADe_NFE_AF",
+            data    = df_c,
+            x       = "gnomAD_NFE_AF_combined",
             y       = "Frequency_%",
             hue     = "Tissue",
+            style   = "gnomAD_NFE_Source",    # Shape = exome vs. genome source
             s       = 130,
             palette = {"Tumour": "#e74c3c", "Healthy": "#3498db"},
-            alpha   = 0.7,
+            alpha   = 0.75,
         )
 
-        # Line of identity: if our study frequency matched gnomAD exactly,
-        # all points would fall on this line (gnomAD AF × 100 = study %)
-        plt.plot(
-            [0, 1], [0, 100],
-            linestyle="--", color="grey", alpha=0.4,
-            label="Line of identity (gnomAD baseline)",
-        )
-
-        plt.title(
-            f"SNP Frequency Benchmarking: {cohort} Cohort\n"
-            f"(Observed study frequency vs. gnomAD NFE population)",
-            fontsize=14, fontweight="bold",
-        )
-        plt.xlabel("gnomAD NFE Population Frequency")
-        plt.ylabel("Observed Study Frequency (%)")
+        # Reference line: perfect agreement with population baseline
+        # X is a proportion [0, 1]; Y is percentage [0, 100] → slope = 100
+        plt.plot([0, 1], [0, 100], "--", color="grey", alpha=0.4,
+                 label="Population baseline (y = x × 100)")
+        plt.title(f"SNP Frequency Benchmarking: {cohort} Cohort",
+                  fontsize=15, fontweight="bold")
+        plt.xlabel("Combined gnomAD NFE Allele Frequency (population reference)")
+        plt.ylabel("Study Carrier Frequency (%)")
         plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
         plt.tight_layout()
-
-        fig_b_path = os.path.join(output_dir, f"11_IdentityPlot_{cohort}.png")
-        plt.savefig(fig_b_path, dpi=300, bbox_inches="tight")
+        fig2_path = os.path.join(output_dir, f"11_IdentityPlot_{cohort}.png")
+        plt.savefig(fig2_path, dpi=300)
         plt.close()
-        print(f"Figure saved: {fig_b_path}")
+        print(f"  Figure 2 saved: {fig2_path}")
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # FIGURE C: SNP consequence type distribution (horizontal bar chart)
-    # ══════════════════════════════════════════════════════════════════════════
-    # Shows the top 10 most common VEP consequence types among the identified
-    # SNPs, providing a quick overview of the molecular nature of common
-    # variation at this locus (e.g. predominantly intronic, synonymous, etc.)
-    consequence_counts = master_pivot["Consequence"].value_counts().head(10)
-
+    # ── Figure 3: SNP consequence type distribution ───────────────────────────
+    # Horizontal bar chart of the top 10 consequence types.
+    # Reveals whether the SNP landscape at this locus is dominated by intronic
+    # (non-coding), synonymous, or missense (protein-altering) variants.
     plt.figure(figsize=(12, 6))
+    consequence_counts = master_pivot["Consequence"].value_counts().head(TOP_N_CONSEQUENCES)
     sns.barplot(
         x       = consequence_counts.values,
         y       = consequence_counts.index,
+        hue     = consequence_counts.index,
         palette = "mako",
+        legend  = False,
     )
-    plt.title("Top 10 Most Common SNP Consequence Types",
+    plt.title(f"Top {TOP_N_CONSEQUENCES} Most Common SNP Consequence Types",
               fontsize=14, fontweight="bold")
     plt.xlabel("Number of Unique SNPs")
     plt.ylabel("VEP Consequence Type")
     plt.tight_layout()
-    fig_c_path = os.path.join(output_dir, "11_SNP_Consequences_Distribution.png")
-    plt.savefig(fig_c_path, dpi=300, bbox_inches="tight")
+    fig3_path = os.path.join(output_dir, "11_SNP_Consequences_Distribution.png")
+    plt.savefig(fig3_path, dpi=300)
     plt.close()
-    print(f"Figure saved: {fig_c_path}")
+    print(f"  Figure 3 saved: {fig3_path}")
+
+    # ── Figure 4: gnomAD annotation source QC ────────────────────────────────
+    # Transparency bar chart showing how many unique SNPs in the final output
+    # used the exome database vs. the genome database as their AF source.
+    # A substantial "Genome_NFE" bar is the methodological justification for
+    # the combined AF approach: it proves that the fallback logic recovered
+    # real SNPs that would have been discarded by an exome-only approach.
+    plt.figure(figsize=(6, 5))
+    source_counts = master_pivot["gnomAD_NFE_Source"].value_counts()
+    sns.barplot(
+        x       = source_counts.index,
+        y       = source_counts.values,
+        hue     = source_counts.index,
+        palette = "Set2",
+        legend  = False,
+    )
+    plt.title("gnomAD Annotation Source Used for Combined NFE AF\n"
+              "(QC — confirms exome + genome fallback logic)",
+              fontsize=13, fontweight="bold")
+    plt.xlabel("gnomAD Database Source")
+    plt.ylabel("Number of Unique SNPs")
+    plt.tight_layout()
+    fig4_path = os.path.join(output_dir, "11_SNP_gnomAD_Source_Distribution.png")
+    plt.savefig(fig4_path, dpi=300)
+    plt.close()
+    print(f"  Figure 4 saved: {fig4_path}")
 
     # ── Completion summary ────────────────────────────────────────────────────
     print(f"\n{'=' * 65}")
     print("Script 11 complete.")
-    print(f"  Unique SNPs identified : {len(master_pivot)}")
-    print(f"  Consequence types found: {master_pivot['Consequence'].nunique()}")
-    print(f"  All outputs saved to   : {output_dir}")
+    print(f"  Unique SNPs identified       : {len(master_pivot)}")
+    print(f"  Unique consequence types     : {master_pivot['Consequence'].nunique()}")
+    print(f"  gnomAD NFE AF logic:")
+    print(f"    Primary source  : gnomADe_NFE_AF (exome database)")
+    print(f"    Fallback source : gnomADg_NFE_AF (genome database)")
+    print(f"  Master summary saved to      : {output_excel}")
     print(f"{'=' * 65}")
 
 
 # ── Script entry point ─────────────────────────────────────────────────────────
-# Ensures identify_snps_pipeline() is only called when this script is run
-# directly, not when imported as a module by another script.
 if __name__ == "__main__":
     identify_snps_pipeline()
