@@ -1,7 +1,27 @@
 #!/usr/bin/env Rscript
-# =============================================================================
-# Script 15: GSDMB Haplotype Analysis 
-# =============================================================================
+# Haplotype analysis for the GSDMB locus (chr17:39.8-39.99 Mb).
+#
+# Three complementary levels of analysis are run in sequence:
+#   1. Full-region haplotypes — all whitelist SNPs treated as a single block.
+#      Provides the broadest overview of haplotype structure across the locus.
+#   2. LD-block haplotypes — the locus is partitioned into internally coherent
+#      blocks using a Gabriel-style algorithm (all pairwise r² >= threshold).
+#      Shorter blocks have fewer SNPs and therefore more phasing power.
+#   3. Gene-specific haplotypes — SNPs are further grouped by gene (GSDMB here),
+#      optionally sub-partitioned into LD blocks within the gene.
+#
+# For each region and level, the script estimates haplotype frequencies via
+# EM (haplo.em), tests tumour vs healthy carrier differences by Fisher's exact
+# test and Firth-penalised logistic regression, and applies BH-FDR correction
+# within each region.
+#
+# Input files (produced by scripts 11 and 15_haplotypes.sh):
+#   phased_genotypes.tsv       — phased GT matrix from BEAGLE
+#   sample_metadata.tsv        — cohort/tissue labels
+#   11_Master_Unique_SNP_Summary.xlsx — whitelist defining the target SNP set
+#   GSDMB_Annotated_Report_Fixed.xlsx — gene/position annotation for each SNP
+#
+# Usage:  Rscript 15_haplo_stats.r
 
 suppressPackageStartupMessages({
   library(haplo.stats)
@@ -13,16 +33,30 @@ suppressPackageStartupMessages({
   library(stringr)
   library(scales)
   library(forcats)
-  for (pkg in c("patchwork", "logistf", "genetics")) {
-    if (!requireNamespace(pkg, quietly = TRUE))
+  for (pkg in c("patchwork", "logistf", "RColorBrewer", "gridExtra")) {
+    if (!requireNamespace(pkg, quietly = TRUE)) {
       install.packages(pkg, repos = "https://cloud.r-project.org")
+    }
+  }
+  # survminer depends on ggpubr -> ggrepel; install with dependencies=TRUE so the
+  # chain resolves. If installation fails in a restricted environment (e.g. conda R)
+  # the function make_km_plot exits silently and no KM plots are produced.
+  for (pkg in c("ggrepel", "ggpubr", "survival", "survminer")) {
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+      tryCatch(
+        install.packages(pkg, repos = "https://cloud.r-project.org",
+                         dependencies = TRUE),
+        warning = function(w) invisible(NULL),
+        error   = function(e) invisible(NULL)
+      )
+    }
   }
   library(patchwork)
   library(logistf)
-  library(genetics)   # for pairwise r² (LD); no LDheatmap needed
 })
 
-# Explicitly re-attach dplyr verbs so they win over genetics/MASS masking
+# Explicitly namespace dplyr verbs to avoid conflicts with base R and other packages
+# (plyr, MASS, and stats all export functions with overlapping names)
 select    <- dplyr::select
 filter    <- dplyr::filter
 mutate    <- dplyr::mutate
@@ -33,24 +67,23 @@ pull      <- dplyr::pull
 group_by  <- dplyr::group_by
 ungroup   <- dplyr::ungroup
 summarise <- dplyr::summarise
-left_join  <- dplyr::left_join
+left_join <- dplyr::left_join
 inner_join <- dplyr::inner_join
-bind_rows  <- dplyr::bind_rows
+bind_rows <- dplyr::bind_rows
 
-# =============================================================================
-# 0. GLOBAL THEME  (publication-ready: Nature/Genetics style)
-# =============================================================================
+# --- Global ggplot theme -----------------------------------------------------
+# A clean publication theme applied to all figures for visual consistency
 pub_theme <- theme_classic(base_size = 11, base_family = "Helvetica") +
   theme(
     plot.title        = element_text(size = 12, face = "bold", hjust = 0),
-    plot.subtitle     = element_text(size = 9,  color = "grey40", hjust = 0),
+    plot.subtitle     = element_text(size = 9, colour = "grey40", hjust = 0),
     axis.title        = element_text(size = 10, face = "bold"),
-    axis.text         = element_text(size = 9,  color = "black"),
+    axis.text         = element_text(size = 9, colour = "black"),
     axis.line         = element_line(linewidth = 0.4),
     axis.ticks        = element_line(linewidth = 0.4),
-    panel.grid.major  = element_line(color = "grey92", linewidth = 0.3),
+    panel.grid.major  = element_line(colour = "grey92", linewidth = 0.3),
     panel.grid.minor  = element_blank(),
-    strip.background  = element_rect(fill = "grey95", color = "grey70"),
+    strip.background  = element_rect(fill = "grey95", colour = "grey70"),
     strip.text        = element_text(size = 9, face = "bold"),
     legend.text       = element_text(size = 8),
     legend.title      = element_text(size = 9, face = "bold"),
@@ -60,7 +93,7 @@ pub_theme <- theme_classic(base_size = 11, base_family = "Helvetica") +
 
 theme_set(pub_theme)
 
-# Cohort/group colour palette (accessible, print-safe)
+# Fixed colour map for the four cohort-tissue groups; used in cohort frequency plots
 GROUP_COLS <- c(
   "Breast_Healthy"      = "#4393C3",
   "Breast_Tumour"       = "#D6604D",
@@ -69,1790 +102,1480 @@ GROUP_COLS <- c(
   "All_Healthy"         = "#92C5DE",
   "All_Tumour"          = "#F4A582"
 )
-COHORT_COLS  <- c("Breast" = "#4393C3", "Endometrium" = "#D6604D", "All" = "#878787")
-TISSUE_COLS  <- c("Healthy" = "#4393C3", "Tumour" = "#D6604D")
 
+# Wrapper around ggsave with consistent DPI and units
 SAVE <- function(file, plot, width = 10, height = 6) {
   ggsave(file, plot, width = width, height = height, dpi = 300,
          units = "in", bg = "white")
   cat("  Saved:", basename(file), "\n")
 }
 
-# =============================================================================
-# 1. CONFIGURATION & PATHS
-# =============================================================================
+# Excel sheet names must be <= 31 characters and cannot contain :\/? etc.
+safe_sheet <- function(x) {
+  x <- gsub("[:/\\?*\\[\\]]", "_", x)
+  substr(x, 1, 31)
+}
+
+# --- Configuration -----------------------------------------------------------
 BASE_DIR  <- "/home/gadeaalonsoj/tfm/gsdmb_final_results"
 HAPLO_DIR <- file.path(BASE_DIR, "19_haplotype_phased")
 OUT_DIR   <- file.path(BASE_DIR, "19_haplo_stats_results")
 
-GENO_FILE  <- file.path(HAPLO_DIR, "phased_genotypes.tsv")
-META_FILE  <- file.path(HAPLO_DIR, "sample_metadata.tsv")
-WHITELIST  <- file.path(BASE_DIR, "11_Master_Unique_SNP_Summary.xlsx")
-ANNOTATED  <- file.path(BASE_DIR, "GSDMB_Annotated_Report_Fixed.xlsx")
+GENO_FILE <- file.path(HAPLO_DIR, "phased_genotypes.tsv")
+META_FILE <- file.path(HAPLO_DIR, "sample_metadata.tsv")
+WHITELIST <- file.path(BASE_DIR, "11_Master_Unique_SNP_Summary.xlsx")    # target SNP set
+ANNOTATED <- file.path(BASE_DIR, "GSDMB_Annotated_Report_Fixed.xlsx")    # gene/position annotations
+
+OUT_XLSX  <- file.path(OUT_DIR, "19_Haplotype_Results_v7_blocks_and_genes.xlsx")
 
 if (!dir.exists(OUT_DIR)) dir.create(OUT_DIR, recursive = TRUE)
 
-# =============================================================================
-# 2. DATA LOADING & ANNOTATION
-# =============================================================================
-cat("\nSTEP 2: Loading and annotating SNPs...\n")
+# Frequency thresholds:
+#   MAIN_MIN_FREQ  — haplotypes below 1% excluded from the full-region overview;
+#                    rare haplotypes are too infrequent for reliable carrier comparison
+#   SUPP_MIN_FREQ  — looser threshold for LD-block and gene analyses where fewer SNPs
+#                    per block means more distinct haplotypes at low frequency
+MAIN_MIN_FREQ        <- 0.01
+SUPP_MIN_FREQ        <- 0.005
+MIN_HAP_COPIES       <- 3    # haplotype must be observed >= 3 times (across both alleles) to be tested
+MIN_SAMPLES_PER_ARM  <- 3    # minimum tumour or healthy samples required to run any test
+MIN_GROUP_SAMPLES_EM <- 3
 
-target_rsids <- read_excel(WHITELIST) %>% pull(Variant_ID) %>% trimws()
+# LD block parameters
+RUN_BLOCK_ANALYSIS   <- TRUE
+LD_BLOCK_THRESHOLD   <- 0.60   # minimum pairwise r² for all pairs within a candidate block
+MIN_BLOCK_SNPS       <- 2
+MAX_BLOCK_SNPS       <- 12     # cap prevents blocks so long that EM becomes unstable
 
-annotation_map <- read_excel(ANNOTATED, sheet = "Biological_Annotations") %>%
-  mutate(
-    rsID_clean = str_extract(Existing_variation, "rs[0-9]+"),
-    POS_int    = as.integer(gsub("[^0-9]", "", as.character(POS)))
-  ) %>%
-  filter(rsID_clean %in% target_rsids) %>%
-  select(POS_int, rsID_clean, Gene = SYMBOL, REF, ALT) %>%
-  arrange(rsID_clean, desc(Gene)) %>%
-  distinct(rsID_clean, .keep_all = TRUE) %>%
-  arrange(POS_int)
-
-geno_raw <- read.table(GENO_FILE, header = TRUE, sep = "\t", check.names = FALSE)
-metadata <- read.table(META_FILE,  header = TRUE, sep = "\t", check.names = FALSE)
-common_samples <- intersect(colnames(geno_raw), metadata$Sample)
-
-stopifnot(all(c("Sample", "Cohort", "Tissue") %in% colnames(metadata)))
-
-geno_filtered <- geno_raw %>%
-  mutate(extracted_pos = as.integer(str_split_fixed(ID, ":", 4)[, 2])) %>%
-  inner_join(annotation_map, by = c("extracted_pos" = "POS_int"))
-
-n_snps     <- nrow(geno_filtered)
-snp_labels <- geno_filtered$rsID_clean
-
-# Carrier counts for annotation labels
-annotation_map$Carrier_Count <- sapply(annotation_map$rsID_clean, function(rsid) {
-  row_data <- geno_filtered %>% filter(rsID_clean == rsid)
-  sum(grepl("1", unlist(row_data[, common_samples])))
-})
-
-annotation_map <- annotation_map %>%
-  mutate(Detailed_Label = paste0(
-    rsID_clean, "\n(", Gene, ", ", REF, ">", ALT, ")\n[n=", Carrier_Count, "]"
-  ))
-
-ordered_labels <- annotation_map$Detailed_Label
+# Gene-specific analysis parameters
+RUN_GENE_SPECIFIC           <- TRUE
+GENE_LIST_SUPP              <- c("GSDMB")
+GENE_SPECIFIC_USE_LD_BLOCKS <- TRUE   # sub-partition gene SNPs into LD blocks before phasing
 
 # =============================================================================
-# 3. BUILD GENOTYPE MATRIX (all common samples)
+# HELPER FUNCTIONS
 # =============================================================================
-cat("STEP 3: Building genotype matrix...\n")
 
-mat_all <- matrix(NA, nrow = length(common_samples), ncol = n_snps * 2,
-                  dimnames = list(common_samples, NULL))
-
-for (i in seq_along(common_samples)) {
-  alleles <- as.numeric(unlist(strsplit(
-    as.character(geno_filtered[, common_samples[i]]), "[|/]"
-  )))
-  mat_all[i, ] <- alleles + 1   # haplo.stats requires 1-based coding
+parse_phased_call <- function(x) {
+  # Parse a single phased genotype string (e.g. "0|1" or "1/0") into a
+  # length-2 integer vector of allele indices. Returns NA for missing calls.
+  x <- trimws(as.character(x))
+  if (is.na(x) || x == "" || x == "." || x == "./." || x == ".|.") {
+    return(c(NA_integer_, NA_integer_))
+  }
+  bits <- strsplit(x, "[|/]")[[1]]
+  if (length(bits) != 2) return(c(NA_integer_, NA_integer_))
+  out <- suppressWarnings(as.integer(bits))
+  if (any(is.na(out))) return(c(NA_integer_, NA_integer_))
+  out
 }
 
-# =============================================================================
-# 4. GLOBAL HAPLOTYPE EM  + 1% FREQUENCY FILTER
-# =============================================================================
-cat("STEP 4: Global EM and frequency filtering (≥1%)...\n")
+build_allele_matrices <- function(geno_df, sample_cols) {
+  # Convert the raw genotype character matrix (one cell per sample per SNP)
+  # into two integer allele matrices: a1 (haplotype 1) and a2 (haplotype 2).
+  # Allele codes follow haplo.stats convention: 1 = REF, 2 = ALT.
+  #
+  # The matrix is transposed so rows are samples and columns are SNPs, matching
+  # the orientation expected by haplo.em. Parsing is vectorised using sub()
+  # regex capture groups rather than looping over each cell for speed.
+  n_samples <- length(sample_cols)
+  n_snps    <- nrow(geno_df)
 
-geno_setup_all <- setupGeno(mat_all, locus.label = snp_labels)
-global_em      <- haplo.em(geno_setup_all)
+  raw_mat <- t(as.matrix(geno_df[, sample_cols, drop = FALSE]))  # samples x SNPs
 
-freq_df <- as.data.frame(global_em$haplotype)
-colnames(freq_df) <- snp_labels
-freq_df$em_index  <- seq_len(nrow(freq_df))
-freq_df$Frequency <- as.numeric(global_em$hap.prob)
-
-freq_df <- freq_df %>%
-  filter(Frequency >= 0.01) %>%
-  arrange(desc(Frequency)) %>%
-  mutate(
-    Haplotype = paste0("H", seq_len(n())),
-    Haplotype = factor(Haplotype, levels = Haplotype),
-    Allele_String = apply(
-      across(all_of(snp_labels)), 1,
-      function(x) paste(ifelse(x == 1, "Ref", "Alt"), collapse = "-")
-    )
-  )
-
-em_to_haplabel    <- setNames(as.character(freq_df$Haplotype), freq_df$em_index)
-common_haplotypes <- as.character(freq_df$Haplotype)
-cat(sprintf("  Haplotypes passing ≥1%% filter: %d\n", length(common_haplotypes)))
-
-# =============================================================================
-# REFERENCE HAPLOTYPE SELECTION
-# H1 (most frequent) is used as the statistical reference for all GLM
-# comparisons. This maximises power by providing the largest reference group,
-# giving the most precise odds ratio estimates.
-#
-# NOTE ON ANCESTRAL STATE: Direct comparison to the reference genome is not
-# possible because no sample in the dataset carries the all-reference haplotype
-# on both chromosomes with certainty. As a transparency measure, the script
-# identifies and reports the haplotype with the fewest alt alleles (closest
-# empirical proxy for the reference genome sequence) so it can be noted in the
-# methods. This is NOT used as the statistical reference.
-# =============================================================================
-freq_df <- freq_df %>%
-  mutate(
-    across(all_of(snp_labels), ~ as.numeric(as.character(.))),
-    n_alt_alleles = rowSums(across(all_of(snp_labels), ~ . - 1))
-  )
-
-# H1 = most frequent = statistical reference
-ref_haplo_global <- as.character(freq_df$Haplotype[1])
-
-# Identify all-reference proxy for reporting purposes only
-allref_candidates <- freq_df %>% filter(n_alt_alleles == min(n_alt_alleles))
-allref_row        <- allref_candidates %>% arrange(desc(Frequency)) %>% slice(1)
-allref_haplo      <- as.character(allref_row$Haplotype)
-
-cat(sprintf("  Statistical reference haplotype : %s  (most frequent, freq=%.1f%%)\n",
-            ref_haplo_global, freq_df$Frequency[1] * 100))
-cat(sprintf("  All-ref proxy haplotype (report): %s  (n_alt=%d, freq=%.1f%%) — noted in methods, not used as reference\n",
-            allref_haplo, min(freq_df$n_alt_alleles), allref_row$Frequency * 100))
-
-# =============================================================================
-# 5. STATISTICAL MODELS  — Tumour vs Healthy within each comparison group
-# =============================================================================
-cat("STEP 5: Running association models...\n")
-
-comparisons <- list(
-  list(label = "Breast",      cohorts = "Breast",                  name = "Breast"),
-  list(label = "Endometrium", cohorts = "Endometrium",             name = "Endometrium"),
-  list(label = "All",         cohorts = c("Breast","Endometrium"), name = "All")
-)
-
-run_comparison <- function(comp) {
-  sub_meta <- metadata %>%
-    filter(Cohort %in% comp$cohorts, Sample %in% common_samples,
-           Tissue %in% c("Healthy", "Tumour"))
-
-  n_normal <- sum(sub_meta$Tissue == "Healthy")
-  n_tumour <- sum(sub_meta$Tissue == "Tumour")
-
-  cat(sprintf("  %s: n=%d  (Healthy=%d, Tumour=%d)\n",
-              comp$label, nrow(sub_meta), n_normal, n_tumour))
-
-  if (nrow(sub_meta) < 10) {
-    warning(sprintf("  SKIPPING %s: too few total samples (%d).", comp$label, nrow(sub_meta)))
-    return(NULL)
-  }
-  if (n_normal == 0 || n_tumour == 0) {
-    warning(sprintf(
-      "  SKIPPING %s: both Healthy and Tumour required (Healthy=%d, Tumour=%d).",
-      comp$label, n_normal, n_tumour))
-    return(NULL)
+  parse_allele <- function(x, allele_idx) {
+    x   <- trimws(as.character(x))
+    bad <- is.na(x) | x == "" | x == "." | x == "./." | x == ".|."
+    # Capture haplotype 1 or 2 from phased format "A|B"
+    a <- if (allele_idx == 1L) {
+      sub("([0-9]+)[|/]([0-9]+)", "\\1", x)
+    } else {
+      sub("([0-9]+)[|/]([0-9]+)", "\\2", x)
+    }
+    out <- suppressWarnings(as.integer(a)) + 1L  # shift 0/1 VCF coding to 1/2 haplo.stats coding
+    out[bad | is.na(out)] <- NA_integer_
+    out
   }
 
-  sub_samples <- sub_meta$Sample
-  sub_mat     <- mat_all[sub_samples, , drop = FALSE]
-  y           <- as.numeric(sub_meta$Tissue == "Tumour")
+  a1 <- matrix(parse_allele(raw_mat, 1L), nrow = n_samples, ncol = n_snps,
+               dimnames = list(sample_cols, geno_df$rsID_clean))
+  a2 <- matrix(parse_allele(raw_mat, 2L), nrow = n_samples, ncol = n_snps,
+               dimnames = list(sample_cols, geno_df$rsID_clean))
 
-  geno_sub <- setupGeno(sub_mat, locus.label = snp_labels)
+  list(a1 = a1, a2 = a2)
+}
 
-  sc <- tryCatch(
-    haplo.score(y, geno_sub, trait.type = "binomial",
-                min.count = ceiling(0.01 * length(y))),
-    error = function(e) { message("  Score test failed: ", e$message); NULL }
+build_geno_matrix <- function(a1_mat, a2_mat) {
+  # Interleave haplotype 1 and haplotype 2 columns into the paired-column
+  # format required by haplo.em: SNP1_hap1, SNP1_hap2, SNP2_hap1, SNP2_hap2...
+  stopifnot(nrow(a1_mat) == nrow(a2_mat), ncol(a1_mat) == ncol(a2_mat))
+  out <- vector("list", ncol(a1_mat) * 2)
+  for (j in seq_len(ncol(a1_mat))) {
+    out[[2 * j - 1]] <- a1_mat[, j]
+    out[[2 * j]]     <- a2_mat[, j]
+  }
+  as.data.frame(out, check.names = FALSE)
+}
+
+make_binary_hap_strings <- function(a_mat) {
+  # Collapse each row of an allele matrix into a binary string (e.g. "0110")
+  # where 0 = REF allele and 1 = ALT allele. Used to identify and count
+  # haplotype combinations without relying on EM output.
+  apply(a_mat - 1L, 1, paste, collapse = "")
+}
+
+make_em_freq_table <- function(a1_mat, a2_mat, snp_meta, min_freq) {
+  # Estimate haplotype frequencies using the EM algorithm implemented in
+  # haplo.em. EM is necessary here because phasing (even from BEAGLE) is
+  # probabilistic — EM integrates over phase uncertainty to give population-
+  # level frequency estimates rather than just counting observed haplotypes.
+  #
+  # miss.val = c(0, NA): both 0 and NA are treated as missing data codes.
+  # min.posterior = 0.001: haplo-sample pairs with posterior probability below
+  # this threshold are excluded, reducing noise from unlikely phase assignments.
+  geno_mat <- build_geno_matrix(a1_mat, a2_mat)
+  em_fit <- haplo.em(
+    geno        = geno_mat,
+    locus.label = snp_meta$rsID_clean,
+    miss.val    = c(0, NA),
+    control     = haplo.em.control(min.posterior = 0.001)
   )
 
-  n_haps_g     <- length(global_em$hap.prob)
-  hap_labels_g <- em_to_haplabel[as.character(seq_len(n_haps_g))]
-  global_to_local <- match(common_samples, sub_samples)
+  freqs <- as.data.frame(em_fit$haplotype)
+  names(freqs) <- snp_meta$rsID_clean
+  freqs$Frequency <- as.numeric(em_fit$hap.prob)
+  freqs$Count     <- round(freqs$Frequency * nrow(a1_mat) * 2)  # expected haplotype copies in pool
+  freqs <- freqs %>%
+    arrange(desc(Frequency)) %>%
+    mutate(Haplotype_ID = paste0("H", seq_len(n())))  # H1 = most frequent
 
-  dosage_mat <- matrix(0, nrow = nrow(sub_mat), ncol = length(common_haplotypes),
-                       dimnames = list(sub_samples, common_haplotypes))
+  # Convert the allele-coded matrix (1/2) back to binary (0/1) for display
+  snp_matrix <- matrix(
+    as.numeric(as.matrix(freqs[, snp_meta$rsID_clean, drop = FALSE])),
+    nrow = nrow(freqs), ncol = nrow(snp_meta)
+  )
+  freqs$Allele_String <- apply(snp_matrix, 1, function(x) paste0(x - 1L, collapse = ""))
+  freqs$Alt_Alleles   <- rowSums(snp_matrix - 1L)  # number of ALT positions in each haplotype
 
-  em_row_g  <- global_em$indx.subj
-  em_hap1_g <- global_em$hap1code
-  em_hap2_g <- global_em$hap2code
-  em_post_g <- global_em$post
-
-  for (k in seq_along(em_row_g)) {
-    global_i <- em_row_g[k]
-    local_i  <- global_to_local[global_i]
-    if (is.na(local_i)) next
-    h1   <- em_hap1_g[k]; h2 <- em_hap2_g[k]; post <- em_post_g[k]
-    lbl1 <- if (!is.na(h1) && h1 >= 1 && h1 <= n_haps_g) hap_labels_g[h1] else NA
-    lbl2 <- if (!is.na(h2) && h2 >= 1 && h2 <= n_haps_g) hap_labels_g[h2] else NA
-    if (!is.na(lbl1) && lbl1 %in% common_haplotypes)
-      dosage_mat[local_i, lbl1] <- dosage_mat[local_i, lbl1] + post
-    if (!is.na(lbl2) && lbl2 %in% common_haplotypes)
-      dosage_mat[local_i, lbl2] <- dosage_mat[local_i, lbl2] + post
-  }
-
-  ref_haplo_label <- ref_haplo_global
-  test_haplos     <- setdiff(common_haplotypes, ref_haplo_label)
-  if (length(test_haplos) == 0) return(NULL)
-
-  results <- lapply(test_haplos, function(hname) {
-    df_fit <- data.frame(y = y, hap = dosage_mat[, hname])
-    if (var(df_fit$hap) == 0) return(NULL)
-    fit <- tryCatch(
-      logistf(y ~ hap, data = df_fit, firth = TRUE, pl = FALSE,
-              control = logistf.control(maxit = 500, maxstep = 10)),
-      error = function(e) NULL
-    )
-    if (is.null(fit)) return(NULL)
-    beta <- coef(fit)["hap"]
-    se   <- sqrt(diag(vcov(fit)))["hap"]
-    p    <- fit$prob["hap"]
-    data.frame(
-      Haplotype  = hname, Beta = beta, SE = se, p_glm = p,
-      OR = exp(beta), Lower = exp(beta - 1.96 * se),
-      Upper = exp(beta + 1.96 * se), Comparison = comp$label,
-      row.names = NULL
-    )
+  # Human-readable description: list the rsIDs that carry the ALT allele
+  annot_strings <- apply(snp_matrix, 1, function(row) {
+    alt_idx <- which(row == 2)
+    if (length(alt_idx) == 0) return("Reference-like")
+    paste0(snp_meta$rsID_clean[alt_idx], collapse = "; ")
   })
+  freqs$Variant_Content <- annot_strings
 
-  res <- bind_rows(results)
-  if (nrow(res) == 0) return(NULL)
+  shown <- freqs %>% filter(Frequency >= min_freq)
+  list(all = freqs, shown = shown, fit = em_fit)
+}
 
-  if (!is.null(sc)) {
-    score_p <- data.frame(
-      Haplotype = paste0("H", seq_along(sc$score.haplo.p)),
-      Score_P   = sc$score.haplo.p
-    )
-    res <- left_join(res, score_p, by = "Haplotype")
-  } else {
-    res$Score_P <- NA_real_
+compute_ld_matrix <- function(a1_mat, a2_mat, snp_meta) {
+  # Compute pairwise r² (the square of the Pearson correlation between allele
+  # dosages) for all SNP pairs. Dosage at each site is the count of ALT alleles
+  # carried across both haplotypes (0, 1, or 2), which is a standard proxy for
+  # LD estimation from phased data. Pairs with fewer than 3 complete observations
+  # are assigned NA to avoid spuriously high r² from minimal data.
+  dosage <- (a1_mat - 1L) + (a2_mat - 1L)
+  n_snps <- ncol(dosage)
+  ld <- matrix(NA_real_, nrow = n_snps, ncol = n_snps,
+               dimnames = list(snp_meta$rsID_clean, snp_meta$rsID_clean))
+  diag(ld) <- 1
+  for (i in seq_len(n_snps)) {
+    for (j in i:n_snps) {
+      xi   <- dosage[, i]
+      xj   <- dosage[, j]
+      keep <- complete.cases(xi, xj)
+      if (sum(keep) < 3) {
+        r2 <- NA_real_
+      } else {
+        r  <- suppressWarnings(cor(xi[keep], xj[keep]))
+        r2 <- ifelse(is.na(r), NA_real_, r^2)
+      }
+      ld[i, j] <- r2
+      ld[j, i] <- r2  # matrix is symmetric
+    }
   }
-  res
+  ld
 }
 
-all_stats_list <- lapply(comparisons, run_comparison)
-all_stats_raw  <- bind_rows(all_stats_list)
-cat(sprintf("  Rows returned by GLM: %d\n", nrow(all_stats_raw)))
+define_ld_blocks <- function(ld_matrix, snp_meta, threshold = 0.6,
+                             min_snps = 2, max_snps = 12) {
+  # Gabriel-style LD block definition: a window of SNPs i:j is accepted as a
+  # block only if ALL pairwise r² values within it are >= threshold (i.e. the
+  # entire block is internally coherent, not just adjacent pairs).
+  #
+  # The algorithm scans left to right. At each starting SNP i it tries the
+  # largest candidate window first (greedily maximising block length), then
+  # shrinks until it finds a valid block or moves on. SNPs not assigned to
+  # any block are skipped — they may be isolated variants in weak LD with
+  # their neighbours.
+  snp_names <- rownames(ld_matrix)
+  n         <- length(snp_names)
+  if (is.null(snp_names) || n < min_snps) return(list())
 
-# =============================================================================
-# 5b. BUILD all_stats WITH BH-FDR SIGNIFICANCE LABELS
-# BH correction applied within each comparison group separately.
-# sig_label reflects FDR-adjusted p, not raw Score_P.
-# =============================================================================
-if (nrow(all_stats_raw) > 0) {
-  all_stats <- all_stats_raw %>%
-    mutate(
-      Comparison = factor(Comparison, levels = c("Breast", "Endometrium", "All")),
-      Haplotype  = factor(Haplotype,  levels = common_haplotypes)
-    ) %>%
-    group_by(Comparison) %>%
-    mutate(
-      fdr = p.adjust(Score_P, method = "BH"),
-      sig_label = case_when(
-        !is.na(fdr) & fdr < 0.001 ~ "***",
-        !is.na(fdr) & fdr < 0.01  ~ "**",
-        !is.na(fdr) & fdr < 0.05  ~ "*",
-        TRUE                       ~ ""
-      ),
-      raw_sig_label = case_when(
-        !is.na(p_glm) & p_glm < 0.001 ~ "***",
-        !is.na(p_glm) & p_glm < 0.01  ~ "**",
-        !is.na(p_glm) & p_glm < 0.05  ~ "*",
-        TRUE                           ~ ""
-      )
-    ) %>%
-    ungroup()
-  cat(sprintf("  Comparisons with results: %s\n",
-              paste(unique(as.character(all_stats$Comparison)), collapse = ", ")))
-  print(head(all_stats %>% select(Haplotype, Comparison, OR, Score_P, fdr), 6))
-} else {
-  all_stats <- all_stats_raw
-  cat("  WARNING: No GLM results.\n")
-  print(warnings())
-}
+  # Check whether all lower-triangle r² values in a candidate window exceed threshold
+  block_coherent <- function(name_idx) {
+    nms   <- snp_names[name_idx]
+    sub   <- ld_matrix[nms, nms, drop = FALSE]
+    pairs <- sub[lower.tri(sub)]
+    length(pairs) > 0 && all(!is.na(pairs) & pairs >= threshold)
+  }
 
-# =============================================================================
-# STEP 5c. EXTRACT PHASED HAPLOTYPE ALLELE MATRICES FOR LD COMPUTATION
-#
-# mat_all rows = samples, cols interleaved: SNP1_allele1, SNP1_allele2,
-# SNP2_allele1, SNP2_allele2, ... (1-based: 1=ref, 2=alt)
-#
-# For LD we treat each phased chromosome as an independent observation.
-# This is the correct approach — using phased data from BEAGLE gives accurate
-# r² because phase ambiguity (the main cause of LD deflation from unphased
-# dosage) is already resolved.
-# =============================================================================
+  blocks   <- list()
+  block_id <- 1
+  i        <- 1
 
-# Extract the two haploid allele matrices from mat_all
-# allele1_mat[i, j] = first phased allele of sample i at SNP j (1 or 2)
-# allele2_mat[i, j] = second phased allele of sample i at SNP j (1 or 2)
-allele1_mat <- mat_all[, seq(1, n_snps * 2, by = 2), drop = FALSE]  # odd cols
-allele2_mat <- mat_all[, seq(2, n_snps * 2, by = 2), drop = FALSE]  # even cols
-colnames(allele1_mat) <- snp_labels
-colnames(allele2_mat) <- snp_labels
+  while (i <= n) {
+    if (i + min_snps - 1L > n) break   # not enough SNPs left to form a block
 
-# Stack: 2*n_samples haploid rows x n_snps cols (0=ref, 1=alt, 0-based)
-# Each row is one phased chromosome — fully resolved by BEAGLE
-hap_mat <- rbind(allele1_mat - 1L, allele2_mat - 1L)  # convert to 0/1
+    best_end <- NA
+    max_j    <- min(n, i + max_snps - 1L)
 
-# =============================================================================
-# 6. FIGURE 0 — LD Heatmap (r² between SNPs in the haplotype analysis)
-#
-# WHY: Shows the haplotype block structure. High r² between SNPs explains
-# why they co-segregate into consistent haplotypes. This is the biological
-# justification for doing haplotype analysis at all rather than single-SNP.
-# Computed from BEAGLE-phased haplotypes for accurate r² (no phase ambiguity).
-# =============================================================================
-cat("STEP 6: Figure 0 — LD Heatmap...\n")
-
-tryCatch({
-
-  # ── Step 1: compute r² directly from phased haplotype matrix ─────────────
-  # r²(A,B) = [cov(A,B)]² / [var(A) * var(B)]
-  # where A and B are 0/1 vectors across all 2*n_samples phased chromosomes.
-  # This is exact and requires no external LD package.
-  compute_r2_phased <- function(hap_mat) {
-    n_snps_h <- ncol(hap_mat)
-    r2_mat   <- matrix(NA_real_, nrow = n_snps_h, ncol = n_snps_h,
-                       dimnames = list(colnames(hap_mat), colnames(hap_mat)))
-    # allele frequencies (p = freq of alt allele = 1)
-    p <- colMeans(hap_mat, na.rm = TRUE)
-    for (i in seq_len(n_snps_h)) {
-      for (j in seq(i, n_snps_h)) {
-        if (i == j) { r2_mat[i, j] <- 1; next }
-        # only use chromosomes with no missing data at either SNP
-        ok  <- !is.na(hap_mat[, i]) & !is.na(hap_mat[, j])
-        a   <- hap_mat[ok, i]
-        b   <- hap_mat[ok, j]
-        pa  <- mean(a); pb <- mean(b)
-        if (pa == 0 | pa == 1 | pb == 0 | pb == 1) { r2_mat[i,j] <- r2_mat[j,i] <- NA; next }
-        # D = observed AB haplotype frequency minus expected
-        D   <- mean(a * b) - pa * pb
-        r2  <- D^2 / (pa * (1 - pa) * pb * (1 - pb))
-        r2_mat[i, j] <- r2_mat[j, i] <- round(r2, 4)
+    # Try longest window first; take first (longest) coherent window found
+    for (j in max_j:(i + min_snps - 1L)) {
+      if (block_coherent(i:j)) {
+        best_end <- j
+        break
       }
     }
-    r2_mat
-  }
 
-  r2_mat <- compute_r2_phased(hap_mat)
-  cat(sprintf("  r² matrix computed: %d x %d SNPs, %d phased chromosomes\n",
-              ncol(r2_mat), ncol(r2_mat), nrow(hap_mat)))
-  cat(sprintf("  r² range (off-diagonal): %.3f – %.3f\n",
-              min(r2_mat[row(r2_mat) != col(r2_mat)], na.rm = TRUE),
-              max(r2_mat[row(r2_mat) != col(r2_mat)], na.rm = TRUE)))
-
-  # ── Step 3: axis labels — rsID + gene + position ──────────────────────────
-  ax_labels <- annotation_map %>%
-    mutate(label = paste0(rsID_clean, "\n", Gene,
-                          " (", round(POS_int / 1e3, 1), " kb)")) %>%
-    pull(label, name = rsID_clean)
-
-  # ── Step 4: tidy long-format, LOWER triangle + diagonal ───────────────────
-  # Lower triangle keeps genomic order on both axes; easy to read
-  r2_df <- as.data.frame(as.table(r2_mat), stringsAsFactors = FALSE) %>%
-    rename(SNP1 = Var1, SNP2 = Var2, r2 = Freq) %>%
-    mutate(
-      SNP1  = factor(SNP1, levels = snp_labels),
-      SNP2  = factor(SNP2, levels = snp_labels),
-      r2    = as.numeric(r2),
-      keep  = as.integer(SNP1) >= as.integer(SNP2),
-      # show value if >= 0.10; blank for diagonal (self-comparisons)
-      r2_label = case_when(
-        SNP1 == SNP2 ~ "",
-        r2   >= 0.10 ~ sprintf("%.2f", r2),
-        TRUE         ~ ""
-      ),
-      # white text on dark cells, black on light cells
-      txt_col = ifelse(r2 >= 0.55, "white", "black")
-    ) %>%
-    filter(keep)
-
-  # ── Step 5: colour palette ─────────────────────────────────────────────────
-  ld_pal <- colorRampPalette(
-    c("#FFFFFF", "#FFF0E0", "#FDCC8A", "#FC8D59", "#E34A33", "#8B0000")
-  )(101)
-
-  # ── Step 6: square heatmap ────────────────────────────────────────────────
-  fig0 <- ggplot(r2_df, aes(x = SNP2, y = SNP1, fill = r2)) +
-    geom_tile(colour = "white", linewidth = 0.5) +
-    geom_text(aes(label = r2_label, colour = txt_col),
-              size = 2.6, show.legend = FALSE) +
-    scale_colour_identity() +
-    scale_fill_gradientn(
-      colours = ld_pal,
-      limits  = c(0, 1),
-      breaks  = c(0, 0.25, 0.5, 0.75, 1),
-      labels  = c("0", "0.25", "0.50", "0.75", "1.00"),
-      name    = expression(r^2),
-      guide   = guide_colorbar(
-        barheight = 8, barwidth = 1.2,
-        title.position = "top", title.hjust = 0.5,
-        frame.colour = "grey40", ticks.colour = "grey40"
-      )
-    ) +
-    scale_x_discrete(labels = ax_labels[snp_labels], position = "bottom") +
-    scale_y_discrete(labels = ax_labels[snp_labels], limits = rev) +
-    coord_fixed() +
-    labs(
-      title    = "Linkage Disequilibrium Between SNPs",
-      subtitle = sprintf(
-        "Pairwise r² from BEAGLE-phased haplotypes | %d samples (%d chromosomes) | Lower triangle | r² ≥ 0.10 labelled",
-        length(common_samples), nrow(hap_mat)),
-      x = NULL, y = NULL
-    ) +
-    theme(
-      axis.text.x     = element_text(size = 7.5, angle = 45, hjust = 1,
-                                     lineheight = 0.85),
-      axis.text.y     = element_text(size = 7.5, lineheight = 0.85),
-      axis.ticks      = element_blank(),
-      axis.line       = element_blank(),
-      panel.grid      = element_blank(),
-      legend.position = "right",
-      plot.margin     = margin(6, 10, 6, 8)
-    )
-
-  fig_sz <- max(7, n_snps * 0.75 + 2)
-  SAVE(file.path(OUT_DIR, "19_Fig0_LD_Heatmap.png"), fig0,
-       width = fig_sz, height = fig_sz - 1)
-
-}, error = function(e) {
-  cat(sprintf("  WARNING: LD heatmap failed (%s) — skipping.\n", e$message))
-})
-
-# =============================================================================
-# 7. FIGURE 1 — Haplotype Composition
-#    1a: SNP Alt-Allele Carrier Counts (bar) — QC/methods context
-#    1b: Haplotype × SNP allele tile — the Rosetta Stone of the analysis
-#        IMPROVED: added allele-string summary column on right margin
-# =============================================================================
-cat("STEP 7: Figure 1 — Haplotype Composition...\n")
-
-tile_data <- freq_df %>%
-  select(Haplotype, Frequency, Allele_String, all_of(snp_labels)) %>%
-  pivot_longer(cols = all_of(snp_labels), names_to = "rsID_clean", values_to = "Val") %>%
-  left_join(annotation_map, by = "rsID_clean") %>%
-  mutate(
-    Allele     = factor(as.numeric(Val) - 1, levels = c(0, 1), labels = c("Ref", "Alt")),
-    Haplotype  = factor(Haplotype, levels = rev(common_haplotypes)),
-    Freq_Label = percent(Frequency, accuracy = 0.1)
-  )
-
-# ── Fig 1a: SNP carrier count bar ─────────────────────────────────────────────
-fig1a <- annotation_map %>%
-  mutate(
-    Short_Label = paste0(rsID_clean, "\n(", Gene, ")"),
-    Short_Label = factor(Short_Label, levels = annotation_map %>%
-                           mutate(Short_Label = paste0(rsID_clean, "\n(", Gene, ")")) %>%
-                           pull(Short_Label))
-  ) %>%
-  ggplot(aes(x = Short_Label, y = Carrier_Count)) +
-  geom_col(fill = "#2166AC", width = 0.65) +
-  geom_text(aes(label = Carrier_Count), vjust = -0.4, size = 3,
-            fontface = "bold", color = "#2166AC") +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.18)),
-                     breaks = scales::pretty_breaks(5)) +
-  labs(
-    title    = "Alt-Allele Carrier Counts per SNP",
-    subtitle = "Number of samples carrying ≥1 alternate allele at each variant",
-    x        = "Variant (rsID, Gene)", y = "Carriers (n)"
-  ) +
-  theme(
-    axis.text.x        = element_text(angle = 40, hjust = 1, size = 8),
-    panel.grid.major.x = element_blank(),
-    panel.grid.major.y = element_line(color = "grey88", linewidth = 0.3)
-  )
-
-SAVE(file.path(OUT_DIR, "19_Fig1a_SNP_Carrier_Counts.png"), fig1a, width = 12, height = 5)
-
-# ── Fig 1b: Haplotype allele composition tile ─────────────────────────────────
-# IMPROVED: allele-string summary shown on right margin so each haplotype
-# can be described in a single line (e.g. "Ref-Alt-Ref-Ref-Alt")
-tile_data2 <- tile_data %>%
-  mutate(
-    Compact_Label = paste0(rsID_clean, "\n[", Gene, ", n=", Carrier_Count, "]"),
-    Compact_Label = factor(Compact_Label,
-      levels = annotation_map %>%
-        mutate(l = paste0(rsID_clean, "\n[", Gene, ", n=", Carrier_Count, "]")) %>%
-        pull(l))
-  )
-
-ordered_compact <- levels(tile_data2$Compact_Label)
-n_cols <- length(ordered_compact)
-
-fig1b <- tile_data2 %>%
-  ggplot(aes(x = Compact_Label, y = Haplotype, fill = Allele)) +
-  geom_tile(color = "white", linewidth = 0.45) +
-  # Frequency label
-  geom_text(
-    data = tile_data2 %>% distinct(Haplotype, Frequency, Freq_Label),
-    aes(x = n_cols + 0.9, y = Haplotype, label = Freq_Label, fill = NULL),
-    size = 2.7, hjust = 0, color = "grey25", fontface = "bold"
-  ) +
-  # Allele string summary (e.g. Ref-Alt-Ref…) — compact haplotype fingerprint
-  geom_text(
-    data = tile_data2 %>% distinct(Haplotype, Allele_String),
-    aes(x = n_cols + 2.6, y = Haplotype, label = Allele_String, fill = NULL),
-    size = 2.2, hjust = 0, color = "grey40", family = "mono"
-  ) +
-  scale_fill_manual(values = c("Ref" = "#E8E8E8", "Alt" = "#C0392B"), name = "Allele") +
-  scale_x_discrete(expand = expansion(add = c(0.5, 5.5))) +
-  labs(
-    title    = "Haplotype Allele Composition",
-    subtitle = sprintf(
-      "Each row = one haplotype (H1 most frequent); red = alternate allele | %d haplotypes ≥1%% global freq.",
-      length(common_haplotypes)),
-    x = "Variant (rsID, Gene, n carriers)", y = "Haplotype"
-  ) +
-  theme(
-    axis.text.x     = element_text(angle = 40, hjust = 1, size = 7.5),
-    panel.grid      = element_blank(),
-    legend.position = "right",
-    plot.margin     = margin(6, 14, 6, 8)
-  )
-
-SAVE(file.path(OUT_DIR, "19_Fig1b_Haplotype_Composition.png"), fig1b, width = 14, height = 8)
-
-fig1_combined <- fig1a / fig1b + plot_layout(heights = c(1, 2.8))
-SAVE(file.path(OUT_DIR, "19_Fig1_Haplotype_Composition.png"), fig1_combined, width = 14, height = 14)
-
-# =============================================================================
-# 8. FIGURE 2 — Global Haplotype Frequencies  (SIMPLIFIED)
-#    CHANGED: removed per-cohort lollipop panels (redundant with Fig 3).
-#    Now a single clean lollipop with frequency % and estimated count labels.
-#    Points sized by frequency; reference haplotype H1 highlighted in red.
-# =============================================================================
-cat("STEP 8: Figure 2 — Global Haplotype Frequencies...\n")
-
-hap_order <- rev(common_haplotypes)   # H1 at top when coord_flip applied
-
-fig2 <- freq_df %>%
-  mutate(
-    Haplotype  = factor(as.character(Haplotype), levels = hap_order),
-    n_chromos  = round(Frequency * length(common_samples) * 2),
-    is_ref     = as.character(Haplotype) == ref_haplo_global,
-    point_col  = ifelse(is_ref, "#e74c3c", "#2166AC"),
-    freq_label = sprintf("%s  (n≈%d)", percent(Frequency, accuracy = 0.1), n_chromos)
-  ) %>%
-  ggplot(aes(x = Haplotype, y = Frequency)) +
-  geom_segment(aes(xend = Haplotype, y = 0, yend = Frequency, colour = is_ref),
-               linewidth = 0.9) +
-  geom_point(aes(size = Frequency, colour = is_ref), alpha = 0.9) +
-  geom_text(aes(label = freq_label), hjust = -0.12, size = 2.7, color = "grey25") +
-  scale_colour_manual(values = c("FALSE" = "#2166AC", "TRUE" = "#e74c3c"),
-                      labels = c("FALSE" = "Other", "TRUE" = "Reference (H1)"),
-                      name = NULL) +
-  scale_size_continuous(range = c(2, 9), guide = "none") +
-  scale_y_continuous(labels = percent, expand = expansion(mult = c(0, 0.5)),
-                     breaks = scales::pretty_breaks(5)) +
-  coord_flip() +
-  labs(
-    title    = "Global Haplotype Frequencies",
-    subtitle = sprintf(
-      "EM-estimated frequencies across all %d samples (%d chromosomes)  |  %s = statistical reference (most frequent, shown in red)  |  %s = all-ref proxy (fewest alt alleles)",
-      length(common_samples), length(common_samples) * 2, ref_haplo_global, allref_haplo),
-    x = "Haplotype", y = "Global Frequency"
-  ) +
-  theme(
-    panel.grid.major.y = element_blank(),
-    panel.grid.major.x = element_line(color = "grey92"),
-    legend.position    = "top",
-    legend.justification = "left"
-  )
-
-SAVE(file.path(OUT_DIR, "19_Fig2_Global_Frequencies.png"), fig2, width = 10, height = 6.5)
-
-# =============================================================================
-# 9. FIGURE 3 — Haplotype Frequencies: Healthy vs Tumour
-#    CHANGED from grouped bars to paired dot-line plot.
-#    Each haplotype has two dots (Healthy, Tumour) connected by a line.
-#    Line colour encodes direction: red = higher in tumour, blue = lower.
-#    Faceted by Breast | Endometrium | All (pooled).
-#    Much easier to read frequency shifts than grouped bars.
-# =============================================================================
-cat("STEP 9: Figure 3 — Stratified Frequencies (Healthy vs Tumour)...\n")
-
-compute_stratum_freqs <- function(tissue_val, cohort_val, label) {
-  sub_meta <- metadata %>%
-    filter(
-      Sample %in% common_samples,
-      Tissue == tissue_val,
-      if (!is.null(cohort_val)) Cohort %in% cohort_val else TRUE
-    )
-  if (nrow(sub_meta) < 5) return(NULL)
-  sub_mat <- mat_all[sub_meta$Sample, , drop = FALSE]
-  em <- tryCatch(
-    haplo.em(setupGeno(sub_mat, locus.label = snp_labels)),
-    error = function(e) NULL
-  )
-  if (is.null(em)) return(NULL)
-  hap_df <- as.data.frame(em$haplotype)
-  colnames(hap_df) <- snp_labels
-  global_patterns  <- apply(freq_df[, snp_labels], 1, paste, collapse = "-")
-  stratum_patterns <- apply(hap_df[, snp_labels],  1, paste, collapse = "-")
-  hap_df$Haplotype <- as.character(freq_df$Haplotype)[match(stratum_patterns, global_patterns)]
-  hap_df$Frequency <- as.numeric(em$hap.prob)
-  hap_df$Group     <- label
-  hap_df %>% filter(Haplotype %in% common_haplotypes) %>%
-    select(Haplotype, Frequency, Group)
-}
-
-strat_freqs <- bind_rows(
-  compute_stratum_freqs("Healthy", "Breast",                  "Breast_Healthy"),
-  compute_stratum_freqs("Tumour",  "Breast",                  "Breast_Tumour"),
-  compute_stratum_freqs("Healthy", "Endometrium",             "Endometrium_Healthy"),
-  compute_stratum_freqs("Tumour",  "Endometrium",             "Endometrium_Tumour"),
-  compute_stratum_freqs("Healthy", c("Breast","Endometrium"), "All_Healthy"),
-  compute_stratum_freqs("Tumour",  c("Breast","Endometrium"), "All_Tumour")
-) %>%
-  mutate(
-    Haplotype = factor(Haplotype, levels = common_haplotypes),
-    Group     = factor(Group, levels = names(GROUP_COLS)),
-    Tissue    = ifelse(grepl("Healthy", Group), "Healthy", "Tumour"),
-    Cohort    = case_when(
-      grepl("^Breast",      Group) ~ "Breast",
-      grepl("^Endometrium", Group) ~ "Endometrium",
-      TRUE                         ~ "All (Pooled)"
-    ),
-    Cohort    = factor(Cohort, levels = c("Breast", "Endometrium", "All (Pooled)"))
-  )
-
-# Wide format for drawing connecting lines between Healthy and Tumour dots
-strat_wide <- strat_freqs %>%
-  select(Haplotype, Tissue, Frequency, Cohort) %>%
-  pivot_wider(names_from = Tissue, values_from = Frequency) %>%
-  mutate(
-    direction = case_when(
-      Tumour > Healthy ~ "Higher in Tumour",
-      Tumour < Healthy ~ "Lower in Tumour",
-      TRUE             ~ "Equal"
-    ),
-    delta = Tumour - Healthy
-  )
-
-# Long format for dots
-strat_long <- strat_freqs %>%
-  mutate(Tissue = factor(Tissue, levels = c("Healthy", "Tumour")))
-
-fig3 <- ggplot() +
-  # Connecting lines coloured by direction
-  geom_segment(
-    data = strat_wide,
-    aes(x = Haplotype, xend = Haplotype,
-        y = Healthy,   yend = Tumour,
-        colour = direction),
-    linewidth = 0.7, alpha = 0.7
-  ) +
-  # Dots for each tissue
-  geom_point(
-    data = strat_long,
-    aes(x = Haplotype, y = Frequency,
-        shape = Tissue, fill = Tissue),
-    size = 2.8, stroke = 0.4, colour = "white", alpha = 0.95
-  ) +
-  scale_colour_manual(
-    values = c("Higher in Tumour" = "#D6604D",
-               "Lower in Tumour"  = "#4393C3",
-               "Equal"            = "grey60"),
-    name = "Frequency shift"
-  ) +
-  scale_shape_manual(values = c("Healthy" = 21, "Tumour" = 24), name = "Tissue") +
-  scale_fill_manual(values = TISSUE_COLS, name = "Tissue") +
-  scale_y_continuous(labels = percent, expand = expansion(mult = c(0.05, 0.1))) +
-  facet_wrap(~ Cohort, ncol = 1, scales = "free_y") +
-  labs(
-    title    = "Haplotype Frequencies: Healthy vs Tumour",
-    subtitle = "EM-estimated per stratum  |  Lines connect Healthy → Tumour for each haplotype  |  Colour = direction of shift",
-    x        = "Haplotype", y = "EM-Estimated Frequency"
-  ) +
-  theme(
-    axis.text.x     = element_text(angle = 45, hjust = 1),
-    legend.position = "top",
-    legend.box      = "horizontal"
-  )
-
-SAVE(file.path(OUT_DIR, "19_Fig3_Stratified_Frequencies.png"), fig3, width = 11, height = 12)
-
-# =============================================================================
-# 10. FIGURE 4 — Forest Plot (Odds Ratios, Tumour vs Healthy)
-#     All v3 improvements:
-#       • Left frequency strip (lollipop; H1 in red)
-#       • H1 reference plotted as diamond at OR=1
-#       • Stars on point (not CI end), BH-FDR corrected
-#       • Arrow heads for clipped upper CIs
-#       • Y-axis labels only on left strip
-# =============================================================================
-cat("STEP 10: Figure 4 — Forest Plot...\n")
-
-ref_haplo <- ref_haplo_global
-ref_freq  <- percent(freq_df$Frequency[freq_df$Haplotype == ref_haplo_global], accuracy = 0.1)
-
-if (nrow(all_stats) == 0) {
-  cat("  SKIPPING Fig4: no GLM results available.\n")
-} else {
-
-  lo_vals <- all_stats$Lower[is.finite(all_stats$Lower) & all_stats$Lower > 0]
-  hi_vals <- all_stats$Upper[is.finite(all_stats$Upper) & all_stats$Upper > 0]
-  x_min   <- max(0.05, min(lo_vals, na.rm = TRUE) * 0.7)
-  x_max   <- min(50,   max(hi_vals, na.rm = TRUE) * 1.4)
-
-  all_breaks <- c(0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 32)
-  use_breaks <- all_breaks[all_breaks >= x_min & all_breaks <= x_max]
-  if (!1 %in% use_breaks) use_breaks <- sort(c(1, use_breaks))
-
-  all_hap_levels <- unique(c(ref_haplo, rev(levels(all_stats$Haplotype))))
-
-  ref_row <- expand.grid(
-    Haplotype  = ref_haplo,
-    Comparison = levels(all_stats$Comparison),
-    stringsAsFactors = FALSE
-  ) %>%
-    mutate(OR = 1, Lower = NA_real_, Upper = NA_real_,
-           sig_label = "", raw_sig_label = "", fdr = NA_real_, is_ref = TRUE)
-
-  plot_data <- all_stats %>%
-    mutate(is_ref = FALSE) %>%
-    bind_rows(ref_row) %>%
-    mutate(
-      Haplotype  = factor(Haplotype,  levels = rev(all_hap_levels)),
-      Comparison = factor(Comparison, levels = c("Breast", "Endometrium", "All")),
-      ci_clipped = !is_ref & !is.na(Upper) & Upper > x_max,
-      or_clipped = !is_ref & !is.na(OR) & OR > x_max,
-      OR_plot    = ifelse(or_clipped, x_max * 0.88, OR)
-    )
-
-  clipped_data <- plot_data %>% filter(ci_clipped | or_clipped)
-
-  make_fig4 <- function(sig_col, file_suffix, subtitle_label) {
-    pd <- plot_data %>% mutate(.sig = .data[[sig_col]])
-
-    forest_main <- ggplot(pd,
-      aes(x = OR_plot, y = Haplotype, colour = Comparison, shape = Comparison)) +
-      geom_vline(xintercept = 1, linetype = "dashed",
-                 colour = "grey45", linewidth = 0.5) +
-      geom_errorbarh(
-        data = pd %>% filter(!is_ref, !ci_clipped, !is.na(Lower), !is.na(Upper)),
-        aes(xmin = pmax(Lower, x_min * 0.9), xmax = pmin(Upper, x_max * 1.05)),
-        height = 0.28, linewidth = 0.55, alpha = 0.85
-      ) +
-      geom_errorbarh(
-        data = pd %>% filter(!is_ref, ci_clipped, !is.na(Lower), !is.na(Upper)),
-        aes(xmin = pmax(Lower, x_min * 0.9), xmax = x_max * 0.88),
-        height = 0.28, linewidth = 0.55, alpha = 0.85
-      ) +
-      geom_segment(
-        data = clipped_data,
-        aes(x = x_max * 0.88, xend = x_max * 0.995,
-            y = Haplotype,    yend = Haplotype),
-        arrow     = arrow(length = unit(0.15, "cm"), type = "open"),
-        linewidth = 0.65, alpha = 0.85
-      ) +
-      geom_point(data = pd %>% filter(!is_ref), size = 2.4, stroke = 0.5) +
-      geom_point(
-        data = pd %>% filter(!is_ref, is.na(Lower) | is.na(Upper)),
-        aes(x = OR_plot), shape = 124, size = 3.5, stroke = 0.5
-      ) +
-      geom_point(
-        data = pd %>% filter(is_ref),
-        aes(x = 1, y = Haplotype), shape = 18, size = 3.8,
-        colour = "black", inherit.aes = FALSE
-      ) +
-      geom_text(
-        data = pd %>% filter(is_ref, Comparison == "Breast"),
-        aes(x = 1, y = Haplotype, label = "ref."),
-        colour = "black", size = 2.4, vjust = -1.2, hjust = 0.5,
-        inherit.aes = FALSE
-      ) +
-      geom_text(
-        data = pd %>% filter(!is_ref, .sig != ""),
-        aes(label = .sig), vjust = -0.75, hjust = 0.5, size = 3.0,
-        show.legend = FALSE
-      ) +
-      scale_x_log10(
-        limits = c(x_min, x_max), breaks = use_breaks,
-        labels = ifelse(use_breaks == as.integer(use_breaks),
-                        as.character(as.integer(use_breaks)),
-                        as.character(use_breaks))
-      ) +
-      scale_colour_manual(values = COHORT_COLS, name = "Comparison") +
-      scale_shape_manual(values = c("Breast" = 16, "Endometrium" = 17, "All" = 15),
-                         name = "Comparison") +
-      facet_wrap(~ Comparison, ncol = length(unique(all_stats$Comparison))) +
-      labs(
-        title    = "Haplotype Association with Tumour (vs Healthy Reference)",
-        subtitle = sprintf(
-          "Reference: %s (%s global freq.)  |  ◆ = reference  |  Stars = %s: * <0.05  ** <0.01  *** <0.001  |  ► CI truncated",
-          ref_haplo, ref_freq, subtitle_label),
-        x = "Odds Ratio (log scale)", y = NULL
-      ) +
-      theme(
-        legend.position    = "none",
-        panel.grid.major.y = element_blank(),
-        panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.3),
-        axis.text.x        = element_text(size = 9),
-        axis.text.y        = element_blank(),
-        axis.ticks.y       = element_blank(),
-        strip.text         = element_text(size = 11, face = "bold")
-      )
-
-    freq_strip_data <- freq_df %>%
-      mutate(
-        Haplotype = factor(as.character(Haplotype), levels = rev(all_hap_levels)),
-        is_ref    = as.character(Haplotype) == ref_haplo_global,
-        freq_pct  = Frequency * 100
-      )
-
-    freq_strip <- ggplot(freq_strip_data,
-      aes(x = freq_pct, y = Haplotype, colour = is_ref)) +
-      geom_segment(aes(x = 0, xend = freq_pct, yend = Haplotype), linewidth = 0.6) +
-      geom_point(size = 2.2) +
-      geom_text(aes(label = sprintf("%.1f%%", freq_pct)),
-                hjust = -0.3, size = 2.4, colour = "grey25") +
-      scale_x_continuous(expand = expansion(mult = c(0, 0.6)),
-                         breaks = scales::pretty_breaks(3)) +
-      scale_colour_manual(values = c("FALSE" = "grey55", "TRUE" = "#e74c3c"),
-                          guide = "none") +
-      labs(title = "Global\nfreq.", subtitle = " ",
-           x = "Frequency (%)", y = "Haplotype") +
-      theme(
-        panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.3),
-        panel.grid.major.y = element_blank(),
-        axis.text.y        = element_text(size = 9, face = "bold"),
-        axis.title.x       = element_text(size = 8.5, face = "bold"),
-        axis.title.y       = element_text(size = 9,   face = "bold"),
-        plot.title         = element_text(size = 9,   face = "bold", hjust = 0.5),
-        plot.subtitle      = element_text(size = 7,   colour = "white")
-      )
-
-    fig <- freq_strip + forest_main + plot_layout(widths = c(0.45, 3))
-    SAVE(file.path(OUT_DIR, paste0("19_Fig4_Forest_Plot_", file_suffix, ".png")),
-         fig, width = 17, height = 7)
-  }
-
-  make_fig4("raw_sig_label", "RawP",  "Raw p-value")
-  make_fig4("sig_label",     "FDR",   "BH-FDR")
-}
-
-# =============================================================================
-# 11. FIGURE 5 — FDR Heatmap across comparisons
-#     IMPROVED vs v2/v3:
-#       • Uses BH-FDR (not raw Score_P) for both colour and text labels
-#       • Cells with FDR < 0.05 show the FDR value AND a significance symbol
-#       • Non-significant cells show "ns" in small grey text (not blank)
-#       • Colour scale anchored to actual data range, not a fixed ceiling
-#       • Added annotation row showing haplotype global frequency
-# =============================================================================
-cat("STEP 11: Figure 5 — FDR Heatmap...\n")
-
-if (nrow(all_stats) == 0) {
-  cat("  SKIPPING Fig5: no GLM results available.\n")
-} else {
-  max_val <- max(-log10(pmax(all_stats$fdr, 1e-10)), na.rm = TRUE)
-  if (is.infinite(max_val) || is.na(max_val)) max_val <- 3
-
-  fdr_data <- all_stats %>%
-    select(Haplotype, Comparison, fdr, sig_label) %>%
-    mutate(
-      neglog10_fdr = -log10(pmax(fdr, 1e-10)),
-      cell_label   = case_when(
-        !is.na(fdr) & fdr < 0.001 ~ paste0(formatC(fdr, digits = 1, format = "e"), "\n***"),
-        !is.na(fdr) & fdr < 0.01  ~ paste0(formatC(fdr, digits = 1, format = "e"), "\n**"),
-        !is.na(fdr) & fdr < 0.05  ~ paste0(formatC(fdr, digits = 1, format = "e"), "\n*"),
-        !is.na(fdr)                ~ formatC(fdr, digits = 2, format = "f"),
-        TRUE                       ~ "NA"
-      ),
-      text_colour = case_when(
-        !is.na(fdr) & fdr < 0.05                      ~ "white",
-        !is.na(fdr) & -log10(fdr) > max_val * 0.5     ~ "white",
-        TRUE                                           ~ "grey30"
-      )
-    )
-
-  # Add global frequency annotation strip at the bottom
-  freq_anno <- freq_df %>%
-    mutate(
-      Comparison   = "Global\nFreq.",
-      neglog10_fdr = NA_real_,
-      cell_label   = percent(Frequency, accuracy = 0.1),
-      text_colour  = "grey20",
-      sig_label    = ""
-    ) %>%
-    select(Haplotype, Comparison, neglog10_fdr, cell_label, text_colour, sig_label)
-
-  plot_data5 <- bind_rows(fdr_data, freq_anno) %>%
-    mutate(
-      Comparison = factor(Comparison, levels = c("Breast", "Endometrium", "All", "Global\nFreq."))
-    )
-
-  fig5 <- ggplot(plot_data5, aes(x = Comparison, y = Haplotype, fill = neglog10_fdr)) +
-    geom_tile(color = "white", linewidth = 0.6) +
-    geom_text(aes(label = cell_label, colour = text_colour),
-              size = 2.4, lineheight = 0.9) +
-    scale_colour_identity() +
-    scale_fill_gradientn(
-      colors   = c("#F7FBFF", "#C6DBEF", "#6BAED6", "#2171B5", "#08306B"),
-      values   = rescale(c(0, max_val * 0.2, max_val * 0.5,
-                           max_val * 0.75, max_val)),
-      name     = expression(-log[10](FDR)),
-      na.value = "grey93",
-      limits   = c(0, max_val),
-      guide    = guide_colorbar(barheight = 8, barwidth = 1.2)
-    ) +
-    # Vertical separator before the frequency annotation column
-    geom_vline(xintercept = 3.5, colour = "grey60", linewidth = 0.8, linetype = "dashed") +
-    labs(
-      title    = "Haplotype Association: BH-FDR Significance Heatmap",
-      subtitle = "Colour = −log₁₀(FDR)  |  All cells show raw FDR value; * p<0.05  ** p<0.01  *** p<0.001  |  Right column = global haplotype frequency",
-      x        = "Comparison (Tumour vs Healthy)", y = "Haplotype"
-    ) +
-    theme(
-      panel.grid  = element_blank(),
-      axis.line   = element_blank(),
-      axis.text.x = element_text(size = 9, angle = 0, hjust = 0.5)
-    )
-
-  SAVE(file.path(OUT_DIR, "19_Fig5_FDR_Heatmap.png"), fig5, width = 8, height = 7)
-}
-
-# =============================================================================
-# 11b. FIGURE 6 — Raw P-value Heatmap
-#      Companion to Fig 5. Uses uncorrected p-values (p_glm from Firth logistic
-#      regression) so the reader can see nominal signals that are obscured by
-#      FDR correction in a small-sample exploratory analysis.
-#      Threshold for labelling: p < 0.05 (nominal, uncorrected).
-#      Cells labelled with raw p-value + * where p < 0.05; 'ns' otherwise.
-# =============================================================================
-cat("STEP 11b: Figure 6 — Raw P-value Heatmap...\n")
-
-if (nrow(all_stats) == 0) {
-  cat("  SKIPPING Fig6: no GLM results available.\n")
-} else {
-  max_val_p <- max(-log10(pmax(all_stats$p_glm, 1e-10)), na.rm = TRUE)
-  if (is.infinite(max_val_p) || is.na(max_val_p)) max_val_p <- 3
-
-  praw_data <- all_stats %>%
-    select(Haplotype, Comparison, p_glm) %>%
-    mutate(
-      neglog10_p   = -log10(pmax(p_glm, 1e-10)),
-      cell_label   = case_when(
-        !is.na(p_glm) & p_glm < 0.001 ~ paste0(formatC(p_glm, digits = 1, format = "e"), "\n***"),
-        !is.na(p_glm) & p_glm < 0.01  ~ paste0(formatC(p_glm, digits = 1, format = "e"), "\n**"),
-        !is.na(p_glm) & p_glm < 0.05  ~ paste0(formatC(p_glm, digits = 1, format = "e"), "\n*"),
-        !is.na(p_glm)                  ~ formatC(p_glm, digits = 2, format = "f"),
-        TRUE                           ~ "NA"
-      ),
-      text_colour = case_when(
-        !is.na(p_glm) & p_glm < 0.05                    ~ "white",
-        !is.na(p_glm) & -log10(p_glm) > max_val_p * 0.5 ~ "white",
-        TRUE                                              ~ "grey30"
-      )
-    )
-
-  # Add global frequency annotation strip
-  freq_anno_p <- freq_df %>%
-    mutate(
-      Comparison   = "Global\nFreq.",
-      neglog10_p   = NA_real_,
-      cell_label   = percent(Frequency, accuracy = 0.1),
-      text_colour  = "grey20"
-    ) %>%
-    select(Haplotype, Comparison, neglog10_p, cell_label, text_colour)
-
-  plot_data6 <- bind_rows(praw_data, freq_anno_p) %>%
-    mutate(
-      Comparison = factor(Comparison,
-                          levels = c("Breast", "Endometrium", "All", "Global\nFreq."))
-    )
-
-  fig6 <- ggplot(plot_data6,
-                 aes(x = Comparison, y = Haplotype, fill = neglog10_p)) +
-    geom_tile(color = "white", linewidth = 0.6) +
-    geom_text(aes(label = cell_label, colour = text_colour),
-              size = 2.4, lineheight = 0.9) +
-    scale_colour_identity() +
-    scale_fill_gradientn(
-      colors   = c("#FFF5F0", "#FCBBA1", "#FB6A4A", "#CB181D", "#67000D"),
-      values   = rescale(c(0, max_val_p * 0.2, max_val_p * 0.5,
-                           max_val_p * 0.75, max_val_p)),
-      name     = expression(-log[10](p)),
-      na.value = "grey93",
-      limits   = c(0, max_val_p),
-      guide    = guide_colorbar(barheight = 8, barwidth = 1.2)
-    ) +
-    geom_vline(xintercept = 3.5, colour = "grey60", linewidth = 0.8,
-               linetype = "dashed") +
-    labs(
-      title    = "Haplotype Association: Nominal P-value Heatmap (Uncorrected)",
-      subtitle = paste0(
-        "Colour = −log₁₀(raw p)  |  Firth logistic regression p-values, NO multiple-testing correction  |",
-        "  * p<0.05  ** p<0.01  *** p<0.001  |  All cells show raw p-value  |  Right column = global freq."
-      ),
-      x = "Comparison (Tumour vs Healthy)", y = "Haplotype"
-    ) +
-    theme(
-      panel.grid  = element_blank(),
-      axis.line   = element_blank(),
-      axis.text.x = element_text(size = 9, angle = 0, hjust = 0.5)
-    )
-
-  SAVE(file.path(OUT_DIR, "19_Fig6_RawP_Heatmap.png"), fig6, width = 8, height = 7)
-}
-
-# =============================================================================
-# 12. GENOTYPIC MODEL ANALYSIS
-#     For each haplotype × comparison, classify each sample as:
-#       WT  = dosage < 0.5  (no copies)
-#       Het = 0.5 ≤ dosage < 1.5  (one copy)
-#       Hom = dosage ≥ 1.5  (two copies)
-#     Model selection per haplotype:
-#       ≥ 3 Hom carriers → full genotypic model (Het vs WT + Hom vs WT)
-#       < 3 Hom but ≥ 3 Het carriers → collapsed Het vs WT
-#       < 3 Het → skip
-#     Threshold: MIN_HOM = 3
-# =============================================================================
-cat("STEP 12: Genotypic model analysis...\n")
-
-MIN_HOM <- 3
-
-run_genotypic_comparison <- function(comp) {
-  sub_meta <- metadata %>%
-    filter(Cohort %in% comp$cohorts, Sample %in% common_samples,
-           Tissue %in% c("Healthy", "Tumour"))
-
-  if (nrow(sub_meta) < 10) return(NULL)
-  n_normal <- sum(sub_meta$Tissue == "Healthy")
-  n_tumour <- sum(sub_meta$Tissue == "Tumour")
-  if (n_normal == 0 || n_tumour == 0) return(NULL)
-
-  sub_samples <- sub_meta$Sample
-  sub_mat     <- mat_all[sub_samples, , drop = FALSE]
-  y           <- as.numeric(sub_meta$Tissue == "Tumour")
-
-  # Rebuild dosage matrix for this comparison's samples
-  n_haps_g     <- length(global_em$hap.prob)
-  hap_labels_g <- em_to_haplabel[as.character(seq_len(n_haps_g))]
-  global_to_local <- match(common_samples, sub_samples)
-
-  dosage_mat <- matrix(0, nrow = length(sub_samples), ncol = length(common_haplotypes),
-                       dimnames = list(sub_samples, common_haplotypes))
-
-  em_row_g  <- global_em$indx.subj
-  em_hap1_g <- global_em$hap1code
-  em_hap2_g <- global_em$hap2code
-  em_post_g <- global_em$post
-
-  for (k in seq_along(em_row_g)) {
-    global_i <- em_row_g[k]
-    local_i  <- global_to_local[global_i]
-    if (is.na(local_i)) next
-    h1   <- em_hap1_g[k]; h2 <- em_hap2_g[k]; post <- em_post_g[k]
-    lbl1 <- if (!is.na(h1) && h1 >= 1 && h1 <= n_haps_g) hap_labels_g[h1] else NA
-    lbl2 <- if (!is.na(h2) && h2 >= 1 && h2 <= n_haps_g) hap_labels_g[h2] else NA
-    if (!is.na(lbl1) && lbl1 %in% common_haplotypes)
-      dosage_mat[local_i, lbl1] <- dosage_mat[local_i, lbl1] + post
-    if (!is.na(lbl2) && lbl2 %in% common_haplotypes)
-      dosage_mat[local_i, lbl2] <- dosage_mat[local_i, lbl2] + post
-  }
-
-  test_haplos <- setdiff(common_haplotypes, ref_haplo_global)
-
-  results <- lapply(test_haplos, function(hname) {
-    dosage <- dosage_mat[, hname]
-
-    # Classify genotype
-    geno <- case_when(
-      dosage >= 1.5 ~ "Hom",
-      dosage >= 0.5 ~ "Het",
-      TRUE          ~ "WT"
-    )
-    geno <- factor(geno, levels = c("WT", "Het", "Hom"))
-
-    n_hom <- sum(geno == "Hom")
-    n_het <- sum(geno == "Het")
-
-    # Determine model type
-    model_type <- if (n_hom >= MIN_HOM) {
-      "Genotypic"
-    } else if (n_het >= MIN_HOM) {
-      "Het_vs_WT"
+    if (!is.na(best_end)) {
+      blocks[[paste0("Block", block_id)]] <- i:best_end
+      block_id <- block_id + 1
+      i <- best_end + 1  # next block starts immediately after current one
     } else {
-      "Skipped"
+      i <- i + 1  # this SNP cannot start a valid block; advance
+    }
+  }
+  blocks
+}
+
+run_assoc_for_region <- function(region_name, a1_mat, a2_mat, region_meta,
+                                 metadata_df, min_copies = 3,
+                                 comparison_set = c("Breast", "Endometrium", "All")) {
+  # Test each haplotype for carrier frequency differences between tumour and
+  # healthy tissue using two complementary methods:
+  #
+  # (1) Fisher's exact test on a 2x2 table (carrier / non-carrier x tumour / healthy).
+  #     Chosen because sample sizes are small and cell counts are sometimes near zero.
+  #
+  # (2) Firth-penalised logistic regression (logistf). Standard logistic regression
+  #     fails or gives infinite estimates when a haplotype is absent in one group
+  #     (complete separation). Firth's penalisation shrinks the likelihood to avoid
+  #     this, making it the recommended method for rare binary outcomes in small samples.
+  #     Falls back to standard GLM if logistf fails, and to Fisher OR if GLM also fails.
+  #
+  # BH-FDR correction is applied once across ALL haplotype-comparison combinations
+  # within a region (not per comparison group), which is more conservative but
+  # avoids inflating significance by treating the three comparison groups as independent.
+
+  # Count haplotype occurrences across both alleles for all samples
+  hap1 <- make_binary_hap_strings(a1_mat)
+  hap2 <- make_binary_hap_strings(a2_mat)
+  hap_counts  <- sort(table(c(hap1, hap2)), decreasing = TRUE)
+  tested_haps <- names(hap_counts[hap_counts >= min_copies])
+
+  if (length(tested_haps) == 0) return(NULL)
+
+  results <- list()
+
+  comp_defs <- list(
+    list(label = "Breast",      keep = metadata_df$Cohort == "Breast"),
+    list(label = "Endometrium", keep = metadata_df$Cohort == "Endometrium"),
+    list(label = "All",         keep = rep(TRUE, nrow(metadata_df)))
+  )
+  comp_defs <- comp_defs[sapply(comp_defs, function(x) x$label %in% comparison_set)]
+
+  for (comp in comp_defs) {
+    idx <- which(comp$keep & metadata_df$Tissue %in% c("Healthy", "Tumour"))
+    if (length(idx) == 0) next
+
+    meta_sub  <- metadata_df[idx, , drop = FALSE]
+    y         <- as.integer(meta_sub$Tissue == "Tumour")   # 1 = case, 0 = control
+    n_case    <- sum(y == 1)
+    n_control <- sum(y == 0)
+    if (n_case < MIN_SAMPLES_PER_ARM || n_control < MIN_SAMPLES_PER_ARM) next
+
+    hap1_sub <- hap1[idx]
+    hap2_sub <- hap2[idx]
+
+    comp_rows <- list()
+    for (h in tested_haps) {
+      # Dosage = number of copies of haplotype h carried by each sample (0, 1, or 2)
+      dosage <- as.integer(hap1_sub == h) + as.integer(hap2_sub == h)
+      if (var(dosage) == 0) next  # no variation — cannot test
+
+      carrier <- as.integer(dosage >= 1)
+      tbl     <- table(carrier, y)
+      if (nrow(tbl) < 2 || ncol(tbl) < 2) next  # degenerate table — skip
+
+      fish <- fisher.test(tbl)
+      freq_case    <- mean(dosage[y == 1], na.rm = TRUE) / 2  # carrier freq = mean dosage / 2
+      freq_control <- mean(dosage[y == 0], na.rm = TRUE) / 2
+
+      # Primary model: Firth-penalised logistic regression on dosage (additive model)
+      fit <- tryCatch(
+        logistf::logistf(y ~ dosage),
+        error = function(e) NULL
+      )
+
+      if (!is.null(fit) && "dosage" %in% names(coef(fit))) {
+        beta  <- coef(fit)["dosage"]
+        ci    <- as.numeric(suppressWarnings(confint(fit, parm = "dosage")))
+        or    <- exp(beta)
+        or_lo <- exp(ci[1])
+        or_hi <- exp(ci[2])
+        p_mod <- fit$prob["dosage"]
+      } else {
+        # Fallback 1: standard logistic regression
+        fit_glm <- tryCatch(suppressWarnings(glm(y ~ dosage, family = binomial())),
+                            error = function(e) NULL)
+        if (!is.null(fit_glm) && nrow(summary(fit_glm)$coefficients) >= 2) {
+          beta  <- coef(fit_glm)["dosage"]
+          se    <- summary(fit_glm)$coefficients["dosage", "Std. Error"]
+          or    <- exp(beta)
+          or_lo <- exp(beta - 1.96 * se)
+          or_hi <- exp(beta + 1.96 * se)
+          p_mod <- summary(fit_glm)$coefficients["dosage", "Pr(>|z|)"]
+        } else {
+          # Fallback 2: use Fisher OR directly (no CI from regression available)
+          or    <- as.numeric(fish$estimate)
+          or_lo <- NA_real_
+          or_hi <- NA_real_
+          p_mod <- fish$p.value
+        }
+      }
+
+      # Decode the binary haplotype string back to a list of ALT-carrying rsIDs
+      hap_bits <- strsplit(h, "")[[1]]
+      alt_idx  <- which(hap_bits == "1")
+      hap_def  <- if (length(alt_idx) == 0) {
+        "Reference-like"
+      } else {
+        paste(region_meta$rsID_clean[alt_idx], collapse = "; ")
+      }
+
+      comp_rows[[length(comp_rows) + 1]] <- data.frame(
+        Region           = region_name,
+        Comparison       = comp$label,
+        Haplotype_String = h,
+        Haplotype_Def    = hap_def,
+        Haplotype_Copies = as.integer(hap_counts[h]),
+        Global_Freq      = as.integer(hap_counts[h]) / sum(hap_counts),
+        Freq_Tumour      = freq_case,
+        Freq_Healthy     = freq_control,
+        OR               = or,
+        OR_95CI_Lo       = or_lo,
+        OR_95CI_Hi       = or_hi,
+        P_Fisher         = fish$p.value,
+        P_Model          = p_mod,
+        N_Tumour         = n_case,
+        N_Healthy        = n_control,
+        stringsAsFactors = FALSE
+      )
     }
 
-    if (model_type == "Skipped") {
-      return(data.frame(
-        Haplotype = hname, Comparison = comp$label,
-        Term = "Skipped", Model_Type = "Skipped",
-        OR = NA_real_, Lower = NA_real_, Upper = NA_real_,
-        p_glm = NA_real_, n_WT = sum(geno=="WT"),
-        n_Het = n_het, n_Hom = n_hom,
-        row.names = NULL
-      ))
+    if (length(comp_rows) > 0) {
+      results[[comp$label]] <- bind_rows(comp_rows) %>% arrange(P_Fisher)
     }
+  }
 
-    df_fit <- data.frame(y = y, geno = geno)
+  if (length(results) == 0) return(NULL)
+  out <- bind_rows(results)
 
-    if (model_type == "Het_vs_WT") {
-      df_fit <- df_fit %>% filter(geno != "Hom") %>%
-        mutate(geno = droplevels(geno))
-    }
+  # BH-FDR across all haplotype-comparison tests in this region jointly
+  out$FDR                <- p.adjust(out$P_Fisher, method = "BH")
+  out$Significant_Fisher <- out$P_Fisher < 0.05
+  out$Significant_FDR    <- out$FDR < 0.05
 
-    fit <- tryCatch(
-      logistf(y ~ geno, data = df_fit, firth = TRUE, pl = FALSE,
-              control = logistf.control(maxit = 500, maxstep = 10)),
-      error = function(e) NULL
-    )
-    if (is.null(fit)) return(NULL)
+  # Assign Haplotype_IDs consistently by global frequency so H1 is always the
+  # most common haplotype regardless of which comparison group it was first seen in
+  freq_rank <- out %>%
+    distinct(Haplotype_String, Global_Freq) %>%
+    arrange(desc(Global_Freq)) %>%
+    mutate(Haplotype_ID = paste0("H", seq_len(n())))
+  out <- out %>% left_join(freq_rank %>% select(Haplotype_String, Haplotype_ID),
+                           by = "Haplotype_String")
+  out
+}
 
-    coef_names <- names(coef(fit))
-    term_names <- coef_names[grepl("^geno", coef_names)]
+build_region_summary <- function(region_name, region_type, snp_meta, freq_obj, assoc_df = NULL) {
+  out <- data.frame(
+    Region       = region_name,
+    Region_Type  = region_type,
+    N_SNPs       = nrow(snp_meta),
+    SNPs         = paste(snp_meta$rsID_clean, collapse = ", "),
+    Genes        = paste(unique(snp_meta$Gene), collapse = ", "),
+    Haps_All     = nrow(freq_obj$all),
+    Haps_Shown   = nrow(freq_obj$shown),
+    Top_Hap      = ifelse(nrow(freq_obj$shown) > 0, freq_obj$shown$Haplotype_ID[1], NA),
+    Top_Hap_Freq = ifelse(nrow(freq_obj$shown) > 0, freq_obj$shown$Frequency[1], NA),
+    N_Tests      = if (!is.null(assoc_df) && nrow(assoc_df) > 0) nrow(assoc_df) else 0L,
+    stringsAsFactors = FALSE
+  )
+  if (!is.null(assoc_df) && nrow(assoc_df) > 0) {
+    best <- assoc_df %>% arrange(P_Fisher) %>% slice(1)
+    out$Best_Comparison <- best$Comparison
+    out$Best_Hap_Def    <- best$Haplotype_Def
+    out$Best_P_Fisher   <- best$P_Fisher
+    out$Best_FDR        <- best$FDR
+  }
+  out
+}
+# =============================================================================
+# FIGURE FUNCTIONS
+# =============================================================================
 
-    rows <- lapply(term_names, function(trm) {
-      beta <- coef(fit)[trm]
-      se   <- tryCatch(sqrt(diag(vcov(fit))[trm]), error = function(e) NA_real_)
-      p    <- fit$prob[trm]
-      term_label <- sub("^geno", "", trm)   # "Het" or "Hom"
+make_ld_plot <- function(ld_matrix, snp_meta, out_file, ld_blocks = NULL) {
+  # LD heatmap: r² between all pairs of SNPs, with optional block boundary
+  # rectangles overlaid. Blocks are drawn as red outlines on the grid.
+  ld_df <- as.data.frame(as.table(ld_matrix), stringsAsFactors = FALSE)
+  names(ld_df) <- c("SNP1", "SNP2", "R2")
+  pos_map <- setNames(snp_meta$POS_int, snp_meta$rsID_clean)
+  ld_df$POS1 <- pos_map[ld_df$SNP1]
+  ld_df$POS2 <- pos_map[ld_df$SNP2]
+
+  snp_levels <- snp_meta$rsID_clean
+
+  # Convert block index vectors to rectangle coordinates on the grid
+  block_rects <- NULL
+  if (!is.null(ld_blocks) && length(ld_blocks) > 0) {
+    block_rects <- bind_rows(lapply(ld_blocks, function(idx) {
       data.frame(
-        Haplotype  = hname, Comparison = comp$label,
-        Term       = term_label, Model_Type = model_type,
-        OR         = exp(beta),
-        Lower      = exp(beta - 1.96 * se),
-        Upper      = exp(beta + 1.96 * se),
-        p_glm      = as.numeric(p),
-        n_WT       = sum(df_fit$geno == "WT"),
-        n_Het      = sum(df_fit$geno == "Het"),
-        n_Hom      = if (model_type == "Genotypic") sum(df_fit$geno == "Hom") else 0L,
-        row.names  = NULL
+        xmin = idx[1] - 0.5,
+        xmax = idx[length(idx)] + 0.5,
+        ymin = length(snp_levels) - idx[length(idx)] + 0.5,
+        ymax = length(snp_levels) - idx[1] + 1.5
       )
-    })
-    bind_rows(rows)
-  })
-
-  bind_rows(results)
-}
-
-geno_stats_list <- lapply(comparisons, run_genotypic_comparison)
-geno_stats_raw  <- bind_rows(geno_stats_list)
-cat(sprintf("  Genotypic model rows: %d\n", nrow(geno_stats_raw)))
-
-# BH-FDR within each comparison × term combination
-geno_stats <- geno_stats_raw %>%
-  filter(Model_Type != "Skipped") %>%
-  mutate(
-    Haplotype  = factor(Haplotype,  levels = common_haplotypes),
-    Comparison = factor(Comparison, levels = c("Breast", "Endometrium", "All")),
-    Term       = factor(Term,       levels = c("Het", "Hom"))
-  ) %>%
-  group_by(Comparison, Term) %>%
-  mutate(
-    fdr = p.adjust(p_glm, method = "BH"),
-    sig_label = case_when(
-      !is.na(fdr) & fdr < 0.001 ~ "***",
-      !is.na(fdr) & fdr < 0.01  ~ "**",
-      !is.na(fdr) & fdr < 0.05  ~ "*",
-      TRUE                       ~ ""
-    ),
-    raw_sig_label = case_when(
-      !is.na(p_glm) & p_glm < 0.001 ~ "***",
-      !is.na(p_glm) & p_glm < 0.01  ~ "**",
-      !is.na(p_glm) & p_glm < 0.05  ~ "*",
-      TRUE                           ~ ""
-    )
-  ) %>%
-  ungroup()
-
-# Model type summary (one row per haplotype × comparison)
-model_summary <- geno_stats_raw %>%
-  select(Haplotype, Comparison, Model_Type, n_WT, n_Het, n_Hom) %>%
-  distinct(Haplotype, Comparison, .keep_all = TRUE) %>%
-  mutate(
-    Haplotype  = factor(Haplotype,  levels = common_haplotypes),
-    Comparison = factor(Comparison, levels = c("Breast", "Endometrium", "All"))
-  )
-
-# =============================================================================
-# FIG G1 — Genotypic Forest Plot
-#   Het vs WT and Hom vs WT shown as separate sub-rows per haplotype,
-#   faceted by comparison. Same arrow/clipping logic as Fig 4.
-# =============================================================================
-cat("  Fig G1: Genotypic forest plot...\n")
-
-if (nrow(geno_stats) > 0) {
-
-  hi_g  <- geno_stats$Upper[is.finite(geno_stats$Upper) & geno_stats$Upper > 0]
-  lo_g  <- geno_stats$Lower[is.finite(geno_stats$Lower) & geno_stats$Lower > 0]
-  xmin_g <- max(0.05, min(lo_g, na.rm = TRUE) * 0.7)
-  xmax_g <- min(50,   max(hi_g, na.rm = TRUE) * 1.4)
-
-  brk_g <- c(0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 32)
-  brk_g <- brk_g[brk_g >= xmin_g & brk_g <= xmax_g]
-  if (!1 %in% brk_g) brk_g <- sort(c(1, brk_g))
-
-  TERM_COLS   <- c("Het" = "#4393C3", "Hom" = "#D6604D")
-  TERM_SHAPES <- c("Het" = 16, "Hom" = 17)
-
-  pd_g <- geno_stats %>%
-    mutate(
-      ci_clipped = !is.na(Upper) & Upper > xmax_g,
-      or_clipped = !is.na(OR)    & OR    > xmax_g,
-      OR_plot    = ifelse(or_clipped, xmax_g * 0.88, OR),
-      HapTerm    = paste0(Haplotype, "\n(", Term, ")")
-    )
-
-  ht_levels <- pd_g %>%
-    arrange(desc(as.integer(Haplotype)), desc(Term)) %>%
-    pull(HapTerm) %>% unique()
-  pd_g <- pd_g %>% mutate(HapTerm = factor(HapTerm, levels = ht_levels))
-
-  make_figG1 <- function(sig_col, file_suffix, subtitle_label) {
-    pd <- pd_g %>% mutate(.sig = .data[[sig_col]])
-
-    figG1 <- ggplot(pd, aes(x = OR_plot, y = HapTerm,
-                              colour = Term, shape = Term)) +
-      geom_vline(xintercept = 1, linetype = "dashed",
-                 colour = "grey45", linewidth = 0.5) +
-      geom_errorbarh(
-        data = pd %>% filter(!ci_clipped, !is.na(Lower), !is.na(Upper)),
-        aes(xmin = pmax(Lower, xmin_g * 0.9), xmax = pmin(Upper, xmax_g)),
-        height = 0.25, linewidth = 0.5, alpha = 0.85
-      ) +
-      geom_errorbarh(
-        data = pd %>% filter(ci_clipped, !is.na(Lower)),
-        aes(xmin = pmax(Lower, xmin_g * 0.9), xmax = xmax_g * 0.88),
-        height = 0.25, linewidth = 0.5, alpha = 0.85
-      ) +
-      geom_segment(
-        data = pd %>% filter(ci_clipped | or_clipped),
-        aes(x = xmax_g * 0.88, xend = xmax_g * 0.995,
-            y = HapTerm, yend = HapTerm),
-        arrow = arrow(length = unit(0.14, "cm"), type = "open"),
-        linewidth = 0.6, alpha = 0.85
-      ) +
-      geom_point(size = 2.2, stroke = 0.5) +
-      geom_point(
-        data = pd %>% filter(is.na(Lower) | is.na(Upper)),
-        shape = 124, size = 3.2, stroke = 0.5
-      ) +
-      geom_text(
-        data = pd %>% filter(.sig != ""),
-        aes(label = .sig), vjust = -0.8, hjust = 0.5, size = 2.8,
-        show.legend = FALSE
-      ) +
-      scale_x_log10(
-        limits = c(xmin_g, xmax_g), breaks = brk_g,
-        labels = ifelse(brk_g == as.integer(brk_g),
-                        as.character(as.integer(brk_g)), as.character(brk_g))
-      ) +
-      scale_colour_manual(values = TERM_COLS,   name = "Genotype vs WT") +
-      scale_shape_manual( values = TERM_SHAPES, name = "Genotype vs WT") +
-      facet_wrap(~ Comparison, ncol = 3) +
-      labs(
-        title    = "Genotypic Haplotype Association with Tumour (vs Healthy)",
-        subtitle = sprintf(
-          "Firth logistic regression  |  Reference: %s (%s global freq.)  |  %s stars: * <0.05 ** <0.01 *** <0.001  |  ► CI truncated",
-          ref_haplo_global,
-          percent(freq_df$Frequency[freq_df$Haplotype == ref_haplo_global], accuracy = 0.1),
-          subtitle_label
-        ),
-        x = "Odds Ratio (log scale)", y = "Haplotype (Genotype)"
-      ) +
-      theme(
-        panel.grid  = element_blank(),
-        axis.text.y = element_text(size = 7.5)
-      )
-
-    SAVE(file.path(OUT_DIR, paste0("19_FigG1_Genotypic_Forest_", file_suffix, ".png")),
-         figG1, width = 17, height = 10)
+    }))
   }
 
-  make_figG1("raw_sig_label", "RawP", "Raw p-value")
-  make_figG1("sig_label",     "FDR",  "BH-FDR")
-}
-
-# =============================================================================
-# FIG G2 — Additive vs Genotypic OR Comparison (Het rows only)
-#   Side-by-side scatter: x = additive OR, y = Het-vs-WT OR
-#   Points coloured by comparison, labelled by haplotype
-# =============================================================================
-cat("  Fig G2: Additive vs genotypic comparison...\n")
-
-if (nrow(geno_stats) > 0 && nrow(all_stats) > 0) {
-
-  compare_models <- all_stats %>%
-    select(Haplotype, Comparison, OR_additive = OR,
-           add_sig_fdr = sig_label, add_sig_raw = raw_sig_label) %>%
-    inner_join(
-      geno_stats %>% filter(Term == "Het") %>%
-        select(Haplotype, Comparison, OR_het = OR,
-               het_sig_fdr = sig_label, het_sig_raw = raw_sig_label),
-      by = c("Haplotype", "Comparison")
-    ) %>%
-    mutate(
-      sig_fdr = ifelse(add_sig_fdr != "" | het_sig_fdr != "", "Significant", "ns"),
-      sig_raw = ifelse(add_sig_raw != "" | het_sig_raw != "", "Significant", "ns")
-    )
-
-  make_figG2 <- function(sig_col, file_suffix, subtitle_label) {
-    pd <- compare_models %>% mutate(.sig = .data[[sig_col]])
-    ggplot(pd, aes(x = OR_additive, y = OR_het, colour = Comparison,
-                   label = Haplotype, alpha = .sig, size = .sig)) +
-      geom_abline(slope = 1, intercept = 0, linetype = "dashed",
-                  colour = "grey60", linewidth = 0.5) +
-      geom_hline(yintercept = 1, linetype = "dotted", colour = "grey75") +
-      geom_vline(xintercept = 1, linetype = "dotted", colour = "grey75") +
-      geom_point() +
-      geom_text(size = 2.4, vjust = -0.8, hjust = 0.5, show.legend = FALSE,
-                alpha = 1) +
-      scale_x_log10() + scale_y_log10() +
-      scale_colour_manual(values = COHORT_COLS, name = "Comparison") +
-      scale_alpha_manual(values = c("Significant" = 1.0, "ns" = 0.45),
-                         name = subtitle_label) +
-      scale_size_manual(values  = c("Significant" = 3.5, "ns" = 2.2),
-                        name = subtitle_label) +
-      facet_wrap(~ Comparison, ncol = 3) +
-      labs(
-        title    = "Additive vs Genotypic (Het vs WT) Odds Ratio Comparison",
-        subtitle = paste0("Each point = one haplotype  |  Dashed diagonal = perfect agreement  |  Both axes log-scaled  |  Highlighted = ", subtitle_label, " p<0.05"),
-        x = "Additive model OR", y = "Genotypic Het-vs-WT OR"
-      )
-  }
-
-  SAVE(file.path(OUT_DIR, "19_FigG2_Additive_vs_Genotypic_RawP.png"),
-       make_figG2("sig_raw", "RawP", "Raw p-value"), width = 13, height = 5)
-  SAVE(file.path(OUT_DIR, "19_FigG2_Additive_vs_Genotypic_FDR.png"),
-       make_figG2("sig_fdr", "FDR",  "BH-FDR"),      width = 13, height = 5)
-}
-
-# =============================================================================
-# FIG G3 — Genotypic Raw P-value Heatmap (Het and Hom panels)
-# =============================================================================
-cat("  Fig G3: Genotypic raw p-value heatmap...\n")
-
-if (nrow(geno_stats) > 0) {
-
-  max_gp <- max(-log10(pmax(geno_stats$p_glm, 1e-10)), na.rm = TRUE)
-  if (is.infinite(max_gp) || is.na(max_gp)) max_gp <- 3
-
-  geno_heat <- geno_stats %>%
-    mutate(
-      neglog10_p = -log10(pmax(p_glm, 1e-10)),
-      cell_label = case_when(
-        !is.na(p_glm) & p_glm < 0.001 ~ paste0(formatC(p_glm, digits = 1, format = "e"), "\n***"),
-        !is.na(p_glm) & p_glm < 0.01  ~ paste0(formatC(p_glm, digits = 1, format = "e"), "\n**"),
-        !is.na(p_glm) & p_glm < 0.05  ~ paste0(formatC(p_glm, digits = 1, format = "e"), "\n*"),
-        !is.na(p_glm)                  ~ formatC(p_glm, digits = 2, format = "f"),
-        TRUE                           ~ "NA"
-      ),
-      text_colour = case_when(
-        !is.na(p_glm) & p_glm < 0.05                      ~ "white",
-        !is.na(p_glm) & -log10(p_glm) > max_gp * 0.5     ~ "white",
-        TRUE                                               ~ "grey30"
-      )
-    )
-
-  freq_anno_g3 <- freq_df %>%
-    mutate(
-      Comparison  = "Global\nFreq.",
-      neglog10_p  = NA_real_,
-      cell_label  = percent(Frequency, accuracy = 0.1),
-      text_colour = "grey20"
-    ) %>%
-    select(Haplotype, Comparison, neglog10_p, cell_label, text_colour)
-
-  make_geno_heatmap <- function(term_val, title_suffix) {
-    pd <- geno_heat %>%
-      filter(Term == term_val) %>%
-      select(Haplotype, Comparison, neglog10_p, cell_label, text_colour) %>%
-      bind_rows(freq_anno_g3) %>%
-      mutate(Comparison = factor(Comparison,
-               levels = c("Breast", "Endometrium", "All", "Global\nFreq.")))
-
-    ggplot(pd, aes(x = Comparison, y = Haplotype, fill = neglog10_p)) +
-      geom_tile(colour = "white", linewidth = 0.6) +
-      geom_text(aes(label = cell_label, colour = text_colour),
-                size = 2.4, lineheight = 0.9) +
-      scale_colour_identity() +
-      scale_fill_gradientn(
-        colours  = c("#FFF5F0", "#FCBBA1", "#FB6A4A", "#CB181D", "#67000D"),
-        values   = rescale(c(0, max_gp * 0.2, max_gp * 0.5, max_gp * 0.75, max_gp)),
-        name     = expression(-log[10](p)),
-        na.value = "grey93",
-        limits   = c(0, max_gp),
-        guide    = guide_colorbar(barheight = 8, barwidth = 1.2)
-      ) +
-      geom_vline(xintercept = 3.5, colour = "grey60", linewidth = 0.8, linetype = "dashed") +
-      labs(
-        title    = paste0("Genotypic Association: Raw P-value Heatmap (", title_suffix, ")"),
-        subtitle = "Colour = −log₁₀(raw p)  |  Firth logistic regression, NO multiple-testing correction  |  All cells show raw p-value",
-        x = "Comparison (Tumour vs Healthy)", y = "Haplotype"
-      ) +
-      theme(panel.grid = element_blank(), axis.line = element_blank(),
-            axis.text.x = element_text(size = 9, angle = 0, hjust = 0.5))
-  }
-
-  figG3_het <- make_geno_heatmap("Het", "Het vs WT")
-  figG3_hom <- make_geno_heatmap("Hom", "Hom vs WT")
-  figG3 <- figG3_het / figG3_hom + plot_annotation(
-    title = "Genotypic Raw P-value Heatmaps",
-    subtitle = "Top: Heterozygous vs Wildtype  |  Bottom: Homozygous vs Wildtype"
-  )
-
-  SAVE(file.path(OUT_DIR, "19_FigG3_Genotypic_RawP_Heatmap.png"), figG3, width = 8, height = 13)
-}
-
-# =============================================================================
-# FIG G4 — Genotypic FDR Heatmap (Het and Hom panels)
-# =============================================================================
-cat("  Fig G4: Genotypic FDR heatmap...\n")
-
-if (nrow(geno_stats) > 0) {
-
-  max_gfdr <- max(-log10(pmax(geno_stats$fdr, 1e-10)), na.rm = TRUE)
-  if (is.infinite(max_gfdr) || is.na(max_gfdr)) max_gfdr <- 3
-
-  geno_fdr_heat <- geno_stats %>%
-    mutate(
-      neglog10_fdr = -log10(pmax(fdr, 1e-10)),
-      cell_label   = case_when(
-        !is.na(fdr) & fdr < 0.001 ~ paste0(formatC(fdr, digits = 1, format = "e"), "\n***"),
-        !is.na(fdr) & fdr < 0.01  ~ paste0(formatC(fdr, digits = 1, format = "e"), "\n**"),
-        !is.na(fdr) & fdr < 0.05  ~ paste0(formatC(fdr, digits = 1, format = "e"), "\n*"),
-        !is.na(fdr)                ~ formatC(fdr, digits = 2, format = "f"),
-        TRUE                       ~ "NA"
-      ),
-      text_colour = case_when(
-        !is.na(fdr) & fdr < 0.05                        ~ "white",
-        !is.na(fdr) & -log10(fdr) > max_gfdr * 0.5     ~ "white",
-        TRUE                                             ~ "grey30"
-      )
-    )
-
-  freq_anno_g4 <- freq_df %>%
-    mutate(
-      Comparison   = "Global\nFreq.",
-      neglog10_fdr = NA_real_,
-      cell_label   = percent(Frequency, accuracy = 0.1),
-      text_colour  = "grey20",
-      sig_label    = ""
-    ) %>%
-    select(Haplotype, Comparison, neglog10_fdr, cell_label, text_colour, sig_label)
-
-  make_fdr_heatmap <- function(term_val, title_suffix) {
-    pd <- geno_fdr_heat %>%
-      filter(Term == term_val) %>%
-      select(Haplotype, Comparison, neglog10_fdr, cell_label, text_colour) %>%
-      bind_rows(freq_anno_g4 %>% select(-sig_label)) %>%
-      mutate(Comparison = factor(Comparison,
-               levels = c("Breast", "Endometrium", "All", "Global\nFreq.")))
-
-    ggplot(pd, aes(x = Comparison, y = Haplotype, fill = neglog10_fdr)) +
-      geom_tile(colour = "white", linewidth = 0.6) +
-      geom_text(aes(label = cell_label, colour = text_colour),
-                size = 2.4, lineheight = 0.9) +
-      scale_colour_identity() +
-      scale_fill_gradientn(
-        colours  = c("#F7FBFF", "#C6DBEF", "#6BAED6", "#2171B5", "#08306B"),
-        values   = rescale(c(0, max_gfdr * 0.2, max_gfdr * 0.5, max_gfdr * 0.75, max_gfdr)),
-        name     = expression(-log[10](FDR)),
-        na.value = "grey93",
-        limits   = c(0, max_gfdr),
-        guide    = guide_colorbar(barheight = 8, barwidth = 1.2)
-      ) +
-      geom_vline(xintercept = 3.5, colour = "grey60", linewidth = 0.8, linetype = "dashed") +
-      labs(
-        title    = paste0("Genotypic Association: BH-FDR Heatmap (", title_suffix, ")"),
-        subtitle = "Colour = −log₁₀(FDR)  |  BH correction within comparison × term  |  All cells show FDR value",
-        x = "Comparison (Tumour vs Healthy)", y = "Haplotype"
-      ) +
-      theme(panel.grid = element_blank(), axis.line = element_blank(),
-            axis.text.x = element_text(size = 9, angle = 0, hjust = 0.5))
-  }
-
-  figG4_het <- make_fdr_heatmap("Het", "Het vs WT")
-  figG4_hom <- make_fdr_heatmap("Hom", "Hom vs WT")
-  figG4 <- figG4_het / figG4_hom + plot_annotation(
-    title    = "Genotypic BH-FDR Heatmaps",
-    subtitle = "Top: Heterozygous vs Wildtype  |  Bottom: Homozygous vs Wildtype"
-  )
-
-  SAVE(file.path(OUT_DIR, "19_FigG4_Genotypic_FDR_Heatmap.png"), figG4, width = 8, height = 13)
-}
-
-# =============================================================================
-# FIG G5 — Genotype Frequency Stacked Bar
-#   WT / Het / Hom proportions per haplotype, split by Tissue and Cohort
-# =============================================================================
-cat("  Fig G5: Genotype frequency stacked bar...\n")
-
-build_geno_freq <- function(comp) {
-  sub_meta <- metadata %>%
-    filter(Cohort %in% comp$cohorts, Sample %in% common_samples,
-           Tissue %in% c("Healthy", "Tumour"))
-  if (nrow(sub_meta) < 5) return(NULL)
-
-  sub_samples <- sub_meta$Sample
-  global_to_local <- match(common_samples, sub_samples)
-  n_haps_g     <- length(global_em$hap.prob)
-  hap_labels_g <- em_to_haplabel[as.character(seq_len(n_haps_g))]
-
-  dosage_mat <- matrix(0, nrow = length(sub_samples), ncol = length(common_haplotypes),
-                       dimnames = list(sub_samples, common_haplotypes))
-
-  for (k in seq_along(global_em$indx.subj)) {
-    global_i <- global_em$indx.subj[k]
-    local_i  <- global_to_local[global_i]
-    if (is.na(local_i)) next
-    h1 <- global_em$hap1code[k]; h2 <- global_em$hap2code[k]
-    p  <- global_em$post[k]
-    lbl1 <- if (!is.na(h1) && h1 >= 1 && h1 <= n_haps_g) hap_labels_g[h1] else NA
-    lbl2 <- if (!is.na(h2) && h2 >= 1 && h2 <= n_haps_g) hap_labels_g[h2] else NA
-    if (!is.na(lbl1) && lbl1 %in% common_haplotypes)
-      dosage_mat[local_i, lbl1] <- dosage_mat[local_i, lbl1] + p
-    if (!is.na(lbl2) && lbl2 %in% common_haplotypes)
-      dosage_mat[local_i, lbl2] <- dosage_mat[local_i, lbl2] + p
-  }
-
-  lapply(common_haplotypes, function(hname) {
-    dosage <- dosage_mat[, hname]
-    geno   <- case_when(dosage >= 1.5 ~ "Hom", dosage >= 0.5 ~ "Het", TRUE ~ "WT")
-    data.frame(
-      Sample     = sub_samples,
-      Haplotype  = hname,
-      Genotype   = geno,
-      Tissue     = sub_meta$Tissue,
-      Comparison = comp$label,
-      stringsAsFactors = FALSE
-    )
-  }) %>% bind_rows()
-}
-
-geno_freq_data <- lapply(comparisons, build_geno_freq) %>%
-  bind_rows() %>%
-  mutate(
-    Haplotype  = factor(Haplotype,  levels = common_haplotypes),
-    Genotype   = factor(Genotype,   levels = c("WT", "Het", "Hom")),
-    Tissue     = factor(Tissue,     levels = c("Healthy", "Tumour")),
-    Comparison = factor(Comparison, levels = c("Breast", "Endometrium", "All"))
-  )
-
-geno_freq_summary <- geno_freq_data %>%
-  count(Haplotype, Genotype, Tissue, Comparison) %>%
-  group_by(Haplotype, Tissue, Comparison) %>%
-  mutate(Proportion = n / sum(n)) %>%
-  ungroup()
-
-GENO_COLS <- c("WT" = "#BDBDBD", "Het" = "#4393C3", "Hom" = "#D6604D")
-
-# Build significance annotation data for G5 bars
-# One star per haplotype × comparison × tissue (Tumour bar gets the star)
-g5_sig_fdr <- geno_stats %>%
-  filter(sig_label != "") %>%
-  select(Haplotype, Comparison, Term, sig_label) %>%
-  mutate(Tissue = "Tumour", Proportion = 1.02)
-
-g5_sig_raw <- geno_stats %>%
-  filter(raw_sig_label != "") %>%
-  select(Haplotype, Comparison, Term, sig_label = raw_sig_label) %>%
-  mutate(Tissue = "Tumour", Proportion = 1.02)
-
-make_figG5 <- function(sig_data, file_suffix, subtitle_extra) {
-  p <- ggplot(geno_freq_summary,
-              aes(x = Tissue, y = Proportion, fill = Genotype)) +
-    geom_col(position = "stack", width = 0.7, colour = "white", linewidth = 0.3) +
-    scale_fill_manual(values = GENO_COLS, name = "Genotype") +
-    scale_y_continuous(labels = percent, expand = expansion(mult = c(0, 0.1))) +
-    facet_grid(Haplotype ~ Comparison, switch = "y") +
-    labs(
-      title    = "Genotype Proportions per Haplotype: Healthy vs Tumour",
-      subtitle = paste0("WT = wildtype (0 copies), Het = heterozygous (1 copy), Hom = homozygous (2 copies)  |  Stars = ", subtitle_extra, " p<0.05 on Tumour bar"),
-      x = "Tissue", y = "Proportion of Samples"
+  p <- ggplot(ld_df, aes(x = factor(SNP1, levels = snp_levels),
+                         y = factor(SNP2, levels = rev(snp_levels)),
+                         fill = R2)) +
+    geom_tile(colour = "white", linewidth = 0.2) +
+    { if (!is.null(block_rects))
+        geom_rect(data = block_rects,
+                  aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+                  inherit.aes = FALSE,
+                  colour = "#D6604D", fill = NA, linewidth = 0.8)
+      else list() } +
+    scale_fill_gradientn(
+      colours  = c("#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"),
+      na.value = "grey95",
+      limits   = c(0, 1),
+      labels   = percent_format(accuracy = 1),
+      name     = expression(r^2)
     ) +
+    labs(title    = "Pairwise linkage disequilibrium across selected SNPs",
+         subtitle = expression(paste("Pairwise ", r^2, " estimated from phased dosages | red boxes = LD blocks")),
+         x = NULL, y = NULL) +
+    theme(axis.text.x    = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 7),
+          axis.text.y    = element_text(size = 7),
+          legend.position = "right")
+  SAVE(out_file, p,
+       width  = max(8, nrow(snp_meta) * 0.40 + 2),
+       height = max(7, nrow(snp_meta) * 0.35 + 1))
+}
+
+make_freq_plot <- function(freq_df, title, subtitle, out_file) {
+  # Simple bar chart of global haplotype frequencies, labelled with percentages
+  if (nrow(freq_df) == 0) return(invisible(NULL))
+  p <- ggplot(freq_df, aes(x = fct_reorder(Haplotype_ID, Frequency, .desc = TRUE),
+                           y = Frequency * 100)) +
+    geom_col(fill = "#4393C3", colour = "black", alpha = 0.85) +
+    geom_text(aes(label = sprintf("%.1f%%", Frequency * 100)), vjust = -0.35, size = 3.2) +
+    labs(title = title, subtitle = subtitle, x = "Haplotype", y = "Frequency (%)") +
+    coord_cartesian(ylim = c(0, max(freq_df$Frequency * 100) * 1.15))
+  SAVE(out_file, p, width = max(7, nrow(freq_df) * 0.7), height = 5)
+}
+
+# -----------------------------------------------------------------------------
+# Forest plot: OR + 95% CI per haplotype, faceted by comparison group
+# Y-axis uses short IDs (H1, H2...); OR and p-value shown as text labels.
+# CI whiskers are capped at [0.05, 20] for readability; raw values are
+# preserved in the data table.
+# -----------------------------------------------------------------------------
+make_forest_plot <- function(assoc_df, region_name, out_file) {
+  if (is.null(assoc_df) || nrow(assoc_df) == 0) return(invisible(NULL))
+
+  plot_df <- assoc_df %>%
+    filter(!is.na(OR), !is.na(OR_95CI_Lo), !is.na(OR_95CI_Hi)) %>%
+    mutate(
+      label      = sprintf("%s (%.0f%%)", Haplotype_ID, Global_Freq * 100),
+      sig_label  = case_when(
+        FDR < 0.05       ~ "FDR < 0.05",
+        P_Fisher < 0.05  ~ "p < 0.05",
+        TRUE             ~ "ns"
+      ),
+      OR_lo_plot = pmax(OR_95CI_Lo, 0.05),   # cap for display only
+      OR_hi_plot = pmin(OR_95CI_Hi, 20),
+      or_text    = sprintf("OR %.2f [%.2f\u2013%.2f]  p=%s",
+                           OR, OR_95CI_Lo, OR_95CI_Hi,
+                           ifelse(P_Fisher < 0.001,
+                                  sprintf("%.2e", P_Fisher),
+                                  sprintf("%.3f", P_Fisher)))
+    )
+
+  if (nrow(plot_df) == 0) return(invisible(NULL))
+
+  x_text_pos <- 10^(log10(20) * 1.05)
+
+  p <- ggplot(plot_df, aes(x = OR, y = fct_reorder(label, OR),
+                           colour = sig_label, shape = sig_label)) +
+    geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50", linewidth = 0.5) +
+    geom_errorbarh(aes(xmin = OR_lo_plot, xmax = OR_hi_plot),
+                   height = 0.25, linewidth = 0.6) +
+    geom_point(size = 3) +
+    geom_text(aes(x = OR_hi_plot, label = or_text),
+              hjust = -0.07, size = 2.8, colour = "grey30") +
+    scale_colour_manual(values = c("FDR < 0.05" = "#D6604D",
+                                   "p < 0.05"   = "#F4A582",
+                                   "ns"         = "grey55"),
+                        name = "Significance") +
+    scale_shape_manual(values = c("FDR < 0.05" = 18,
+                                  "p < 0.05"   = 17,
+                                  "ns"         = 16),
+                       name = "Significance") +
+    scale_x_log10(breaks = c(0.1, 0.25, 0.5, 1, 2, 4, 10),
+                  labels = c("0.1", "0.25", "0.5", "1", "2", "4", "10")) +
+    coord_cartesian(clip = "off") +
+    facet_wrap(~Comparison, ncol = 1, scales = "free_y") +
+    labs(title    = sprintf("Forest plot \u2014 %s", region_name),
+         subtitle = "Firth-penalised logistic regression | OR (95% CI) | log10 x-axis | label = Haplotype ID (global freq%)",
+         x = "Odds ratio (log scale)", y = NULL) +
+    theme(axis.text.y     = element_text(size = 8.5, face = "bold"),
+          strip.text      = element_text(face = "bold"),
+          legend.position = "right",
+          plot.margin     = margin(6, 160, 6, 8))
+
+  n_haps <- length(unique(plot_df$label))
+  n_comp <- length(unique(plot_df$Comparison))
+  SAVE(out_file, p,
+       width  = 11,
+       height = max(5, n_haps * 0.5 * n_comp + 2.5))
+}
+
+# -----------------------------------------------------------------------------
+# Allele composition tile grid: one row per haplotype, one column per SNP.
+# Red tiles = ALT allele; white = REF. Frequency labels on the right margin.
+# Rows are ordered by descending global frequency (H1 at top).
+# -----------------------------------------------------------------------------
+make_haplotype_composition_plot <- function(freq_df, snp_meta_sub, region_name, out_file) {
+  if (nrow(freq_df) == 0) return(invisible(NULL))
+
+  snp_cols <- intersect(snp_meta_sub$rsID_clean, names(freq_df))
+  if (length(snp_cols) < 2) return(invisible(NULL))
+
+  hap_mat <- freq_df %>%
+    select(Haplotype_ID, Frequency, all_of(snp_cols)) %>%
+    arrange(desc(Frequency))
+
+  tile_df <- hap_mat %>%
+    pivot_longer(cols = all_of(snp_cols),
+                 names_to = "SNP", values_to = "Allele_Code") %>%
+    mutate(
+      Allele       = ifelse(Allele_Code == 2, "Alt", "Ref"),
+      SNP          = factor(SNP, levels = snp_cols),
+      Haplotype_ID = factor(Haplotype_ID, levels = rev(hap_mat$Haplotype_ID)),
+      Freq_label   = sprintf("%.1f%%", Frequency * 100)
+    )
+
+  gene_map  <- setNames(snp_meta_sub$Gene, snp_meta_sub$rsID_clean)
+  tile_df$Gene <- gene_map[as.character(tile_df$SNP)]
+
+  p <- ggplot(tile_df, aes(x = SNP, y = Haplotype_ID, fill = Allele)) +
+    geom_tile(colour = "white", linewidth = 0.35) +
+    scale_fill_manual(values = c("Alt" = "#D6604D", "Ref" = "#F7F7F7"),
+                      name = "Allele") +
+    geom_text(data = hap_mat %>%
+                mutate(Haplotype_ID = factor(Haplotype_ID, levels = rev(hap_mat$Haplotype_ID))),
+              aes(x = length(snp_cols) + 0.6,
+                  y = Haplotype_ID,
+                  label = sprintf("%.1f%%", Frequency * 100)),
+              inherit.aes = FALSE, size = 3, hjust = 0) +
+    coord_cartesian(clip = "off") +
+    labs(title    = sprintf("Haplotype allele composition \u2014 %s", region_name),
+         subtitle = "Red = alt allele carried | rows ordered by global frequency",
+         x = NULL, y = "Haplotype") +
     theme(
-      strip.text.y    = element_text(angle = 180, size = 7),
-      axis.text.x     = element_text(size = 8, angle = 30, hjust = 1),
+      axis.text.x     = element_text(angle = 45, hjust = 1, size = 7.5),
+      axis.text.y     = element_text(size = 8),
+      plot.margin     = margin(8, 50, 6, 8),
       legend.position = "top"
     )
 
-  if (nrow(sig_data) > 0) {
-    sig_data <- sig_data %>%
-      mutate(
-        Haplotype  = factor(Haplotype,  levels = common_haplotypes),
-        Comparison = factor(Comparison, levels = c("Breast", "Endometrium", "All")),
-        Tissue     = factor(Tissue,     levels = c("Healthy", "Tumour"))
-      )
-    p <- p + geom_text(
-      data = sig_data,
-      aes(x = Tissue, y = Proportion, label = sig_label),
-      inherit.aes = FALSE, size = 3, colour = "black", vjust = 0
-    )
-  }
-  p
+  n_haps <- nrow(hap_mat)
+  n_snps <- length(snp_cols)
+  SAVE(out_file, p,
+       width  = max(7, n_snps * 0.55 + 2),
+       height = max(4, n_haps * 0.38 + 2))
 }
 
-SAVE(file.path(OUT_DIR, "19_FigG5_Genotype_Freq_Bars_RawP.png"),
-     make_figG5(g5_sig_raw, "RawP", "Raw p-value"), width = 10, height = 22)
-SAVE(file.path(OUT_DIR, "19_FigG5_Genotype_Freq_Bars_FDR.png"),
-     make_figG5(g5_sig_fdr, "FDR",  "BH-FDR"),      width = 10, height = 22)
+# -----------------------------------------------------------------------------
+# Tumour vs Healthy frequency bar chart with a haplotype definition table below.
+# Short Haplotype_IDs (H1, H2...) are used on the x-axis; the definition table
+# maps each ID to its constituent ALT SNPs and Fisher p-value. Combined into a
+# single figure using patchwork.
+# -----------------------------------------------------------------------------
+make_freq_comparison_plot <- function(assoc_df, region_name, out_file,
+                                      comparison = "All") {
+  if (is.null(assoc_df) || nrow(assoc_df) == 0) return(invisible(NULL))
 
-# =============================================================================
-# FIG G6 — Het vs Hom OR Comparison Scatter
-#   Do Het and Hom effects point in the same direction?
-#   x = Het OR, y = Hom OR, labelled by haplotype, faceted by comparison
-# =============================================================================
-cat("  Fig G6: Het vs Hom OR scatter...\n")
-
-if (nrow(geno_stats) > 0) {
-
-  het_hom_wide <- geno_stats %>%
-    filter(Term %in% c("Het", "Hom")) %>%
-    select(Haplotype, Comparison, Term, OR, sig_label, raw_sig_label) %>%
-    pivot_wider(names_from = Term,
-                values_from = c(OR, sig_label, raw_sig_label)) %>%
-    filter(!is.na(OR_Het), !is.na(OR_Hom)) %>%
-    rename(Het = OR_Het, Hom = OR_Hom) %>%
+  sub <- assoc_df %>%
+    filter(Comparison == comparison) %>%
+    arrange(desc(Global_Freq)) %>%
     mutate(
-      sig_fdr = ifelse(sig_label_Het != "" | sig_label_Hom != "", "Significant", "ns"),
-      sig_raw = ifelse(raw_sig_label_Het != "" | raw_sig_label_Hom != "", "Significant", "ns")
+      sig_mark  = case_when(
+        FDR < 0.05      ~ "**",
+        P_Fisher < 0.05 ~ "*",
+        TRUE            ~ ""
+      ),
+      Hap_Label = Haplotype_ID
     )
 
-  if (nrow(het_hom_wide) > 0) {
+  if (nrow(sub) == 0) return(invisible(NULL))
 
-    make_figG6 <- function(sig_col, file_suffix, subtitle_label) {
-      pd <- het_hom_wide %>% mutate(.sig = .data[[sig_col]])
-      ggplot(pd, aes(x = Het, y = Hom, colour = Comparison,
-                     label = Haplotype, alpha = .sig, size = .sig)) +
-        geom_abline(slope = 1, intercept = 0, linetype = "dashed",
-                    colour = "grey60", linewidth = 0.5) +
-        geom_hline(yintercept = 1, linetype = "dotted", colour = "grey75") +
-        geom_vline(xintercept = 1, linetype = "dotted", colour = "grey75") +
-        geom_point() +
-        geom_text(size = 2.4, vjust = -0.9, hjust = 0.5,
-                  show.legend = FALSE, alpha = 1) +
-        scale_x_log10() + scale_y_log10() +
-        scale_colour_manual(values = COHORT_COLS, name = "Comparison") +
-        scale_alpha_manual(values = c("Significant" = 1.0, "ns" = 0.4),
-                           name = subtitle_label) +
-        scale_size_manual(values  = c("Significant" = 3.5, "ns" = 2.2),
-                          name = subtitle_label) +
-        facet_wrap(~ Comparison, ncol = 3) +
-        labs(
-          title    = "Heterozygous vs Homozygous Odds Ratios",
-          subtitle = paste0("Each point = one haplotype  |  Dashed diagonal = equal Het and Hom effects  |  Both axes log-scaled  |  Highlighted = ", subtitle_label, " p<0.05\nPoints above diagonal = Hom effect stronger; below = Het effect stronger"),
-          x = "Het vs WT Odds Ratio", y = "Hom vs WT Odds Ratio"
+  plot_df <- sub %>%
+    select(Hap_Label, Haplotype_ID, Freq_Tumour, Freq_Healthy,
+           P_Fisher, FDR, sig_mark, Global_Freq) %>%
+    pivot_longer(cols = c(Freq_Tumour, Freq_Healthy),
+                 names_to = "Group", values_to = "Freq") %>%
+    mutate(
+      Group     = recode(Group, "Freq_Tumour" = "Tumour", "Freq_Healthy" = "Healthy"),
+      Group     = factor(Group, levels = c("Healthy", "Tumour")),
+      Hap_Label = factor(Hap_Label, levels = unique(sub$Hap_Label))
+    )
+
+  # Significance markers placed above the taller bar in each pair
+  sig_df  <- plot_df %>%
+    group_by(Hap_Label, sig_mark) %>%
+    summarise(y_max = max(Freq, na.rm = TRUE), .groups = "drop") %>%
+    filter(sig_mark != "")
+
+  y_ceil <- max(plot_df$Freq * 100, na.rm = TRUE) * 1.18
+
+  bar_plot <- ggplot(plot_df,
+                     aes(x = Hap_Label, y = Freq * 100, fill = Group)) +
+    geom_col(position = position_dodge(0.72), width = 0.62,
+             colour = "black", linewidth = 0.3, alpha = 0.88) +
+    { if (nrow(sig_df) > 0)
+        geom_text(data = sig_df,
+                  aes(x = Hap_Label, y = y_max * 100 + y_ceil * 0.04,
+                      label = sig_mark),
+                  inherit.aes = FALSE, size = 5, colour = "#A50026")
+      else list() } +
+    scale_fill_manual(values = c("Healthy" = "#4393C3", "Tumour" = "#D6604D"),
+                      name = NULL) +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, y_ceil)) +
+    labs(title    = sprintf("Haplotype frequency: Tumour vs Healthy \u2014 %s (%s)",
+                            region_name, comparison),
+         subtitle = "* p\u202f<\u202f0.05 (Fisher)   ** FDR\u202f<\u202f0.05   bars show carrier frequency",
+         x = NULL, y = "Haplotype frequency (%)") +
+    theme(axis.text.x    = element_text(size = 9, face = "bold"),
+          legend.position = "top",
+          plot.margin    = margin(6, 8, 2, 8))
+
+  # Definition table rendered as a ggplot grob so it can be combined with patchwork
+  tbl_df <- sub %>%
+    transmute(
+      ID         = Haplotype_ID,
+      `Global%`  = sprintf("%.1f%%", Global_Freq * 100),
+      `Alt SNPs` = ifelse(nchar(Haplotype_Def) > 60,
+                          paste0(substr(Haplotype_Def, 1, 57), "\u2026"),
+                          Haplotype_Def),
+      `p (Fisher)` = ifelse(P_Fisher < 0.001,
+                             sprintf("%.2e", P_Fisher),
+                             sprintf("%.3f", P_Fisher)),
+      FDR_col      = ifelse(FDR < 0.001,
+                            sprintf("%.2e", FDR),
+                            sprintf("%.3f", FDR))
+    ) %>%
+    rename(FDR = FDR_col)
+
+  tbl_plot <- ggplot() +
+    theme_void() +
+    annotation_custom(
+      gridExtra::tableGrob(
+        tbl_df, rows = NULL,
+        theme = gridExtra::ttheme_minimal(
+          core    = list(fg_params = list(cex = 0.72, hjust = 0, x = 0.02)),
+          colhead = list(fg_params = list(cex = 0.75, fontface = "bold",
+                                          hjust = 0, x = 0.02)),
+          padding = unit(c(2, 4), "mm")
         )
-    }
+      )
+    )
 
-    SAVE(file.path(OUT_DIR, "19_FigG6_Het_vs_Hom_OR_RawP.png"),
-         make_figG6("sig_raw", "RawP", "Raw p-value"), width = 13, height = 5)
-    SAVE(file.path(OUT_DIR, "19_FigG6_Het_vs_Hom_OR_FDR.png"),
-         make_figG6("sig_fdr", "FDR",  "BH-FDR"),      width = 13, height = 5)
+  combined <- patchwork::wrap_plots(bar_plot, tbl_plot,
+                                    ncol    = 1,
+                                    heights = c(3, max(1, nrow(tbl_df) * 0.28)))
+  n_haps <- nrow(sub)
+  SAVE(out_file, combined,
+       width  = max(7, n_haps * 0.85 + 2),
+       height = max(6, n_haps * 0.28 + 5))
+}
+
+# -----------------------------------------------------------------------------
+# Association overview bubble plot: -log10(best Fisher p) per region.
+# Bubble size encodes the number of haplotypes tested in that region; colour
+# encodes region type (Full / LD_Block / Gene). Two reference lines are drawn:
+# the nominal p = 0.05 threshold and the Bonferroni-corrected threshold across
+# the total number of haplotype-comparison tests run.
+# -----------------------------------------------------------------------------
+make_association_overview_plot <- function(summary_df, out_file) {
+  plot_df <- summary_df %>%
+    filter(!is.na(Best_P_Fisher)) %>%
+    mutate(
+      neg_log_p   = -log10(Best_P_Fisher),
+      neg_log_fdr = -log10(pmax(Best_FDR, 1e-6)),
+      Region_Type = factor(Region_Type, levels = c("Full", "LD_Block", "Gene")),
+      sig_label   = case_when(
+        Best_FDR < 0.05      ~ "FDR < 0.05",
+        Best_P_Fisher < 0.05 ~ "p < 0.05",
+        TRUE                 ~ "ns"
+      ),
+      Region_short = gsub("Gene_GSDMB_", "GSDMB\n", gsub("LD_", "", Region))
+    )
+
+  if (nrow(plot_df) == 0) return(invisible(NULL))
+
+  # Bonferroni correction: divide 0.05 by the total number of individual tests
+  n_tests <- if ("N_Tests" %in% names(plot_df)) sum(plot_df$N_Tests, na.rm = TRUE) else sum(plot_df$Haps_Shown)
+  n_tests <- max(n_tests, 1L)
+
+  p <- ggplot(plot_df, aes(x = fct_reorder(Region_short, neg_log_p, .desc = TRUE),
+                           y = neg_log_p,
+                           size   = Haps_Shown,
+                           colour = Region_Type,
+                           shape  = sig_label)) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed",
+               colour = "grey60", linewidth = 0.5) +
+    geom_hline(yintercept = -log10(0.05 / n_tests),
+               linetype = "dotted", colour = "#D6604D", linewidth = 0.5) +
+    geom_point(alpha = 0.85) +
+    scale_size_continuous(range = c(3, 9), name = "Haplotypes\ntested") +
+    scale_colour_manual(
+      values = c("Full" = "#666666", "LD_Block" = "#7B3294", "Gene" = "#1B9E77"),
+      name   = "Region type") +
+    scale_shape_manual(
+      values = c("FDR < 0.05" = 18, "p < 0.05" = 17, "ns" = 16),
+      name   = "Significance") +
+    annotate("text", x = Inf, y = -log10(0.05) + 0.1,
+             label = "p = 0.05", hjust = 1.1, size = 3, colour = "grey50") +
+    annotate("text", x = Inf, y = -log10(0.05 / n_tests) + 0.1,
+             label = sprintf("Bonferroni (n=%d tests)", n_tests),
+             hjust = 1.1, size = 3, colour = "#D6604D") +
+    labs(title    = "Association overview across all haplotype regions",
+         subtitle = "-log10(best Fisher p) per region | bubble size = haplotypes tested",
+         x = NULL, y = expression(-log[10](p))) +
+    theme(axis.text.x    = element_text(angle = 40, hjust = 1, size = 7.5),
+          legend.position = "right")
+
+  SAVE(out_file, p,
+       width  = max(10, nrow(plot_df) * 0.65 + 2),
+       height = 6)
+}
+
+make_block_ld_plot <- function(ld_matrix_full, block_idx, snp_meta_full,
+                               block_name, out_file) {
+  # Extract the LD sub-matrix for a single block and pass to make_ld_plot
+  sub_snps <- snp_meta_full$rsID_clean[block_idx]
+  sub_ld   <- ld_matrix_full[sub_snps, sub_snps, drop = FALSE]
+  sub_meta <- snp_meta_full[block_idx, , drop = FALSE]
+  make_ld_plot(sub_ld, sub_meta, out_file)
+}
+
+# -----------------------------------------------------------------------------
+# Stacked bar chart: haplotype distribution across the four cohort-tissue groups.
+# Each bar segment represents one haplotype; "Other" aggregates haplotypes below
+# the frequency threshold. A consistent colour palette is used across all cohort
+# frequency plots so H1 is always the same colour.
+# -----------------------------------------------------------------------------
+make_cohort_freq_plot <- function(a1_mat, a2_mat, freq_df, metadata_df,
+                                  region_name, out_file, min_freq = 0.01,
+                                  hap_palette = NULL) {
+  shown_haps <- freq_df %>% filter(Frequency >= min_freq) %>% pull(Haplotype_ID)
+  if (length(shown_haps) == 0) return(invisible(NULL))
+
+  hap1 <- make_binary_hap_strings(a1_mat)
+  hap2 <- make_binary_hap_strings(a2_mat)
+
+  # Map binary allele strings back to Haplotype_IDs
+  str_to_id <- setNames(freq_df$Haplotype_ID, freq_df$Allele_String)
+
+  n    <- nrow(metadata_df)
+  hid1 <- str_to_id[hap1]
+  hid2 <- str_to_id[hap2]
+  hid1[is.na(hid1) | !(hid1 %in% shown_haps)] <- "Other"
+  hid2[is.na(hid2) | !(hid2 %in% shown_haps)] <- "Other"
+  group_vec <- paste(metadata_df$Cohort, metadata_df$Tissue, sep = "\n")
+
+  # Build long-form table vectorised (rep() avoids a row-by-row loop)
+  rows <- data.frame(
+    Haplotype = c(hid1, hid2),
+    Group     = rep(group_vec, 2L),
+    stringsAsFactors = FALSE
+  )
+
+  plot_df <- bind_rows(rows) %>%
+    group_by(Group, Haplotype) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    group_by(Group) %>%
+    mutate(Freq = n / sum(n)) %>%
+    ungroup() %>%
+    mutate(
+      Haplotype = factor(Haplotype,
+                         levels = c(shown_haps[shown_haps %in% unique(Haplotype)], "Other")),
+      Group     = factor(Group, levels = sort(unique(Group)))
+    )
+
+  n_haps <- length(shown_haps)
+  if (!is.null(hap_palette) && all(shown_haps %in% names(hap_palette))) {
+    hap_pal <- hap_palette[c(shown_haps, "Other")]
   } else {
-    cat("  SKIPPING FigG6: no haplotypes with both Het and Hom estimates.\n")
+    # Paired palette (max 12 colours); hue_pal() fills in any additional haplotypes
+    hap_pal <- setNames(
+      c(RColorBrewer::brewer.pal(min(n_haps, 12), "Paired")[seq_len(min(n_haps, 12))],
+        if (n_haps > 12) scales::hue_pal()(n_haps - 12) else character(0),
+        "grey75"),
+      c(shown_haps, "Other")
+    )
   }
+
+  p <- ggplot(plot_df, aes(x = Group, y = Freq * 100, fill = Haplotype)) +
+    geom_col(colour = "white", linewidth = 0.3) +
+    scale_fill_manual(values = hap_pal, name = "Haplotype") +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, 102)) +
+    labs(title    = sprintf("Haplotype distribution by cohort \u2014 %s", region_name),
+         subtitle = "Stacked bars show haplotype frequency within each group",
+         x = NULL, y = "Frequency (%)") +
+    theme(axis.text.x    = element_text(size = 9),
+          legend.position = "right")
+
+  SAVE(out_file, p, width = max(7, length(unique(plot_df$Group)) * 1.2 + 3), height = 5.5)
+}
+
+# -----------------------------------------------------------------------------
+# Manhattan-style plot: -log10(Fisher p) per haplotype plotted at the median
+# genomic position of its ALT-carrying SNPs. Point size encodes global
+# haplotype frequency; colour encodes gene. Reference-like haplotypes (no ALT
+# SNPs) are plotted at the median position of all locus SNPs.
+# -----------------------------------------------------------------------------
+make_manhattan_hap_plot <- function(assoc_df, snp_meta, out_file,
+                                    comparison = "All") {
+  if (is.null(assoc_df) || nrow(assoc_df) == 0) return(invisible(NULL))
+
+  sub <- assoc_df %>% filter(Comparison == comparison, !is.na(P_Fisher))
+  if (nrow(sub) == 0) return(invisible(NULL))
+
+  get_median_pos <- function(hap_def, snp_meta) {
+    if (hap_def == "Reference-like") return(median(snp_meta$POS_int))
+    snp_ids <- trimws(strsplit(hap_def, ";")[[1]])
+    pos     <- snp_meta$POS_int[snp_meta$rsID_clean %in% snp_ids]
+    if (length(pos) == 0) return(median(snp_meta$POS_int))
+    median(pos)
+  }
+
+  sub <- sub %>%
+    rowwise() %>%
+    mutate(
+      med_pos    = get_median_pos(Haplotype_Def, snp_meta),
+      neg_log_p  = -log10(P_Fisher),
+      gene_label = {
+        snp_ids <- trimws(strsplit(Haplotype_Def, ";")[[1]])
+        genes   <- snp_meta$Gene[snp_meta$rsID_clean %in% snp_ids]
+        if (length(genes) == 0) "Unknown" else paste(unique(genes), collapse = "/")
+      }
+    ) %>%
+    ungroup()
+
+  gene_lvls <- unique(snp_meta$Gene)
+  gene_cols <- setNames(scales::hue_pal()(length(gene_lvls)), gene_lvls)
+
+  p <- ggplot(sub, aes(x = med_pos / 1e6, y = neg_log_p,
+                       colour = gene_label, size = Global_Freq * 100)) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed",
+               colour = "grey60", linewidth = 0.4) +
+    geom_point(alpha = 0.8) +
+    scale_colour_manual(values = gene_cols, name = "Gene") +
+    scale_size_continuous(range = c(2, 7), name = "Global freq (%)") +
+    labs(title    = sprintf("Haplotype association by genomic position \u2014 %s comparison", comparison),
+         subtitle = "-log10(Fisher p) | point size = global haplotype frequency | coloured by gene",
+         x = "Genomic position (Mb)", y = expression(-log[10](p))) +
+    theme(legend.position = "right")
+
+  SAVE(out_file, p, width = 10, height = 5.5)
+}
+
+# -----------------------------------------------------------------------------
+# Kaplan-Meier survival plot: carrier vs non-carrier of a specified haplotype.
+# Requires os_months/os_event or pfs_months/pfs_event columns in the metadata,
+# which are only present if clinical data were merged upstream. The function
+# exits silently if survival packages or the necessary columns are absent.
+# Log-rank p-value is computed manually and added as a subtitle rather than
+# using survminer's built-in pval argument, to control decimal formatting.
+# -----------------------------------------------------------------------------
+make_km_plot <- function(a1_mat, a2_mat, freq_df, metadata_df,
+                         region_name, out_dir,
+                         hap_rank  = 1,
+                         time_col  = "os_months", event_col = "os_event") {
+
+  if (!requireNamespace("survival",  quietly = TRUE)) return(invisible(NULL))
+  if (!requireNamespace("survminer", quietly = TRUE)) return(invisible(NULL))
+  if (!all(c(time_col, event_col) %in% names(metadata_df))) return(invisible(NULL))
+
+  top_hap_str <- freq_df$Allele_String[hap_rank]
+  top_hap_id  <- freq_df$Haplotype_ID[hap_rank]
+  if (is.na(top_hap_str)) return(invisible(NULL))
+
+  hap1 <- make_binary_hap_strings(a1_mat)
+  hap2 <- make_binary_hap_strings(a2_mat)
+
+  # Carrier = sample carries at least one copy of the target haplotype
+  carrier      <- as.integer(hap1 == top_hap_str) + as.integer(hap2 == top_hap_str)
+  carrier_flag <- factor(ifelse(carrier >= 1, "Carrier", "Non-carrier"),
+                         levels = c("Non-carrier", "Carrier"))
+
+  surv_df <- data.frame(
+    time    = as.numeric(metadata_df[[time_col]]),
+    event   = as.integer(metadata_df[[event_col]]),
+    carrier = carrier_flag
+  ) %>% filter(!is.na(time), !is.na(event), time >= 0)
+
+  # Require at least 10 subjects and both carrier groups to be represented
+  if (nrow(surv_df) < 10 || length(unique(surv_df$carrier)) < 2) return(invisible(NULL))
+
+  fit       <- survival::survfit(survival::Surv(time, event) ~ carrier, data = surv_df)
+  pval      <- survival::survdiff(survival::Surv(time, event) ~ carrier, data = surv_df)
+  pval_text <- sprintf("Log-rank p = %.3f", 1 - pchisq(pval$chisq, df = 1))
+
+  p <- survminer::ggsurvplot(
+    fit,
+    data         = surv_df,
+    pval         = FALSE,
+    conf.int     = TRUE,
+    risk.table   = TRUE,
+    palette      = c("#4393C3", "#D6604D"),
+    legend.labs  = c("Non-carrier", sprintf("Carrier (%s)", top_hap_id)),
+    title        = sprintf("Survival by %s carrier status \u2014 %s", top_hap_id, region_name),
+    subtitle     = pval_text,
+    xlab         = ifelse(grepl("pfs", time_col, ignore.case = TRUE),
+                          "Time (months) \u2014 PFS", "Time (months) \u2014 OS"),
+    ylab         = "Survival probability",
+    ggtheme      = pub_theme,
+    risk.table.height = 0.25
+  )
+
+  safe_nm   <- gsub("[^A-Za-z0-9_]", "_", region_name)
+  safe_time <- gsub("[^A-Za-z0-9]", "_", time_col)
+  out_file  <- file.path(out_dir,
+                         sprintf("19_KM_%s_%s_%s.png", safe_nm, top_hap_id, safe_time))
+
+  png(out_file, width = 2800, height = 2400, res = 300)
+  print(p)
+  dev.off()
+  cat("  Saved:", basename(out_file), "\n")
 }
 
 # =============================================================================
-# FIG G7 — Model Type Summary Table Plot
-#   Which haplotypes used full genotypic / collapsed / skipped, per comparison
+# MAIN PIPELINE
 # =============================================================================
-cat("  Fig G7: Model type summary...\n")
+cat("\n======================================================================\n")
+cat("SCRIPT 15: HAPLOTYPE ANALYSIS\n")
+cat("======================================================================\n\n")
+cat(sprintf("  Main frequency threshold:       %.1f%%\n", MAIN_MIN_FREQ * 100))
+cat(sprintf("  Supplementary frequency cutoff: %.1f%%\n", SUPP_MIN_FREQ * 100))
+cat(sprintf("  LD block threshold (r^2):       %.2f\n\n", LD_BLOCK_THRESHOLD))
 
-model_summary_full <- geno_stats_raw %>%
-  select(Haplotype, Comparison, Model_Type, n_WT, n_Het, n_Hom) %>%
-  distinct(Haplotype, Comparison, .keep_all = TRUE) %>%
+if (!requireNamespace("survminer", quietly = TRUE)) {
+  cat("  Note: survminer not available \u2014 KM plots will be skipped.\n")
+  cat("  To enable: conda install -c conda-forge r-survminer\n\n")
+}
+
+# --- Step 1: Load phased genotypes and annotations ---------------------------
+cat("Step 1: Loading phased genotypes and annotations\n")
+cat("----------------------------------------------------------------------\n")
+
+# The whitelist defines which SNPs to include: those with gnomAD NFE AF > 1%
+# from script 11. Only these SNPs enter the haplotype analysis.
+target_rsids <- read_excel(WHITELIST) %>%
+  pull(Variant_ID) %>%
+  as.character() %>%
+  trimws() %>%
+  unique()
+
+# Build a per-rsID annotation map (position, gene, alleles) from the main
+# annotated report. distinct() keeps one row per rsID because VEP outputs one
+# row per transcript; we only need positional and gene-level information here.
+annot <- read_excel(ANNOTATED, sheet = "Biological_Annotations")
+annotation_map <- annot %>%
   mutate(
-    Haplotype  = factor(Haplotype,  levels = rev(common_haplotypes)),
-    Comparison = factor(Comparison, levels = c("Breast", "Endometrium", "All")),
-    Model_Type = factor(Model_Type, levels = c("Genotypic", "Het_vs_WT", "Skipped")),
-    cell_label = paste0("WT=", n_WT, "\nHet=", n_Het, "\nHom=", n_Hom)
+    rsID_clean = str_extract(Existing_variation, "rs[0-9]+"),
+    POS_int    = as.integer(gsub("[^0-9]", "", as.character(POS))),
+    Gene       = ifelse(is.na(SYMBOL) | trimws(SYMBOL) == "", "Unknown", trimws(SYMBOL))
+  ) %>%
+  filter(rsID_clean %in% target_rsids) %>%
+  select(POS_int, rsID_clean, Gene, REF, ALT) %>%
+  distinct(rsID_clean, .keep_all = TRUE) %>%
+  arrange(POS_int)
+
+geno_raw <- read.table(GENO_FILE, header = TRUE, sep = "\t", check.names = FALSE, quote = "")
+meta_raw <- read.table(META_FILE, header = TRUE, sep = "\t", check.names = FALSE, quote = "")
+
+stopifnot(all(c("Sample", "Cohort", "Tissue") %in% names(meta_raw)))
+
+# The VCF ID field from BEAGLE is sometimes formatted as "CHROM:POS:REF:ALT"
+# rather than an rsID. Extract the numeric POS component to join against the
+# annotation map by genomic position.
+geno_raw <- geno_raw %>%
+  mutate(extracted_pos = as.integer(str_split_fixed(ID, ":", 4)[, 2]))
+
+# inner_join on POS_int retains only SNPs present in both the phased VCF and
+# the whitelist annotation map. Where the join produces duplicate REF/ALT
+# columns (.x from VCF, .y from annotation_map), the curated annotation values
+# (.y) are kept because they have been verified against the reference genome.
+geno_filtered <- geno_raw %>%
+  inner_join(annotation_map, by = c("extracted_pos" = "POS_int")) %>%
+  mutate(POS_int = extracted_pos) %>%
+  { if ("REF.y" %in% names(.)) rename(., REF = REF.y, ALT = ALT.y) else . } %>%
+  select(-any_of(c("REF.x", "ALT.x"))) %>%
+  arrange(POS_int) %>%
+  distinct(rsID_clean, .keep_all = TRUE)   # guard against many-to-many collisions at shared positions
+
+# Align metadata rows to the sample column order in the genotype table;
+# the strict equality check below ensures no mismatch propagates silently
+sample_cols <- intersect(names(geno_filtered), meta_raw$Sample)
+meta <- meta_raw %>%
+  filter(Sample %in% sample_cols) %>%
+  mutate(Group = paste(Cohort, Tissue, sep = "_"))
+
+sample_cols <- sample_cols[sample_cols %in% meta$Sample]
+meta <- meta[match(sample_cols, meta$Sample), , drop = FALSE]
+stopifnot(all(sample_cols == meta$Sample))
+
+cat(sprintf("  Genotype table: %d SNPs x %d samples\n", nrow(geno_filtered), length(sample_cols)))
+cat(sprintf("  Metadata:       %d samples retained\n", nrow(meta)))
+cat(sprintf("  Genes covered:  %s\n", paste(unique(geno_filtered$Gene), collapse = ", ")))
+
+# --- Step 2: Build phased allele matrices ------------------------------------
+cat("\nStep 2: Building phased allele matrices\n")
+cat("----------------------------------------------------------------------\n")
+
+am <- build_allele_matrices(geno_filtered, sample_cols)
+a1 <- am$a1
+a2 <- am$a2
+
+# snp_meta is the per-SNP metadata table used throughout the analysis;
+# it is kept in genomic position order to ensure consistent matrix indexing
+snp_meta <- geno_filtered %>%
+  select(POS_int, rsID_clean, Gene, REF, ALT) %>%
+  distinct(rsID_clean, .keep_all = TRUE) %>%
+  arrange(POS_int)
+
+n_samples     <- nrow(a1)
+n_snps        <- ncol(a1)
+n_missing     <- sum(is.na(a1) | is.na(a2))
+total_alleles <- 2 * n_samples * n_snps
+
+cat(sprintf("  Allele matrices: %d samples x %d SNPs\n", n_samples, n_snps))
+cat(sprintf("  Missing alleles: %d / %d (%.2f%%)\n",
+            n_missing, total_alleles, 100 * n_missing / total_alleles))
+
+# --- Step 3: Full-region haplotype analysis ----------------------------------
+cat("\nStep 3: Full-region haplotypes\n")
+cat("----------------------------------------------------------------------\n")
+
+full_freq  <- make_em_freq_table(a1, a2, snp_meta, min_freq = MAIN_MIN_FREQ)
+full_assoc <- run_assoc_for_region("Full_Region", a1, a2, snp_meta, meta,
+                                   min_copies = MIN_HAP_COPIES)
+
+# Build a single consistent haplotype colour palette from the full-region
+# frequency table so that H1, H2... are always the same colour across all
+# cohort-frequency plots regardless of which region is being plotted
+.all_hap_ids <- full_freq$shown$Haplotype_ID
+.n_haps      <- length(.all_hap_ids)
+.hap_palette <- if (.n_haps > 0) {
+  setNames(
+    c(RColorBrewer::brewer.pal(min(.n_haps, 12), "Paired")[seq_len(min(.n_haps, 12))],
+      if (.n_haps > 12) scales::hue_pal()(.n_haps - 12) else character(0)),
+    .all_hap_ids
   )
+} else {
+  character(0)
+}
+.hap_palette["Other"] <- "grey75"
 
-MODEL_COLS <- c("Genotypic" = "#2166AC", "Het_vs_WT" = "#F4A582", "Skipped" = "#EEEEEE")
+cat(sprintf("  Full-region: %d haplotypes total | %d shown at >= %.1f%%\n",
+            nrow(full_freq$all), nrow(full_freq$shown), MAIN_MIN_FREQ * 100))
+if (nrow(full_freq$shown) > 0) {
+  cat(sprintf("  Top haplotype: %s (%.1f%%)\n",
+              full_freq$shown$Haplotype_ID[1], full_freq$shown$Frequency[1] * 100))
+}
 
-figG7 <- ggplot(model_summary_full,
-                aes(x = Comparison, y = Haplotype, fill = Model_Type)) +
-  geom_tile(colour = "white", linewidth = 0.6) +
-  geom_text(aes(label = cell_label), size = 2.1, colour = "grey20", lineheight = 0.9) +
-  scale_fill_manual(
-    values = MODEL_COLS,
-    labels = c(
-      "Genotypic" = "Full genotypic (Het+Hom vs WT)",
-      "Het_vs_WT" = "Collapsed (Het vs WT only)",
-      "Skipped"   = "Skipped (too few carriers)"
-    ),
-    name = "Model used"
-  ) +
-  labs(
-    title    = "Model Type per Haplotype × Comparison",
-    subtitle = sprintf(
-      "Blue = full genotypic model (≥%d Hom carriers)  |  Orange = collapsed Het vs WT  |  Grey = skipped\nCell text = sample counts (WT / Het / Hom)",
-      MIN_HOM
-    ),
-    x = "Comparison", y = "Haplotype"
-  ) +
-  theme(
-    panel.grid  = element_blank(),
-    axis.line   = element_blank(),
-    legend.position = "top",
-    legend.text = element_text(size = 8)
-  )
+# --- Step 4: LD analysis and block definition --------------------------------
+cat("\nStep 4: Linkage disequilibrium and LD blocks\n")
+cat("----------------------------------------------------------------------\n")
 
-SAVE(file.path(OUT_DIR, "19_FigG7_Model_Type_Summary.png"), figG7, width = 8, height = 7)
+ld_matrix <- compute_ld_matrix(a1, a2, snp_meta)
+ld_blocks  <- if (RUN_BLOCK_ANALYSIS) {
+  define_ld_blocks(ld_matrix, snp_meta,
+                   threshold = LD_BLOCK_THRESHOLD,
+                   min_snps  = MIN_BLOCK_SNPS,
+                   max_snps  = MAX_BLOCK_SNPS)
+} else {
+  list()
+}
 
-# =============================================================================
-# 12b. EXPORT GENOTYPIC RESULTS TO EXCEL (appended to existing workbook)
-# =============================================================================
-cat("STEP 12b: Exporting results...\n")
+if (length(ld_blocks) == 0) {
+  cat("  No LD blocks met the configured criteria\n")
+} else {
+  cat(sprintf("  LD blocks defined: %d\n", length(ld_blocks)))
+  for (nm in names(ld_blocks)) {
+    idx <- ld_blocks[[nm]]
+    cat(sprintf("  %s: %d SNPs | %s\n",
+                nm, length(idx), paste(snp_meta$rsID_clean[idx], collapse = ", ")))
+  }
+}
 
-write.xlsx(
-  list(
-    Global_Frequencies  = freq_df %>%
-      select(Haplotype, Frequency, Allele_String, all_of(snp_labels)),
-    Stratified_Freqs    = strat_freqs,
-    Association_Stats   = if (nrow(all_stats) > 0)
-      all_stats %>%
-        select(any_of(c("Haplotype", "Comparison", "OR", "Lower", "Upper",
-                        "Beta", "SE", "p_glm", "Score_P", "fdr", "sig_label")))
-      else data.frame(Note = "No GLM results"),
-    Genotypic_Stats     = if (nrow(geno_stats) > 0)
-      geno_stats %>%
-        select(any_of(c("Haplotype", "Comparison", "Term", "Model_Type",
-                        "OR", "Lower", "Upper", "p_glm", "fdr", "sig_label",
-                        "n_WT", "n_Het", "n_Hom")))
-      else data.frame(Note = "No genotypic results"),
-    Genotypic_ModelType = model_summary_full %>%
-      select(Haplotype, Comparison, Model_Type, n_WT, n_Het, n_Hom) %>%
-      arrange(Comparison, Haplotype)
-  ),
-  file.path(OUT_DIR, "19_Haplotype_Results_v5.xlsx"),
-  overwrite = TRUE
+block_freq_tables  <- list()
+block_assoc_tables <- list()
+block_summary_rows <- list()
+
+if (length(ld_blocks) > 0) {
+  for (nm in names(ld_blocks)) {
+    idx         <- ld_blocks[[nm]]
+    region_meta <- snp_meta[idx, , drop = FALSE]
+    region_name <- sprintf("LD_%s", nm)
+
+    freq_obj <- make_em_freq_table(a1[, idx, drop = FALSE], a2[, idx, drop = FALSE],
+                                   region_meta, min_freq = SUPP_MIN_FREQ)
+    assoc_df <- run_assoc_for_region(region_name,
+                                     a1[, idx, drop = FALSE], a2[, idx, drop = FALSE],
+                                     region_meta, meta, min_copies = MIN_HAP_COPIES)
+
+    block_freq_tables[[region_name]]  <- freq_obj$shown
+    block_assoc_tables[[region_name]] <- assoc_df
+    block_summary_rows[[region_name]] <- build_region_summary(region_name, "LD_Block",
+                                                              region_meta, freq_obj, assoc_df)
+  }
+}
+
+# --- Step 5: Gene-specific haplotypes ----------------------------------------
+cat("\nStep 5: Gene-specific haplotypes\n")
+cat("----------------------------------------------------------------------\n")
+
+gene_freq_tables  <- list()
+gene_assoc_tables <- list()
+gene_summary_rows <- list()
+
+if (RUN_GENE_SPECIFIC) {
+  genes_to_run <- intersect(GENE_LIST_SUPP, unique(snp_meta$Gene))
+  if (length(genes_to_run) == 0) {
+    cat("  None of the requested genes were found in the SNP panel\n")
+  } else {
+    for (gene in genes_to_run) {
+      gene_idx <- which(snp_meta$Gene == gene)
+      if (length(gene_idx) < 2) {
+        cat(sprintf("  Skipping %s: fewer than 2 SNPs\n", gene))
+        next
+      }
+
+      # Optionally sub-partition gene SNPs into LD blocks before phasing;
+      # this reduces the number of SNPs per EM call and improves power
+      # where clear block structure exists within the gene
+      if (GENE_SPECIFIC_USE_LD_BLOCKS) {
+        gene_ld     <- ld_matrix[gene_idx, gene_idx, drop = FALSE]
+        gene_blocks <- define_ld_blocks(gene_ld, snp_meta[gene_idx, , drop = FALSE],
+                                        threshold = LD_BLOCK_THRESHOLD,
+                                        min_snps  = MIN_BLOCK_SNPS,
+                                        max_snps  = MAX_BLOCK_SNPS)
+        if (length(gene_blocks) == 0) gene_blocks <- list(All = seq_along(gene_idx))
+      } else {
+        gene_blocks <- list(All = seq_along(gene_idx))
+      }
+
+      for (sub_nm in names(gene_blocks)) {
+        sub_local_idx <- gene_blocks[[sub_nm]]
+        sub_idx       <- gene_idx[sub_local_idx]
+        region_meta   <- snp_meta[sub_idx, , drop = FALSE]
+        region_name   <- if (sub_nm == "All") sprintf("Gene_%s", gene) else
+                                              sprintf("Gene_%s_%s", gene, sub_nm)
+
+        freq_obj <- make_em_freq_table(a1[, sub_idx, drop = FALSE],
+                                       a2[, sub_idx, drop = FALSE],
+                                       region_meta, min_freq = SUPP_MIN_FREQ)
+        assoc_df <- run_assoc_for_region(region_name,
+                                         a1[, sub_idx, drop = FALSE],
+                                         a2[, sub_idx, drop = FALSE],
+                                         region_meta, meta, min_copies = MIN_HAP_COPIES)
+
+        gene_freq_tables[[region_name]]  <- freq_obj$shown
+        gene_assoc_tables[[region_name]] <- assoc_df
+        gene_summary_rows[[region_name]] <- build_region_summary(region_name, "Gene",
+                                                                 region_meta, freq_obj, assoc_df)
+        cat(sprintf("  %s: %d SNPs | %d shown haplotypes\n",
+                    region_name, nrow(region_meta), nrow(freq_obj$shown)))
+      }
+    }
+  }
+}
+
+# --- Step 6: Save results workbook -------------------------------------------
+cat("\nStep 6: Saving results workbook\n")
+cat("----------------------------------------------------------------------\n")
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "SNPs_Used");       writeData(wb, "SNPs_Used",       snp_meta)
+addWorksheet(wb, "Full_Global_Freqs"); writeData(wb, "Full_Global_Freqs", full_freq$shown)
+
+if (!is.null(full_assoc) && nrow(full_assoc) > 0) {
+  addWorksheet(wb, "Full_Associations")
+  writeData(wb, "Full_Associations", full_assoc)
+}
+
+# LD matrix in long format for easier downstream handling in R or Python
+ld_long <- as.data.frame(as.table(ld_matrix), stringsAsFactors = FALSE)
+names(ld_long) <- c("SNP1", "SNP2", "R2")
+addWorksheet(wb, "LD_Matrix_Long")
+writeData(wb, "LD_Matrix_Long", ld_long)
+
+if (length(ld_blocks) > 0) {
+  ld_block_df <- bind_rows(lapply(names(ld_blocks), function(nm) {
+    idx <- ld_blocks[[nm]]
+    data.frame(Block = nm, SNP_Order = seq_along(idx),
+               rsID = snp_meta$rsID_clean[idx], POS = snp_meta$POS_int[idx],
+               Gene = snp_meta$Gene[idx], stringsAsFactors = FALSE)
+  }))
+  addWorksheet(wb, "LD_Blocks")
+  writeData(wb, "LD_Blocks", ld_block_df)
+}
+
+for (nm in names(block_freq_tables)) {
+  addWorksheet(wb, safe_sheet(paste0(nm, "_Freqs")))
+  writeData(wb, safe_sheet(paste0(nm, "_Freqs")), block_freq_tables[[nm]])
+}
+for (nm in names(block_assoc_tables)) {
+  if (!is.null(block_assoc_tables[[nm]]) && nrow(block_assoc_tables[[nm]]) > 0) {
+    addWorksheet(wb, safe_sheet(paste0(nm, "_Assoc")))
+    writeData(wb, safe_sheet(paste0(nm, "_Assoc")), block_assoc_tables[[nm]])
+  }
+}
+for (nm in names(gene_freq_tables)) {
+  addWorksheet(wb, safe_sheet(paste0(nm, "_Freqs")))
+  writeData(wb, safe_sheet(paste0(nm, "_Freqs")), gene_freq_tables[[nm]])
+}
+for (nm in names(gene_assoc_tables)) {
+  if (!is.null(gene_assoc_tables[[nm]]) && nrow(gene_assoc_tables[[nm]]) > 0) {
+    addWorksheet(wb, safe_sheet(paste0(nm, "_Assoc")))
+    writeData(wb, safe_sheet(paste0(nm, "_Assoc")), gene_assoc_tables[[nm]])
+  }
+}
+
+summary_parts <- list(build_region_summary("Full_Region", "Full", snp_meta, full_freq, full_assoc))
+if (length(block_summary_rows) > 0) summary_parts[[length(summary_parts) + 1]] <- bind_rows(block_summary_rows)
+if (length(gene_summary_rows)  > 0) summary_parts[[length(summary_parts) + 1]] <- bind_rows(gene_summary_rows)
+summary_rows <- bind_rows(summary_parts)
+addWorksheet(wb, "Region_Summary")
+writeData(wb, "Region_Summary", summary_rows)
+
+saveWorkbook(wb, OUT_XLSX, overwrite = TRUE)
+cat(sprintf("  Workbook saved: %s\n", OUT_XLSX))
+
+# --- Step 7: Generate figures ------------------------------------------------
+cat("\nStep 7: Generating figures\n")
+cat("----------------------------------------------------------------------\n")
+
+make_freq_plot(
+  full_freq$shown,
+  title    = "Full-region global haplotype frequencies",
+  subtitle = sprintf("%d SNPs across %d samples | shown haplotypes >= %.1f%%",
+                     n_snps, n_samples, MAIN_MIN_FREQ * 100),
+  out_file = file.path(OUT_DIR, "19_FullRegion_Haplotype_Frequencies.png")
 )
 
-# =============================================================================
-# 13. SUMMARY TO CONSOLE
-# =============================================================================
-cat("\n", strrep("=", 60), "\n")
-cat("✓ ANALYSIS COMPLETE — v5\n")
-cat(strrep("=", 60), "\n")
-cat(sprintf("  SNPs in analysis     : %d\n", n_snps))
-cat(sprintf("  Common samples       : %d\n", length(common_samples)))
-cat(sprintf("  Haplotypes (≥1%%)    : %d\n", length(common_haplotypes)))
-cat(sprintf("  Statistical reference  : %s\n", ref_haplo_global))
-cat(sprintf("  All-ref proxy (report): %s\n", allref_haplo))
-cat("\n  Global haplotype freqs (top 5):\n")
-print(head(freq_df %>% select(Haplotype, Frequency, Allele_String), 5))
-cat("\n  Figures saved to:", OUT_DIR, "\n")
-cat("    19_Fig0_LD_Heatmap.png\n")
-cat("    19_Fig1a_SNP_Carrier_Counts.png\n")
-cat("    19_Fig1b_Haplotype_Composition.png\n")
-cat("    19_Fig1_Haplotype_Composition.png   (combined)\n")
-cat("    19_Fig2_Global_Frequencies.png\n")
-cat("    19_Fig3_Stratified_Frequencies.png\n")
-cat("    19_Fig4_Forest_Plot.png\n")
-cat("    19_Fig4_Forest_Plot_RawP.png\n")
-cat("    19_Fig4_Forest_Plot_FDR.png\n")
-cat("    19_Fig5_FDR_Heatmap.png\n")
-cat("    19_Fig6_RawP_Heatmap.png\n")
-cat("    19_FigG1_Genotypic_Forest_RawP.png\n")
-cat("    19_FigG1_Genotypic_Forest_FDR.png\n")
-cat("    19_FigG2_Additive_vs_Genotypic_RawP.png\n")
-cat("    19_FigG2_Additive_vs_Genotypic_FDR.png\n")
-cat("    19_FigG3_Genotypic_RawP_Heatmap.png\n")
-cat("    19_FigG4_Genotypic_FDR_Heatmap.png\n")
-cat("    19_FigG5_Genotype_Freq_Bars_RawP.png\n")
-cat("    19_FigG5_Genotype_Freq_Bars_FDR.png\n")
-cat("    19_FigG6_Het_vs_Hom_OR_RawP.png\n")
-cat("    19_FigG6_Het_vs_Hom_OR_FDR.png\n")
-cat("    19_FigG7_Model_Type_Summary.png\n")
-cat("    19_Haplotype_Results_v5.xlsx\n\n")
+make_ld_plot(ld_matrix, snp_meta, ld_blocks = ld_blocks,
+             out_file = file.path(OUT_DIR, "19_LD_Heatmap_FullRegion.png"))
+
+if (length(block_summary_rows) > 0) {
+  block_plot_df <- bind_rows(block_summary_rows) %>%
+    mutate(Region = factor(Region, levels = Region[order(N_SNPs, decreasing = TRUE)]))
+
+  p_blocks <- ggplot(block_plot_df, aes(x = Region, y = Haps_Shown)) +
+    geom_col(fill = "#7B3294", colour = "black", alpha = 0.85) +
+    geom_text(aes(label = paste0(N_SNPs, " SNPs")), vjust = -0.35, size = 3.2) +
+    labs(title    = "LD-block haplotype complexity",
+         subtitle = sprintf("Shown haplotypes at >= %.1f%% frequency", SUPP_MIN_FREQ * 100),
+         x = NULL, y = "Shown haplotypes") +
+    theme(axis.text.x = element_text(angle = 35, hjust = 1))
+  SAVE(file.path(OUT_DIR, "19_LD_Block_Haplotype_Counts.png"), p_blocks, width = 8, height = 5)
+}
+
+if (length(gene_summary_rows) > 0) {
+  gene_plot_df <- bind_rows(gene_summary_rows) %>%
+    mutate(Region = factor(Region, levels = Region[order(Haps_Shown, decreasing = TRUE)]))
+
+  p_genes <- ggplot(gene_plot_df, aes(x = Region, y = Haps_Shown)) +
+    geom_col(fill = "#1B9E77", colour = "black", alpha = 0.85) +
+    geom_text(aes(label = paste0(N_SNPs, " SNPs")), vjust = -0.35, size = 3.2) +
+    labs(title    = "Gene-specific haplotype complexity",
+         subtitle = sprintf("Shown haplotypes at >= %.1f%% frequency", SUPP_MIN_FREQ * 100),
+         x = NULL, y = "Shown haplotypes") +
+    theme(axis.text.x = element_text(angle = 35, hjust = 1))
+  SAVE(file.path(OUT_DIR, "19_Gene_Haplotype_Counts.png"), p_genes, width = 8, height = 5)
+}
+
+make_association_overview_plot(summary_rows,
+                               out_file = file.path(OUT_DIR, "19_Association_Overview_Bubble.png"))
+
+if (!is.null(full_assoc) && nrow(full_assoc) > 0) {
+  make_forest_plot(full_assoc, region_name = "Full_Region",
+                   out_file = file.path(OUT_DIR, "19_Forest_FullRegion.png"))
+}
+
+make_haplotype_composition_plot(freq_df = full_freq$shown, snp_meta_sub = snp_meta,
+                                region_name = "Full_Region",
+                                out_file = file.path(OUT_DIR, "19_Composition_FullRegion.png"))
+
+if (!is.null(full_assoc) && nrow(full_assoc) > 0) {
+  make_freq_comparison_plot(full_assoc, region_name = "Full_Region",
+                            out_file   = file.path(OUT_DIR, "19_FreqComparison_FullRegion.png"),
+                            comparison = "All")
+}
+
+if (!is.null(full_assoc) && nrow(full_assoc) > 0) {
+  make_manhattan_hap_plot(full_assoc, snp_meta,
+                          out_file   = file.path(OUT_DIR, "19_Manhattan_Haplotypes_All.png"),
+                          comparison = "All")
+  for (.comp in c("Breast", "Endometrium")) {
+    if (.comp %in% full_assoc$Comparison) {
+      make_manhattan_hap_plot(full_assoc, snp_meta,
+                              out_file   = file.path(OUT_DIR, sprintf("19_Manhattan_Haplotypes_%s.png", .comp)),
+                              comparison = .comp)
+    }
+  }
+}
+
+make_cohort_freq_plot(a1_mat = a1, a2_mat = a2, freq_df = full_freq$shown,
+                      metadata_df = meta, region_name = "Full_Region",
+                      out_file    = file.path(OUT_DIR, "19_CohortFreq_FullRegion.png"),
+                      min_freq    = MAIN_MIN_FREQ, hap_palette = .hap_palette)
+
+# KM plots: run for the most frequent haplotype plus any nominally significant ones
+if (nrow(full_freq$shown) > 0) {
+  km_hap_ranks <- unique(c(
+    1L,
+    if (!is.null(full_assoc) && nrow(full_assoc) > 0)
+      which(full_freq$shown$Allele_String %in%
+              full_assoc$Haplotype_String[full_assoc$Significant_Fisher])
+    else integer(0)
+  ))
+  for (.tc in c("os_months", "pfs_months")) {
+    .ec <- sub("months", "event", .tc)
+    for (.rank in km_hap_ranks) {
+      make_km_plot(a1, a2, full_freq$shown, meta,
+                   region_name = "Full_Region", out_dir = OUT_DIR,
+                   hap_rank = .rank, time_col = .tc, event_col = .ec)
+    }
+  }
+}
+
+# Per-gene KM plots
+if (length(gene_freq_tables) > 0) {
+  for (.gnm in names(gene_freq_tables)) {
+    .gfreq <- gene_freq_tables[[.gnm]]
+    if (is.null(.gfreq) || nrow(.gfreq) == 0) next
+    .gsnp_ids <- trimws(strsplit(gene_summary_rows[[.gnm]]$SNPs, ",")[[1]])
+    .gidx     <- which(snp_meta$rsID_clean %in% .gsnp_ids)
+    if (length(.gidx) < 2) next
+    .g_assoc       <- gene_assoc_tables[[.gnm]]
+    km_hap_ranks_g <- unique(c(
+      1L,
+      if (!is.null(.g_assoc) && nrow(.g_assoc) > 0)
+        which(.gfreq$Allele_String %in%
+                .g_assoc$Haplotype_String[.g_assoc$Significant_Fisher])
+      else integer(0)
+    ))
+    for (.tc in c("os_months", "pfs_months")) {
+      .ec <- sub("months", "event", .tc)
+      for (.rank in km_hap_ranks_g) {
+        make_km_plot(a1[, .gidx, drop = FALSE], a2[, .gidx, drop = FALSE],
+                     .gfreq, meta, region_name = .gnm, out_dir = OUT_DIR,
+                     hap_rank = .rank, time_col = .tc, event_col = .ec)
+      }
+    }
+  }
+}
+
+# Per-gene-block figures: forest, composition, frequency comparison, LD heatmaps
+if (length(gene_assoc_tables) > 0) {
+  for (region_nm in names(gene_assoc_tables)) {
+    assoc_df_g <- gene_assoc_tables[[region_nm]]
+    freq_df_g  <- gene_freq_tables[[region_nm]]
+    safe_nm    <- gsub("[^A-Za-z0-9_]", "_", region_nm)
+
+    if (!is.null(assoc_df_g) && nrow(assoc_df_g) > 0) {
+      make_forest_plot(assoc_df_g, region_name = region_nm,
+                       out_file = file.path(OUT_DIR, sprintf("19_Forest_%s.png", safe_nm)))
+    }
+
+    if (!is.null(freq_df_g) && nrow(freq_df_g) > 0) {
+      gene_block_meta <- tryCatch({
+        snp_ids <- trimws(strsplit(gene_summary_rows[[region_nm]]$SNPs, ",")[[1]])
+        snp_meta[snp_meta$rsID_clean %in% snp_ids, , drop = FALSE]
+      }, error = function(e) NULL)
+      if (!is.null(gene_block_meta) && nrow(gene_block_meta) > 0) {
+        make_haplotype_composition_plot(freq_df = freq_df_g, snp_meta_sub = gene_block_meta,
+                                        region_name = region_nm,
+                                        out_file = file.path(OUT_DIR, sprintf("19_Composition_%s.png", safe_nm)))
+      }
+    }
+
+    if (!is.null(assoc_df_g) && nrow(assoc_df_g) > 0) {
+      for (.comp in unique(assoc_df_g$Comparison)) {
+        .comp_safe <- gsub("[^A-Za-z0-9]", "_", .comp)
+        make_freq_comparison_plot(assoc_df_g, region_name = region_nm,
+                                  out_file   = file.path(OUT_DIR, sprintf("19_FreqComparison_%s_%s.png", safe_nm, .comp_safe)),
+                                  comparison = .comp)
+        make_forest_plot(assoc_df_g %>% filter(Comparison == .comp),
+                         region_name = sprintf("%s (%s)", region_nm, .comp),
+                         out_file    = file.path(OUT_DIR, sprintf("19_Forest_%s_%s.png", safe_nm, .comp_safe)))
+      }
+    }
+  }
+}
+
+# Per-GSDMB-block LD heatmaps
+if (RUN_GENE_SPECIFIC && exists("ld_matrix")) {
+  gsdmb_idx <- which(snp_meta$Gene == "GSDMB")
+  if (length(gsdmb_idx) >= 2) {
+    gsdmb_ld <- ld_matrix[snp_meta$rsID_clean[gsdmb_idx],
+                           snp_meta$rsID_clean[gsdmb_idx], drop = FALSE]
+    gsdmb_meta         <- snp_meta[gsdmb_idx, , drop = FALSE]
+    gsdmb_blocks_local <- define_ld_blocks(gsdmb_ld, gsdmb_meta,
+                                           threshold = LD_BLOCK_THRESHOLD,
+                                           min_snps  = MIN_BLOCK_SNPS,
+                                           max_snps  = MAX_BLOCK_SNPS)
+    for (blk_nm in names(gsdmb_blocks_local)) {
+      blk_idx <- gsdmb_idx[gsdmb_blocks_local[[blk_nm]]]
+      make_block_ld_plot(ld_matrix_full = ld_matrix, block_idx = blk_idx,
+                         snp_meta_full  = snp_meta, block_name = blk_nm,
+                         out_file = file.path(OUT_DIR, sprintf("19_LD_GSDMB_%s.png", blk_nm)))
+    }
+  }
+}
+
+# --- Completion summary ------------------------------------------------------
+cat("\n======================================================================\n")
+cat("HAPLOTYPE ANALYSIS COMPLETE\n")
+cat("======================================================================\n\n")
+cat(sprintf("Outputs in: %s\n\n", OUT_DIR))
+
+out_files <- sort(list.files(OUT_DIR, full.names = FALSE))
+cat(sprintf("Files created (%d total):\n", length(out_files)))
+for (f in out_files) cat(sprintf("  %s\n", f))
+
+cat("\nRegion summary:\n")
+print(summary_rows, row.names = FALSE)
+cat("\n")
