@@ -1,432 +1,179 @@
-# GSDMB Variant Analysis Pipeline
+# GSDMB Targeted Sequencing Analysis Pipeline
 
-A fully integrated bioinformatics and statistical pipeline for targeted amplicon sequencing of the **GSDMB locus (17q21)** in breast and endometrial cancer cohorts.
+A reproducible analysis pipeline for targeted DNA sequencing of the **GSDMB locus and surrounding Chr17 panel**, including QC, variant calling, functional annotation, descriptive visualisation, SNP enrichment testing, clinical association analysis, and haplotype-based modelling.
 
-Developed as part of a Master's thesis (TFM), this repository implements an end-to-end workflow spanning sequencing quality control, variant annotation, haplotype analysis, clinical harmonisation, and SNP–phenotype association modelling.
+This repository contains the analysis code used to process targeted sequencing data from breast and endometrium cohorts across tumour and normal/control groups.
 
----
+## What This Repository Does
 
-## Overview
+The pipeline supports the following stages:
 
-This pipeline performs:
-
-- BAM integrity verification and indexing  
-- Coverage quality control and technical auditing  
-- Variant calling and normalisation  
-- Functional annotation (Ensembl VEP + pathogenicity predictors)  
-- Variant statistics and enrichment testing  
-- Haplotype phasing and association testing  
-- Clinical data integration and harmonisation  
-- SNP–clinical association modelling  
-- Haplotype–clinical association modelling  
-- Survival analysis (Kaplan–Meier + Cox proportional hazards)  
-- Interactive visualisation outputs  
-
-The workflow integrates sequencing QC, genomic annotation, and multivariable statistical modelling into a reproducible analytical framework.
-
----
+- technical validation of BAM files and indexing
+- sequencing quality control and zero-coverage assessment
+- targeted variant calling and filtering
+- functional annotation with Ensembl VEP
+- consolidation of annotated variants into analysis-ready tables
+- descriptive variant landscape visualisation
+- common SNP identification and enrichment testing
+- interactive dashboard generation
+- harmonisation of clinical metadata
+- SNP-clinical association analysis
+- haplotype phasing and haplotype-clinical association analysis
 
 ## Repository Structure
 
+```text
+01_check_and_index.sh            BAM integrity checks and indexing
+02_dna_qc.sh                     DNA sequencing QC pipeline
+02b_more-qc.sh                  PASS manifest creation and zero-coverage summaries
+02c_zerocovinfo.py              Zero-coverage Excel reporting
+03_qc_visualisation.py          QC figures and panel-level visual summaries
+04_technical_audit.py           Technical audit of amplicon performance
+05_variant_calling.sh           Targeted variant calling workflow
+06_annotation.sh                Functional annotation with VEP
+07_merge_annotations.py         Merge annotated VCFs into a canonical table
+07b_variant_qc.py               Variant-level QC checks
+08_mapping.py                   Global variant landscape plot
+09_gsdmb_only.py                GSDMB-only landscape plot
+10_variant_stats.py             Descriptive consequence/impact summaries
+11_SNPs.py                      Common SNP identification and benchmarking
+12_stats_enrichment.py          Tumour-versus-control SNP enrichment testing
+13_permutation_testing.py       Permutation-based SNP comparison
+14_interactive_dashboard.py     Interactive Plotly dashboard
+15_haplotypes.sh                Haplotype phasing workflow
+15_haplotype_stats.R                Haplotype statistical analysis
+16b_excel_harmonisation.py      Clinical-data harmonisation
+17_snp_association.py           SNP-clinical association analysis
+18_haplotype_association.py     Haplotype-clinical association analysis
+pipeline_config.toml            Shared paths, thresholds, and grouping choices
+pipeline_utils.py               Shared helper functions
+pipeline_validation.py          Shared validation helpers
+association_runtime.py          Shared runtime defaults for scripts 17 and 18
+environment.yml                 Conda environment specification
 ```
-.
-├── 01_check_and_index.sh
-├── 02_dna_qc.sh
-├── 02b_more-qc.sh
-├── 02c_zerocovinfo.py
-├── 03_qc_visualisation.py
-├── 04_technical_audit.py
-├── 05_variant_calling.sh
-├── 06_annotation.sh
-├── 07_merge-annotations.py
-├── 07b_variant-qc.py
-├── 08_mapping.py
-├── 09_gsdmb-only.py
-├── 10_variant-stats.py
-├── 11_SNPs.py
-├── 12_stats-enrichment.py
-├── 13_permutation_testing.py
-├── 14_interactive_dashboard.py
-├── 15_haplotypes.sh
-├── 15_haplo.stats.r
-├── 16_excel_making.py
-├── 16b_excel_harmonisation.py
-├── 17_snp-association.py
-└── 18_haplotype-association.py
-```
 
-Scripts are intended to be executed sequentially (`01` → `18`).
+## Recommended Run Order
 
----
+1. `01_check_and_index.sh`
+2. `02_dna_qc.sh`
+3. `02b_more-qc.sh`
+4. `02c_zerocovinfo.py`
+5. `03_qc_visualisation.py`
+6. `04_technical_audit.py`
+7. `05_variant_calling.sh`
+8. `06_annotation.sh`
+9. `07_merge_annotations.py`
+10. `07b_variant_qc.py`
+11. `08_mapping.py`
+12. `09_gsdmb_only.py`
+13. `10_variant_stats.py`
+14. `11_SNPs.py`
+15. `12_stats_enrichment.py`
+16. `13_permutation_testing.py`
+17. `14_interactive_dashboard.py`
+18. `15_haplotypes.sh`
+19. `15_haplotype_stats.R`
+20. `16b_excel_harmonisation.py`
+21. `17_snp_association.py`
+22. `18_haplotype_association.py`
 
-# Computational Environments
+## Installation
 
-The pipeline uses **three isolated environments** due to distinct toolchains required for bioinformatics processing, annotation, and statistical modelling.
-
----
-
-## 1. Bioinformatics Environment (Micromamba)
-
-Used for shell-based genomic processing:
-
-- `01_check_and_index.sh`
-- `02_dna_qc.sh`
-- `02b_more-qc.sh`
-- `05_variant_calling.sh`
-- `15_haplotypes.sh`
-
-### Installation
+### 1. Clone the repository
 
 ```bash
-micromamba create -n bam-steps \
-  samtools bcftools mosdepth \
-  -c bioconda -c conda-forge
-
-micromamba activate bam-steps
+git clone <your-repository-url>
+cd tfm
 ```
 
-### Tools
-
-- samtools — BAM integrity checking and indexing  
-- bcftools — VCF normalisation, filtering, merging  
-- mosdepth — Per-base and per-region coverage metrics  
-
----
-
-## 2. Python Analysis Environment
-
-Used for all Python-based processing and modelling:
-
-- `02c_zerocovinfo.py`
-- `03_qc_visualisation.py`
-- `04_technical_audit.py`
-- `07`–`14`
-- `16_excel_making.py`
-- `16b_excel_harmonisation.py`
-- `17_snp-association.py`
-- `18_haplotype-association.py`
-
-### Installation
+### 2. Create the Python environment
 
 ```bash
-python3 -m venv tfm_env
-source tfm_env/bin/activate
-pip install -r requirements.txt
+conda env create -f environment.yml
+conda activate tfm-gsdmb
 ```
 
-### Core Dependencies
+### 3. Install external tools
 
-- pandas  
-- numpy  
-- scipy  
-- statsmodels  
-- seaborn  
-- matplotlib  
-- lifelines  
-- openpyxl  
+Some parts of the pipeline also require command-line tools that are **not** installed through `environment.yml`.
 
-This environment handles data integration, harmonisation, regression modelling, survival analysis, and visualisation.
+Typical external dependencies include:
 
----
+- `samtools`
+- `bcftools`
+- `mosdepth`
+- Ion Torrent variant calling tools
+- Ensembl `vep` and its local cache/plugins
+- `beagle` for haplotype phasing
+- `Rscript` plus the R packages used in `15_haplotype_stats.R`
 
-## 3. VEP Annotation Environment
+## Configuration
 
-Used exclusively for:
+Shared paths and thresholds are defined in [pipeline_config.toml](pipeline_config.toml).
 
-- `06_annotation.sh`
+Important points:
 
-### Activation
+- the current config uses **absolute local paths** from the original analysis environment
+- before reusing the pipeline on another machine, update those paths first
+- pooled-control behaviour is also defined there
 
-```bash
-conda activate vep_env
+Current grouping logic includes:
+
+- pooled controls = `Breast normal + Endometrium normal`
+- cohort-specific comparisons = tumour cohort vs pooled controls
+- global comparisons = all tumours vs all controls
+
+## Outputs
+
+Major outputs generated by the pipeline include:
+
+- QC tables and QC summary figures
+- annotated Excel reports
+- variant landscape plots
+- SNP benchmarking and enrichment results
+- permutation-test summaries
+- interactive HTML dashboards
+- harmonised clinical master sheets
+- SNP-clinical association workbooks and figures
+- phased haplotype tables and haplotype association results
+
+Most analysis outputs are written to the configured results directory, currently:
+
+```text
+/home/gadeaalonsoj/tfm/gsdmb_final_results
 ```
 
-### Required Resources
+## Reproducibility Notes
 
-- Ensembl VEP (GRCh38 cache)  
-- Reference FASTA (GRCh38)  
-- CADD scores  
-- dbNSFP  
-- COSMIC annotation data  
+The repository now includes a shared reproducibility layer:
 
-> Note: The annotation script automatically unsets `PERL5LIB` and `PERL_LOCAL_LIB_ROOT` to avoid WSL Perl conflicts.
+- [pipeline_config.toml](pipeline_config.toml) centralises paths and thresholds
+- [pipeline_utils.py](pipeline_utils.py) centralises shared transformations
+- [pipeline_validation.py](pipeline_validation.py) centralises common integrity checks
+- [association_runtime.py](association_runtime.py) keeps scripts 17 and 18 aligned
 
----
+Additional details are described in [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
 
-# Pipeline Stages
+## Data Availability
 
----
+This repository contains code and workflow logic. Raw sequencing data, patient-level clinical data, and any restricted metadata should only be shared if ethics approval, institutional policy, and privacy requirements allow it.
 
-## Stage 1 — Sequencing QC
+If the repository is made public, it is usually best to:
 
-```bash
-micromamba activate bam-steps
-./01_check_and_index.sh -i "$HOME/tfm/endometrium/normal/dna" -t 8
-./02_dna_qc.sh \
-  -i "/home/gadeaalonsoj/tfm/breast/tumour/dna" \
-  -o "/home/gadeaalonsoj/tfm/breast/tumour/dna_qc" \
-  -r "/home/gadeaalonsoj/ref_alt/hg38_alt.fa" \
-  -b "/home/gadeaalonsoj/tfm/dna_bed/IAD255368_167_Submitted.bed" \
-  -t 8
-./02b_more-qc.sh \
-  -q /home/gadeaalonsoj/tfm/breast/tumour/dna_qc \
-  -m /home/gadeaalonsoj/tfm/manifests/breast-tumour-pass_manifest.txt \
-  -z /home/gadeaalonsoj/tfm/breast/tumour/zero_cov \
+- exclude patient-identifiable data
+- exclude large derived result folders unless they are intentionally released
+- provide only de-identified example inputs where appropriate
 
-source tfm_env/bin/activate
-python 02c_zerocovinfo.py --zero /home/gadeaalonsoj/tfm/endometrium/tumour/zero_coverage/zero_cov_tumour.tsv --qc /home/gadeaalonsoj/tfm/endometrium/tumour/dna_qc/qc_summary.tsv
-python 03_qc_visualisation.py
-python 04_technical_audit.py both
+## Suggested Citation
+
+If you plan to publish or share this repository publicly, add a formal citation section here once the manuscript title, author list, and year are finalised.
+
+Example placeholder:
+
+```text
+Author(s). Title of study or repository. Year. GitHub repository.
 ```
 
-Outputs:
-- Coverage metrics  
-- Zero-coverage region reports  
-- PCA and QC plots  
-- Technical audit summary  
+## Contact
 
----
-
-## Stage 2 — Variant Calling & Annotation
-
-```bash
-micromamba activate bam-steps
-bash 05_variant_calling.sh \
-  -m ~/tfm/manifests/pass_breast_tumour.txt \
-  -r ~/ref_alt/hg38_canonical.fa \
-  -b ~/tfm/dna_bed/IAD255368_167_Submitted.bed \
-  -o ~/tfm/breast/tumour/dna_calls \
-  -t 8 \
-
-conda activate vep_env
-./06_annotation.sh
-```
-
-Functional predictors applied:
-- gnomAD allele frequencies  
-- CADD  
-- SIFT  
-- PolyPhen-2  
-- REVEL  
-- DANN  
-- COSMIC  
-
----
-
-## Stage 3 — Variant Processing & Enrichment
-
-```bash
-source tfm_env/bin/activate
-python3 07b_variant-qc.py \
-  --input /home/gadeaalonsoj/tfm/gsdmb_final_results/GSDMB_Annotated_Report_Fixed.xlsx \
-  --output /home/gadeaalonsoj/tfm/gsdmb_final_results/variant_qc
-python 08_mapping.py
-python 09_gsdmb-only.py
-python 10_variant-stats.py
-python 11_SNPs.py
-python 12_stats-enrichment.py
-python 13_permutation_testing.py
-python 14_interactive_dashboard.py
-```
-
-Produces:
-- Filtered SNP lists  
-- Population frequency filtering  
-- Enrichment testing  
-- Permutation validation  
-- Interactive dashboard  
-
----
-
-## Stage 4 — Haplotype Analysis
-
-```bash
-micromamba activate bam-steps
-./15_haplotypes.sh
-
-Rscript 15_haplo.stats.r
-```
-
-- BEAGLE phasing  
-- Haplotype frequency estimation  
-- Association modelling  
-
----
-
-# Clinical Integration & Harmonisation
-
-## 16_excel_making.py
-
-Builds a unified SNP master dataset by:
-- Merging SNP metadata  
-- Joining breast and endometrial clinical data  
-- Applying HER2 case-level germline logic  
-
-Output:
-
-```
-MASTER_SNP_plus_clinical__MERGED.xlsx
-```
-
----
-
-## 16b_excel_harmonisation.py
-
-Creates the harmonised analytical layer:
-
-- Preserves all original columns (lossless merge)  
-- Adds canonical `canon__*` variables  
-- Standardises:
-  - Yes/No encodings  
-  - FIGO stage  
-  - Grade  
-  - ER/PR status  
-  - HER2 copy number  
-  - MSI status  
-
-Output:
-
-```
-MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx
-```
-
----
-
-# SNP–Clinical Association Modelling
-
-## 17_snp-association.py
-
-Performs SNP-level association analysis using individual variant genotypes as the
-exposure variable. Mirrors the statistical framework of script 18 but operates at
-single-variant resolution rather than haplotype level.
-
-### Pre-processing
-- DNA-only filtering  
-- gnomAD NFE AF > 1%  
-- Manifest-based sequencing confirmation  
-- Technical replicate removal  
-
-### Statistical Analyses
-- Tumour vs Healthy — Fisher's exact test + Odds Ratio  
-- SNP × Clinical variables:
-  - Continuous → Mann–Whitney U  
-  - Binary → Fisher's exact + age- and BMI-adjusted logistic regression  
-  - Nominal → Chi-square  
-- Genotype-dose trend testing (heterozygous / homozygous contrasts)  
-- Survival analysis (Kaplan–Meier + age-adjusted Cox PH) for OS and PFS  
-- Cancer risk — case-control logistic regression (tumour vs healthy)  
-
-### Multiple Testing
-Benjamini–Hochberg False Discovery Rate (default: FDR < 0.10)
-
-### Outputs
-- `17_SNP_Clinical_Association_Results.xlsx` — multi-sheet results workbook  
-- Volcano plots (raw p and log₂ OR)  
-- Clinical association heatmaps (raw p and FDR)  
-- Forest plots (binary outcomes, cancer risk)  
-- Kaplan–Meier curves (PDF)  
-- Summary panel figure  
-- Sample manifest audit  
-
-### Run
-
-```bash
-python 17_snp-association.py \
-  --gsdmb   /path/to/GSDMB_Annotated_Report_Fixed.xlsx \
-  --master  /path/to/MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx \
-  --out_dir /path/to/output/
-```
-
----
-
-# Haplotype–Clinical Association Modelling
-
-## 18_haplotype-association.py
-
-Mirrors script 17 but uses **BEAGLE-phased haplotype carrier status** as the
-exposure variable instead of individual SNP genotypes. Haplotype strings are
-constructed from the established SNP positions (gnomAD NFE AF > 1%) identified
-in script 11; each sample carries two haplotype strings (one per chromosome)
-and is classified as a carrier of a given haplotype if it appears on at least
-one chromosome (dosage ≥ 1). Only haplotypes with a global frequency ≥ 2% are
-tested.
-
-### Data Sources
-- `phased_genotypes.tsv` — BEAGLE output from `15_haplotypes.sh`  
-- `MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx` — harmonised clinical master  
-- `GSDMB_Annotated_Report_Fixed.xlsx` — source of established SNP positions  
-
-### Statistical Analyses
-- Tumour vs Healthy — Fisher's exact test per haplotype  
-- Haplotype × Clinical variables (per cohort):
-  - Continuous → Mann–Whitney U  
-  - Binary → Fisher's exact + age- and BMI-adjusted logistic regression  
-  - Nominal → Chi-square  
-- Haplotype-dose trend testing (dosage 0 / 1 / 2) for nominally significant hits  
-- Survival analysis (Kaplan–Meier + age-adjusted Cox PH) for OS and PFS  
-- Cancer risk — case-control logistic regression (tumour vs healthy)  
-
-### Multiple Testing
-Benjamini–Hochberg False Discovery Rate (default: FDR < 0.10)
-
-### Outputs
-- `18_Haplo_Clinical_Association_Results.xlsx` — multi-sheet results workbook:
-  - `haplotype_frequencies`
-  - `tumour_vs_healthy`
-  - `breast_clinical_assoc`
-  - `endo_clinical_assoc`
-  - `haplotype_dose`
-  - `survival_cox`
-  - `cancer_risk`
-  - `summary_significant`
-  - `sample_manifest`
-- `18_Haplo_Volcano_raw_p.png` — tumour vs healthy volcano plot  
-- `18_Haplo_Heatmap_Breast.png` — dual-panel heatmap (−log₁₀p + effect size), breast cohort  
-- `18_Haplo_Heatmap_Endometrial.png` — dual-panel heatmap, endometrial cohort (raw p)  
-- `18_Haplo_Heatmap_Endometrial_FDR.png` — dual-panel heatmap, endometrial cohort (FDR)  
-- `18_Haplo_Forest_Breast.png` — forest plot, breast binary outcomes  
-- `18_Haplo_Forest_Endometrial.png` — forest plot, endometrial binary outcomes  
-- `18_Haplo_Forest_CancerRisk.png` — cancer risk forest plot with 95% CI whiskers  
-- `18_KM_Curves_All_Cohorts.pdf` — Kaplan–Meier curves for all haplotypes and endpoints  
-
-### Run
-
-```bash
-python 18_haplotype-association.py \
-  --phased   /path/to/phased_genotypes.tsv \
-  --master   /path/to/MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx \
-  --annot    /path/to/GSDMB_Annotated_Report_Fixed.xlsx \
-  --out_dir  /path/to/output/ \
-  --min_freq 0.02
-```
-
----
-
-# Statistical Framework
-
-- Fisher's exact test  
-- Mann–Whitney U  
-- Chi-square  
-- Logistic regression (age-adjusted and age+BMI-adjusted)  
-- Cox proportional hazards (age-adjusted)  
-- Kaplan–Meier survival estimation  
-- Benjamini–Hochberg FDR correction  
-
----
-
-# System Notes
-
-- Developed on Ubuntu 24 (WSL2)  
-- Python 3.11  
-- Ion Torrent amplicon sequencing  
-- Assumed directory structure:
-
-```
-<root>/<cohort>/<tissue>/<sample>/
-```
-
----
-
-# Author
-
-Research conducted as part of a Master's Thesis
+For repository-specific questions, add the preferred contact details for the project maintainer here before publishing the repository.

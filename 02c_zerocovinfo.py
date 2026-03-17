@@ -1,0 +1,470 @@
+#!/usr/bin/env python3
+"""
+Script: 02c_zero_cov_report.py
+================================
+Post-processing script for zero-coverage output from 02b_more-qc.sh.
+
+python3 02c_zerocovinfo.py --zero /home/gadeaalonsoj/tfm/endometrium/tumour/zero_coverage/zero_cov_tumour.tsv --qc /home/gadeaalonsoj/tfm/endometrium/tumour/dna_qc/qc_summary.tsv
+
+Reads one or more zero_cov_*.tsv files (new format with 4 metrics per sample)
+and optionally the qc_summary.tsv from script 02, then produces a colour-coded
+Excel workbook with four sheets:
+
+  1. Legend          - explanation of colours and columns
+  2. Amplicon_Summary - one row per amplicon, mean metrics across all samples,
+                        flagged red/orange if thresholds exceeded
+  3. Sample_Summary  - one row per sample, overall zero/low coverage burden,
+                        plus PASS/FAIL status from script 02 QC if available
+  4. Problem_Detail  - every (amplicon x sample) combination that exceeds
+                        either threshold, with all four metrics
+
+Thresholds (adjustable via --pct-zero and --pct-low):
+  pct_zero  > 5%   -> RED    (bases with 0x coverage as % of amplicon length)
+  pct_low   > 20%  -> ORANGE (bases with <200x coverage as % of amplicon length)
+
+Usage:
+  python 02c_zero_cov_report.py \\
+      --zero  /path/to/zero_cov_tumour.tsv /path/to/zero_cov_normal.tsv \\
+      --qc    /path/to/breast/tumour/dna_qc/qc_summary.tsv \\
+              /path/to/breast/normal/dna_qc/qc_summary.tsv \\
+      --output ./zero_cov_report.xlsx
+
+  # Single cohort, no QC summary
+  python 02c_zero_cov_report.py \\
+      --zero /path/to/zero_cov_normal.tsv \\
+      --output ./zero_cov_report.xlsx
+"""
+
+import argparse
+import sys
+import os
+import pandas as pd
+import numpy as np
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+# ============================================================================
+# THRESHOLDS
+# ============================================================================
+DEFAULT_PCT_ZERO = 5.0
+DEFAULT_PCT_LOW  = 20.0
+
+# ============================================================================
+# STYLES
+# ============================================================================
+RED_FILL    = PatternFill('solid', start_color='FFCCCC', end_color='FFCCCC')
+ORANGE_FILL = PatternFill('solid', start_color='FFE0B2', end_color='FFE0B2')
+GREEN_FILL  = PatternFill('solid', start_color='C8E6C9', end_color='C8E6C9')
+GREY_FILL   = PatternFill('solid', start_color='EEEEEE', end_color='EEEEEE')
+HEADER_FILL = PatternFill('solid', start_color='263238', end_color='263238')
+
+HEADER_FONT  = Font(name='Arial', bold=True, color='FFFFFF', size=10)
+BODY_FONT    = Font(name='Arial', size=9)
+BOLD_FONT    = Font(name='Arial', bold=True, size=9)
+GREEN_FONT   = Font(name='Arial', bold=True, size=9, color='1B5E20')
+RED_FONT     = Font(name='Arial', bold=True, size=9, color='B71C1C')
+CENTRE_ALIGN = Alignment(horizontal='center', vertical='center', wrap_text=True)
+LEFT_ALIGN   = Alignment(horizontal='left',   vertical='center', wrap_text=True)
+
+THIN = Side(style='thin', color='CCCCCC')
+THIN_BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+
+
+def _style(cell, fill=None, font=None, align=None):
+    cell.border    = THIN_BORDER
+    cell.font      = font or BODY_FONT
+    cell.alignment = align or CENTRE_ALIGN
+    if fill:
+        cell.fill = fill
+
+
+def style_header_row(ws, row_num, n_cols):
+    for col in range(1, n_cols + 1):
+        cell = ws.cell(row=row_num, column=col)
+        _style(cell, fill=HEADER_FILL, font=HEADER_FONT)
+
+
+def autofit(ws, min_w=8, max_w=38):
+    for col in ws.columns:
+        letter = get_column_letter(col[0].column)
+        best = max((len(str(c.value or '')) for c in col), default=min_w)
+        ws.column_dimensions[letter].width = min(max(best + 2, min_w), max_w)
+
+
+def safe(v):
+    """Return empty string instead of NaN for Excel cells."""
+    if isinstance(v, float) and np.isnan(v):
+        return ''
+    return v
+
+# ============================================================================
+# DATA LOADING
+# ============================================================================
+
+def load_zero_cov(paths):
+    frames = []
+    for path in paths:
+        cohort = os.path.basename(path).replace('zero_cov_', '').replace('.tsv', '')
+        df = pd.read_csv(path, sep='\t')
+        if 'amplicon_length_bp' not in df.columns:
+            print(f"ERROR: {path} is in the OLD format from script 02b.")
+            print("       Rerun 02b_more-qc.sh (updated version) on this cohort first.")
+            sys.exit(1)
+        if not any(c.endswith('_pct_zero') for c in df.columns):
+            print(f"ERROR: No _pct_zero columns found in {path}.")
+            sys.exit(1)
+        df['cohort'] = cohort
+        n_samples = sum(1 for c in df.columns if c.endswith('_zero_bases'))
+        print(f"  Loaded {os.path.basename(path)}: {len(df)} amplicons, {n_samples} samples")
+        frames.append(df)
+    return pd.concat(frames, ignore_index=True)
+
+
+def load_qc(paths):
+    if not paths:
+        return pd.DataFrame()
+    frames = []
+    for path in paths:
+        df = pd.read_csv(path, sep='\t')
+        frames.append(df)
+        print(f"  Loaded QC summary {os.path.basename(path)}: {len(df)} samples")
+    return pd.concat(frames, ignore_index=True)
+
+# ============================================================================
+# BUILD TABLES
+# ============================================================================
+
+def _sample_names(cdf):
+    return [c.replace('_zero_bases', '') for c in cdf.columns if c.endswith('_zero_bases')]
+
+
+def _qc_info(sample, qc_df):
+    if qc_df.empty:
+        return 'N/A', '', np.nan, np.nan, np.nan, np.nan, np.nan
+    m = qc_df[qc_df['sample'] == sample]
+    if m.empty:
+        return 'N/A', '', np.nan, np.nan, np.nan, np.nan, np.nan
+    r = m.iloc[0]
+    return (r.get('status', 'N/A'), r.get('fail_reasons', ''),
+            r.get('total_reads', np.nan), r.get('mapped_pct', np.nan),
+            r.get('on_target_pct', np.nan), r.get('mean_cov', np.nan),
+            r.get('uniformity_100x', np.nan))
+
+
+def build_amplicon_summary(df, pct_zero_thr, pct_low_thr):
+    rows = []
+    for cohort, cdf in df.groupby('cohort'):
+        samples = _sample_names(cdf)
+        pct_z_cols = [f'{s}_pct_zero' for s in samples]
+        pct_l_cols = [f'{s}_pct_low'  for s in samples]
+        z_b_cols   = [f'{s}_zero_bases' for s in samples]
+        l_b_cols   = [f'{s}_low_bases'  for s in samples]
+
+        for _, row in cdf.iterrows():
+            mean_pz = row[pct_z_cols].mean()
+            max_pz  = row[pct_z_cols].max()
+            mean_pl = row[pct_l_cols].mean()
+            max_pl  = row[pct_l_cols].max()
+            n_zero  = int((row[z_b_cols] > 0).sum())
+            n_low   = int((row[l_b_cols] > 0).sum())
+
+            if mean_pz > pct_zero_thr:
+                flag = 'FAIL_ZERO'
+            elif mean_pl > pct_low_thr:
+                flag = 'WARN_LOW'
+            else:
+                flag = 'PASS'
+
+            rows.append({
+                'Cohort':             cohort,
+                'Amplicon_ID':        row['annotation'],
+                'Chr':                row['chr'],
+                'Start':              row['start'],
+                'End':                row['end'],
+                'Amplicon_Length_bp': row['amplicon_length_bp'],
+                'N_Samples':          len(samples),
+                'Mean_Pct_Zero':      round(mean_pz, 2),
+                'Max_Pct_Zero':       round(max_pz, 2),
+                'N_Samples_Any_Zero': n_zero,
+                'Mean_Pct_Low_200x':  round(mean_pl, 2),
+                'Max_Pct_Low_200x':   round(max_pl, 2),
+                'N_Samples_Any_Low':  n_low,
+                'Flag':               flag,
+            })
+
+    out = pd.DataFrame(rows)
+    return out.sort_values(['Cohort', 'Mean_Pct_Zero'], ascending=[True, False])
+
+
+def build_sample_summary(df, qc_df, pct_zero_thr, pct_low_thr):
+    rows = []
+    for cohort, cdf in df.groupby('cohort'):
+        for sample in _sample_names(cdf):
+            total_zero = int(cdf[f'{sample}_zero_bases'].sum())
+            mean_pz    = round(cdf[f'{sample}_pct_zero'].mean(), 2)
+            total_low  = int(cdf[f'{sample}_low_bases'].sum())
+            mean_pl    = round(cdf[f'{sample}_pct_low'].mean(), 2)
+            n_amp_z    = int((cdf[f'{sample}_zero_bases'] > 0).sum())
+            n_amp_l    = int((cdf[f'{sample}_low_bases']  > 0).sum())
+
+            qc_status, fail_reasons, total_reads, mapped_pct, \
+                on_target_pct, mean_cov, uniformity = _qc_info(sample, qc_df)
+
+            if mean_pz > pct_zero_thr:
+                cov_flag = 'FAIL_ZERO'
+            elif mean_pl > pct_low_thr:
+                cov_flag = 'WARN_LOW'
+            else:
+                cov_flag = 'PASS'
+
+            rows.append({
+                'Cohort':                cohort,
+                'Sample':                sample,
+                'Script02_QC_Status':    qc_status,
+                'Script02_Fail_Reasons': fail_reasons,
+                'Total_Reads':           total_reads,
+                'Mapped_Pct':            mapped_pct,
+                'On_Target_Pct':         on_target_pct,
+                'Mean_Coverage':         mean_cov,
+                'Uniformity_100x_Pct':   uniformity,
+                'Total_Zero_Bases':      total_zero,
+                'Mean_Pct_Zero':         mean_pz,
+                'Total_Low_Bases':       total_low,
+                'Mean_Pct_Low_200x':     mean_pl,
+                'N_Amplicons_Any_Zero':  n_amp_z,
+                'N_Amplicons_Any_Low':   n_amp_l,
+                'Coverage_Flag':         cov_flag,
+            })
+
+    out = pd.DataFrame(rows)
+    return out.sort_values(['Cohort', 'Mean_Pct_Zero'], ascending=[True, False])
+
+
+def build_problem_detail(df, qc_df, pct_zero_thr, pct_low_thr):
+    rows = []
+    for cohort, cdf in df.groupby('cohort'):
+        for sample in _sample_names(cdf):
+            for _, amp in cdf.iterrows():
+                pz = amp[f'{sample}_pct_zero']
+                pl = amp[f'{sample}_pct_low']
+                if pz <= pct_zero_thr and pl <= pct_low_thr:
+                    continue
+                flag = 'FAIL_ZERO' if pz > pct_zero_thr else 'WARN_LOW'
+                qc_status, fail_reasons, *_ = _qc_info(sample, qc_df)
+                rows.append({
+                    'Cohort':                cohort,
+                    'Amplicon_ID':           amp['annotation'],
+                    'Chr':                   amp['chr'],
+                    'Start':                 amp['start'],
+                    'End':                   amp['end'],
+                    'Amplicon_Length_bp':    amp['amplicon_length_bp'],
+                    'Sample':                sample,
+                    'Script02_QC_Status':    qc_status,
+                    'Script02_Fail_Reasons': fail_reasons,
+                    'Zero_Bases':            int(amp[f'{sample}_zero_bases']),
+                    'Pct_Zero':              round(pz, 2),
+                    'Low_Bases':             int(amp[f'{sample}_low_bases']),
+                    'Pct_Low_200x':          round(pl, 2),
+                    'Flag':                  flag,
+                })
+
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    return out.sort_values(['Flag', 'Pct_Zero'], ascending=[True, False])
+
+# ============================================================================
+# EXCEL SHEETS
+# ============================================================================
+
+def write_legend(wb, pct_zero_thr, pct_low_thr):
+    ws = wb.create_sheet('Legend', 0)
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions['A'].width = 38
+    ws.column_dimensions['B'].width = 82
+
+    ws.cell(row=1, column=1, value='Zero Coverage QC Report — Legend').font = \
+        Font(name='Arial', bold=True, size=13)
+
+    entries = [
+        ('COLOUR KEY', '', None, True),
+        (f'RED   — Mean_Pct_Zero > {pct_zero_thr}%',
+         f'Mean % of the amplicon with ZERO coverage exceeds {pct_zero_thr}% across samples. '
+         'This is a genuine coverage gap. Consider excluding this amplicon or sample from '
+         'downstream analysis and checking script 04 sequence complexity metrics.',
+         RED_FILL, False),
+        (f'ORANGE — Mean_Pct_Low > {pct_low_thr}%',
+         f'Mean % of the amplicon below 200x coverage exceeds {pct_low_thr}%. Coverage is '
+         'present but below the pipeline minimum. Variant calls here should be treated '
+         'with caution.',
+         ORANGE_FILL, False),
+        ('GREEN  — Script 02 PASS',
+         'Sample passed all upstream QC thresholds in script 02 '
+         '(total reads, mapping %, on-target %, mean coverage, uniformity).',
+         GREEN_FILL, False),
+        ('RED    — Script 02 FAIL',
+         'Sample failed one or more upstream QC thresholds. '
+         'See Script02_Fail_Reasons for details.',
+         RED_FILL, False),
+        ('', '', None, False),
+        ('SHEET GUIDE', '', None, True),
+        ('Amplicon_Summary',
+         'One row per amplicon per cohort. Mean and max metrics across all samples. '
+         'Use this to identify panel-level design problems (amplicons that are '
+         'consistently poorly covered regardless of sample).',
+         None, False),
+        ('Sample_Summary',
+         'One row per sample per cohort. Overall coverage burden summed across all '
+         'amplicons, plus script 02 QC status. Use this to identify poor-quality '
+         'samples or batch effects.',
+         None, False),
+        ('Problem_Detail',
+         'Every individual (amplicon x sample) pair exceeding either threshold. '
+         'Most granular view — use this to distinguish sample-specific problems '
+         'from panel-wide design failures.',
+         None, False),
+    ]
+
+    for i, (label, desc, fill, is_header) in enumerate(entries, start=3):
+        ca = ws.cell(row=i, column=1, value=label)
+        cb = ws.cell(row=i, column=2, value=desc)
+        for cell in (ca, cb):
+            cell.border    = THIN_BORDER
+            cell.alignment = LEFT_ALIGN
+            cell.font      = BOLD_FONT if is_header else BODY_FONT
+            if is_header:
+                cell.fill = GREY_FILL
+        if fill:
+            ca.fill = fill
+
+
+def _write_data_sheet(wb, name, df, flag_col_name, qc_col_name=None, freeze='A2'):
+    ws = wb.create_sheet(name)
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = freeze
+
+    if df.empty:
+        ws.cell(row=1, column=1,
+                value='No rows met the problem threshold with the given settings.')
+        return
+
+    headers = list(df.columns)
+    ws.append(headers)
+    style_header_row(ws, 1, len(headers))
+
+    flag_col = headers.index(flag_col_name) + 1
+    qc_col   = (headers.index(qc_col_name) + 1) if qc_col_name and qc_col_name in headers else None
+
+    for r_idx, row in enumerate(df.itertuples(index=False), start=2):
+        for c_idx, value in enumerate(row, start=1):
+            cell = ws.cell(row=r_idx, column=c_idx, value=safe(value))
+            _style(cell)
+
+        flag = ws.cell(row=r_idx, column=flag_col).value
+        row_fill = RED_FILL if flag == 'FAIL_ZERO' else \
+                   ORANGE_FILL if flag == 'WARN_LOW' else None
+        if row_fill:
+            for c in range(1, len(headers) + 1):
+                ws.cell(row=r_idx, column=c).fill = row_fill
+
+        # Script 02 QC status cell override
+        if qc_col:
+            qc_cell = ws.cell(row=r_idx, column=qc_col)
+            if qc_cell.value == 'PASS':
+                qc_cell.fill = GREEN_FILL
+                qc_cell.font = GREEN_FONT
+            elif qc_cell.value == 'FAIL':
+                qc_cell.fill = RED_FILL
+                qc_cell.font = RED_FONT
+
+    autofit(ws)
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Summarise zero-coverage output from 02b_more-qc.sh into a '
+                    'colour-coded Excel report.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Multiple cohorts with QC summaries
+  python 02c_zero_cov_report.py \\
+      --zero zero_cov_tumour.tsv zero_cov_normal.tsv \\
+      --qc   /data/tumour/dna_qc/qc_summary.tsv \\
+             /data/normal/dna_qc/qc_summary.tsv \\
+      --output zero_cov_report.xlsx
+
+  # Single cohort, custom thresholds
+  python 02c_zero_cov_report.py \\
+      --zero zero_cov_normal.tsv \\
+      --pct-zero 10 --pct-low 30 \\
+      --output zero_cov_report.xlsx
+        """
+    )
+    parser.add_argument('--zero', nargs='+', required=True,
+                        help='One or more zero_cov_*.tsv files from 02b_more-qc.sh')
+    parser.add_argument('--qc', nargs='*', default=[],
+                        help='Optional: qc_summary.tsv files from 02_dna_qc.sh')
+    parser.add_argument('--output', '-o', default='zero_cov_report.xlsx',
+                        help='Output Excel file (default: zero_cov_report.xlsx)')
+    parser.add_argument('--pct-zero', type=float, default=DEFAULT_PCT_ZERO,
+                        help=f'% zero-coverage threshold -> RED (default: {DEFAULT_PCT_ZERO})')
+    parser.add_argument('--pct-low', type=float, default=DEFAULT_PCT_LOW,
+                        help=f'%% <200x threshold -> ORANGE (default: {DEFAULT_PCT_LOW})')
+
+    args = parser.parse_args()
+
+    print('=' * 65)
+    print('ZERO COVERAGE REPORT — 02c_zero_cov_report.py')
+    print('=' * 65)
+    print(f'Thresholds:  pct_zero > {args.pct_zero}% = RED | '
+          f'pct_low > {args.pct_low}% = ORANGE')
+    print()
+
+    print('Loading zero-coverage files...')
+    zero_df = load_zero_cov(args.zero)
+
+    print('\nLoading QC summaries...')
+    qc_df = load_qc(args.qc)
+    if qc_df.empty:
+        print('  (none provided — Script02_QC_Status will show N/A)')
+
+    print('\nBuilding summary tables...')
+    amp_df    = build_amplicon_summary(zero_df, args.pct_zero, args.pct_low)
+    samp_df   = build_sample_summary(zero_df, qc_df, args.pct_zero, args.pct_low)
+    detail_df = build_problem_detail(zero_df, qc_df, args.pct_zero, args.pct_low)
+
+    print(f'\n  Amplicons FAIL (red):    {(amp_df["Flag"]=="FAIL_ZERO").sum()}')
+    print(f'  Amplicons WARN (orange): {(amp_df["Flag"]=="WARN_LOW").sum()}')
+    print(f'  Samples   FAIL (red):    {(samp_df["Coverage_Flag"]=="FAIL_ZERO").sum()}')
+    print(f'  Samples   WARN (orange): {(samp_df["Coverage_Flag"]=="WARN_LOW").sum()}')
+    print(f'  Problem (amplicon x sample) pairs: {len(detail_df)}')
+
+    print(f'\nWriting: {args.output}')
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    write_legend(wb, args.pct_zero, args.pct_low)
+    _write_data_sheet(wb, 'Amplicon_Summary', amp_df,
+                      flag_col_name='Flag')
+    _write_data_sheet(wb, 'Sample_Summary', samp_df,
+                      flag_col_name='Coverage_Flag',
+                      qc_col_name='Script02_QC_Status')
+    _write_data_sheet(wb, 'Problem_Detail', detail_df,
+                      flag_col_name='Flag',
+                      qc_col_name='Script02_QC_Status')
+
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+    wb.save(args.output)
+
+    print('=' * 65)
+    print(f'Done. Report saved to: {args.output}')
+    print('=' * 65)
+
+
+if __name__ == '__main__':
+    main()
