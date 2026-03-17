@@ -217,9 +217,9 @@ Functional predictors applied:
 
 ```bash
 source tfm_env/bin/activate
-python 07_merge-annotations.py
-python 07b_variant-qc.py
-python 07c_cosmic_integration.py
+python3 07b_variant-qc.py \
+  --input /home/gadeaalonsoj/tfm/gsdmb_final_results/GSDMB_Annotated_Report_Fixed.xlsx \
+  --output /home/gadeaalonsoj/tfm/gsdmb_final_results/variant_qc
 python 08_mapping.py
 python 09_gsdmb-only.py
 python 10_variant-stats.py
