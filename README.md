@@ -163,14 +163,22 @@ conda activate vep_env
 
 ```bash
 micromamba activate bam-steps
-./01_check_and_index.sh
-./02_dna_qc.sh
-./02b_more-qc.sh
+./01_check_and_index.sh -i "$HOME/tfm/endometrium/normal/dna" -t 8
+./02_dna_qc.sh \
+  -i "/home/gadeaalonsoj/tfm/breast/tumour/dna" \
+  -o "/home/gadeaalonsoj/tfm/breast/tumour/dna_qc" \
+  -r "/home/gadeaalonsoj/ref_alt/hg38_alt.fa" \
+  -b "/home/gadeaalonsoj/tfm/dna_bed/IAD255368_167_Submitted.bed" \
+  -t 8
+./02b_more-qc.sh \
+  -q /home/gadeaalonsoj/tfm/breast/tumour/dna_qc \
+  -m /home/gadeaalonsoj/tfm/manifests/breast-tumour-pass_manifest.txt \
+  -z /home/gadeaalonsoj/tfm/breast/tumour/zero_cov \
 
 source tfm_env/bin/activate
-python 02c_zerocovinfo.py
+python 02c_zerocovinfo.py --zero /home/gadeaalonsoj/tfm/endometrium/tumour/zero_coverage/zero_cov_tumour.tsv --qc /home/gadeaalonsoj/tfm/endometrium/tumour/dna_qc/qc_summary.tsv
 python 03_qc_visualisation.py
-python 04_technical_audit.py
+python 04_technical_audit.py both
 ```
 
 Outputs:
@@ -185,7 +193,12 @@ Outputs:
 
 ```bash
 micromamba activate bam-steps
-./05_variant_calling.sh
+bash 05_variant_calling.sh \
+  -m ~/tfm/manifests/pass_breast_tumour.txt \
+  -r ~/ref_alt/hg38_canonical.fa \
+  -b ~/tfm/dna_bed/IAD255368_167_Submitted.bed \
+  -o ~/tfm/breast/tumour/dna_calls \
+  -t 8 \
 
 conda activate vep_env
 ./06_annotation.sh
