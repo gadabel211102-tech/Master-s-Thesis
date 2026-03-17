@@ -14,7 +14,6 @@ This pipeline performs:
 - Coverage quality control and technical auditing  
 - Variant calling and normalisation  
 - Functional annotation (Ensembl VEP + pathogenicity predictors)  
-- COSMIC contextualisation  
 - Variant statistics and enrichment testing  
 - Haplotype phasing and association testing  
 - Clinical data integration and harmonisation  
@@ -41,7 +40,6 @@ The workflow integrates sequencing QC, genomic annotation, and multivariable sta
 ├── 06_annotation.sh
 ├── 07_merge-annotations.py
 ├── 07b_variant-qc.py
-├── 07c_cosmic_integration.py
 ├── 08_mapping.py
 ├── 09_gsdmb-only.py
 ├── 10_variant-stats.py
