@@ -1,41 +1,141 @@
 # Reproducibility Guide
 
-This document explains how to run the pipeline reproducibly and what should be adjusted before sharing or reusing the repository.
+This document explains how to run the pipeline reproducibly and how the repository maps onto the three environments used in the original analysis workflow.
 
-## 1. Environment
+## 1. Environment Strategy
 
-The Python environment is defined in [environment.yml](environment.yml).
+The original project used three distinct environments:
 
-Create it with:
+- `bam-steps` via **micromamba** for shell-based bioinformatics processing
+- `tfm_env` via **Python virtualenv** for the Python analysis scripts
+- `vep_env` via **conda** for Ensembl VEP annotation
+
+For GitHub sharing, this repository now includes two reusable dependency files:
+
+- [environment.yml](environment.yml) for a shared conda/micromamba environment
+- [requirements.txt](requirements.txt) for the historical `tfm_env` virtual-environment workflow
+
+## 2. Exact Environment Activation
+
+### `bam-steps`
+
+Create it once:
+
+```bash
+micromamba create -n bam-steps samtools bcftools mosdepth -c bioconda -c conda-forge
+```
+
+Activate it:
+
+```bash
+micromamba activate bam-steps
+```
+
+Deactivate it:
+
+```bash
+micromamba deactivate
+```
+
+Typical scripts run here:
+
+- `01_check_and_index.sh`
+- `02_dna_qc.sh`
+- `02b_more-qc.sh`
+- `05_variant_calling.sh`
+- `15_haplotypes.sh`
+
+### `tfm_env`
+
+Create it once in the original style:
+
+```bash
+python3 -m venv tfm_env
+source tfm_env/bin/activate
+pip install -r requirements.txt
+```
+
+Activate it later:
+
+```bash
+source tfm_env/bin/activate
+```
+
+Deactivate it:
+
+```bash
+deactivate
+```
+
+Typical scripts run here:
+
+- `02c_zerocovinfo.py`
+- `03_qc_visualisation.py`
+- `04_technical_audit.py`
+- `07_merge_annotations.py`
+- `07b_variant_qc.py`
+- `08_mapping.py`
+- `09_gsdmb_only.py`
+- `10_variant_stats.py`
+- `11_SNPs.py`
+- `12_stats_enrichment.py`
+- `13_permutation_testing.py`
+- `14_interactive_dashboard.py`
+- `16b_excel_harmonisation.py`
+- `17_snp_association.py`
+- `18_haplotype_association.py`
+
+### `vep_env`
+
+Activate it with:
+
+```bash
+conda activate vep_env
+```
+
+Deactivate it with:
+
+```bash
+conda deactivate
+```
+
+Typical script run here:
+
+- `06_annotation.sh`
+
+This environment must provide Ensembl VEP and its local annotation resources.
+
+## 3. Shared Dependency Files
+
+### `requirements.txt`
+
+Use this if you want to recreate the Python-analysis environment in the same style as the original `tfm_env` workflow.
+
+```bash
+python3 -m venv tfm_env
+source tfm_env/bin/activate
+pip install -r requirements.txt
+```
+
+### `environment.yml`
+
+Use this if you prefer a single reproducible environment through conda or micromamba.
+
+With conda:
 
 ```bash
 conda env create -f environment.yml
 conda activate tfm-gsdmb
 ```
 
-The pipeline also depends on external bioinformatics tools that must be installed separately, including `samtools`, `bcftools`, `mosdepth`, `vep`, Ion Torrent calling tools, `beagle`, and `Rscript`.
+With micromamba:
 
-## 2. Configuration
+```bash
+micromamba create -f environment.yml
+micromamba activate tfm-gsdmb
+```
 
-Shared runtime settings are defined in [pipeline_config.toml](pipeline_config.toml).
-
-The most important fields are:
-
-- `paths`: where inputs, manifests, results, and harmonised files live
-- `thresholds`: cutoffs used across SNP and haplotype analyses
-- `grouping`: tumour/control definitions and pooled-normal behaviour
-
-Before running on another machine, update all absolute paths.
-
-## 3. Shared Logic
-
-To keep scripts consistent, common operations were centralised in:
-
-- [pipeline_utils.py](pipeline_utils.py)
-- [pipeline_validation.py](pipeline_validation.py)
-- [association_runtime.py](association_runtime.py)
-
-This reduces the risk that one script applies different labelling, frequency, or control-group logic than another.
+This shared environment is convenient for documentation and portability, but it does not replace the fact that the original workflow used the three-environment split described above.
 
 ## 4. Control Definition
 
@@ -61,7 +161,17 @@ Examples include:
 
 Descriptive count plots were left as counts only when the goal is to describe composition rather than compare prevalence.
 
-## 6. Validation
+## 6. Shared Logic
+
+To keep scripts consistent, common operations were centralised in:
+
+- [pipeline_utils.py](pipeline_utils.py)
+- [pipeline_validation.py](pipeline_validation.py)
+- [association_runtime.py](association_runtime.py)
+
+This reduces the risk that one script applies different labelling, frequency, or control-group logic than another.
+
+## 7. Validation
 
 Several scripts now include lightweight validation steps such as:
 
@@ -73,22 +183,12 @@ Several scripts now include lightweight validation steps such as:
 
 These checks are intentionally simple but useful for catching broken inputs early.
 
-## 7. Recommended Practice Before Publishing
-
-Before pushing this repository to GitHub, review the following:
-
-- remove or ignore patient-level data files
-- review whether result directories should be versioned
-- replace local absolute paths if you want others to run the code
-- add a project-specific license
-- add maintainer contact and formal citation details to the README
-
 ## 8. Minimal Verification
 
 A practical lightweight verification routine is:
 
 ```bash
-python -m py_compile 07_merge_annotations.py 08_mapping.py 09_gsdmb_only.py 10_variant_stats.py 11_SNPs.py 12_stats_enrichment.py 13_permutation_testing.py 14_interactive_dashboard.py association_runtime.py pipeline_utils.py pipeline_validation.py
+python -m py_compile 07_merge_annotations.py 08_mapping.py 09_gsdmb_only.py 10_variant_stats.py 11_SNPs.py 12_stats_enrichment.py 13_permutation_testing.py 14_interactive_dashboard.py association_runtime.py pipeline_utils.py pipeline_validation.py 17_snp_association.py 18_haplotype_association.py
 bash -n 01_check_and_index.sh 05_variant_calling.sh 06_annotation.sh
 Rscript -e "parse(file='15_haplotype_stats.R')"
 ```

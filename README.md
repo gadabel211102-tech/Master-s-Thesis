@@ -2,7 +2,7 @@
 
 A reproducible analysis pipeline for targeted DNA sequencing of the **GSDMB locus and surrounding Chr17 panel**, including QC, variant calling, functional annotation, descriptive visualisation, SNP enrichment testing, clinical association analysis, and haplotype-based modelling.
 
-This repository contains the analysis code used to process targeted sequencing data from breast and endometrium cohorts across tumour and normal/control groups.
+Developed as part of a Master's thesis (TFM), this repository implements an end-to-end workflow spanning sequencing quality control, variant annotation, haplotype analysis, clinical harmonisation, and SNP-phenotype association modelling.
 
 ## What This Repository Does
 
@@ -11,46 +11,77 @@ The pipeline supports the following stages:
 - technical validation of BAM files and indexing
 - sequencing quality control and zero-coverage assessment
 - targeted variant calling and filtering
-- functional annotation with Ensembl VEP
-- consolidation of annotated variants into analysis-ready tables
-- descriptive variant landscape visualisation
-- common SNP identification and enrichment testing
-- interactive dashboard generation
-- harmonisation of clinical metadata
+- functional annotation with Ensembl VEP and pathogenicity predictors
+- variant statistics and enrichment testing
+- haplotype phasing and haplotype-based association testing
+- clinical data integration and harmonisation
 - SNP-clinical association analysis
-- haplotype phasing and haplotype-clinical association analysis
+- haplotype-clinical association analysis
+- survival analysis and interactive visualisation outputs
 
 ## Repository Structure
 
 ```text
 01_check_and_index.sh            BAM integrity checks and indexing
 02_dna_qc.sh                     DNA sequencing QC pipeline
-02b_more-qc.sh                  PASS manifest creation and zero-coverage summaries
-02c_zerocovinfo.py              Zero-coverage Excel reporting
-03_qc_visualisation.py          QC figures and panel-level visual summaries
-04_technical_audit.py           Technical audit of amplicon performance
-05_variant_calling.sh           Targeted variant calling workflow
-06_annotation.sh                Functional annotation with VEP
-07_merge_annotations.py         Merge annotated VCFs into a canonical table
-07b_variant_qc.py               Variant-level QC checks
-08_mapping.py                   Global variant landscape plot
-09_gsdmb_only.py                GSDMB-only landscape plot
-10_variant_stats.py             Descriptive consequence/impact summaries
-11_SNPs.py                      Common SNP identification and benchmarking
-12_stats_enrichment.py          Tumour-versus-control SNP enrichment testing
-13_permutation_testing.py       Permutation-based SNP comparison
-14_interactive_dashboard.py     Interactive Plotly dashboard
-15_haplotypes.sh                Haplotype phasing workflow
-15_haplotype_stats.R                Haplotype statistical analysis
-16b_excel_harmonisation.py      Clinical-data harmonisation
-17_snp_association.py           SNP-clinical association analysis
-18_haplotype_association.py     Haplotype-clinical association analysis
-pipeline_config.toml            Shared paths, thresholds, and grouping choices
-pipeline_utils.py               Shared helper functions
-pipeline_validation.py          Shared validation helpers
-association_runtime.py          Shared runtime defaults for scripts 17 and 18
-environment.yml                 Conda environment specification
+02b_more-qc.sh                   PASS manifest creation and zero-coverage summaries
+02c_zerocovinfo.py               Zero-coverage Excel reporting
+03_qc_visualisation.py           QC figures and panel-level visual summaries
+04_technical_audit.py            Technical audit of amplicon performance
+05_variant_calling.sh            Targeted variant calling workflow
+06_annotation.sh                 Functional annotation with VEP
+07_merge_annotations.py          Merge annotated VCFs into a canonical table
+07b_variant_qc.py                Variant-level QC checks
+08_mapping.py                    Global variant landscape plot
+09_gsdmb_only.py                 GSDMB-only landscape plot
+10_variant_stats.py              Descriptive consequence/impact summaries
+11_SNPs.py                       Common SNP identification and benchmarking
+12_stats_enrichment.py           Tumour-versus-control SNP enrichment testing
+13_permutation_testing.py        Permutation-based SNP comparison
+14_interactive_dashboard.py      Interactive Plotly dashboard
+15_haplotypes.sh                 Haplotype phasing workflow
+15_haplotype_stats.R             Haplotype statistical analysis
+16b_excel_harmonisation.py       Clinical-data harmonisation
+17_snp_association.py            SNP-clinical association analysis
+18_haplotype_association.py      Haplotype-clinical association analysis
+pipeline_config.toml             Shared paths, thresholds, and grouping choices
+pipeline_utils.py                Shared helper functions
+pipeline_validation.py           Shared validation helpers
+association_runtime.py           Shared runtime defaults for scripts 17 and 18
+environment.yml                  Shared conda/micromamba environment specification
+requirements.txt                 Shared pip specification for the legacy tfm_env workflow
+PIPELINE.md                      Short pipeline notes and doc pointers
 ```
+
+## Quick Start
+
+If you want the shortest practical version of the workflow, use the environments like this:
+
+1. Activate `bam-steps` for shell-based bioinformatics work.
+
+```bash
+micromamba activate bam-steps
+```
+
+2. Activate `tfm_env` for the Python analysis scripts.
+
+```bash
+source tfm_env/bin/activate
+```
+
+3. Activate `vep_env` only for annotation.
+
+```bash
+conda activate vep_env
+```
+
+4. Run by stage:
+
+- Stage 1 QC: `bam-steps` then `tfm_env`
+- Stage 2 calling: `bam-steps`
+- Stage 2 annotation: `vep_env`
+- Stages 3 and 5 analysis: `tfm_env`
+- Stage 4 phasing: `bam-steps`, then run `Rscript 15_haplotype_stats.R`
 
 ## Recommended Run Order
 
@@ -77,35 +108,198 @@ environment.yml                 Conda environment specification
 21. `17_snp_association.py`
 22. `18_haplotype_association.py`
 
-## Installation
+## Computational Environments
 
-### 1. Clone the repository
+The original workflow used **three separate environments** because bioinformatics processing, annotation, and statistical analysis rely on different toolchains.
+
+### 1. Bioinformatics Environment: `bam-steps` (micromamba)
+
+Used for shell-based genomic processing:
+
+- `01_check_and_index.sh`
+- `02_dna_qc.sh`
+- `02b_more-qc.sh`
+- `05_variant_calling.sh`
+- `15_haplotypes.sh`
+
+Create and activate it:
 
 ```bash
-git clone <your-repository-url>
-cd tfm
+micromamba create -n bam-steps samtools bcftools mosdepth -c bioconda -c conda-forge
+micromamba activate bam-steps
 ```
 
-### 2. Create the Python environment
+Deactivate when finished:
 
 ```bash
-conda env create -f environment.yml
-conda activate tfm-gsdmb
+micromamba deactivate
 ```
 
-### 3. Install external tools
+Core tools in this environment:
 
-Some parts of the pipeline also require command-line tools that are **not** installed through `environment.yml`.
+- `samtools` for BAM integrity checking and indexing
+- `bcftools` for VCF normalisation, filtering, and merging
+- `mosdepth` for per-base and per-region coverage metrics
 
-Typical external dependencies include:
+### 2. Python Analysis Environment: `tfm_env`
 
-- `samtools`
-- `bcftools`
-- `mosdepth`
-- Ion Torrent variant calling tools
-- Ensembl `vep` and its local cache/plugins
-- `beagle` for haplotype phasing
-- `Rscript` plus the R packages used in `15_haplotype_stats.R`
+Used for the Python-based analytical part of the pipeline:
+
+- `02c_zerocovinfo.py`
+- `03_qc_visualisation.py`
+- `04_technical_audit.py`
+- `07_merge_annotations.py`
+- `07b_variant_qc.py`
+- `08_mapping.py`
+- `09_gsdmb_only.py`
+- `10_variant_stats.py`
+- `11_SNPs.py`
+- `12_stats_enrichment.py`
+- `13_permutation_testing.py`
+- `14_interactive_dashboard.py`
+- `16b_excel_harmonisation.py`
+- `17_snp_association.py`
+- `18_haplotype_association.py`
+
+The original setup used a standard Python virtual environment:
+
+```bash
+python3 -m venv tfm_env
+source tfm_env/bin/activate
+pip install -r requirements.txt
+```
+
+Activate it later with:
+
+```bash
+source tfm_env/bin/activate
+```
+
+Deactivate it with:
+
+```bash
+deactivate
+```
+
+This repository also includes [environment.yml](environment.yml) as a shared dependency specification for users who prefer `conda` or `micromamba`, but the historical workflow for Python analysis was the `tfm_env` virtual environment.
+
+### 3. VEP Annotation Environment: `vep_env` (conda)
+
+Used specifically for:
+
+- `06_annotation.sh`
+
+Activate it with:
+
+```bash
+conda activate vep_env
+```
+
+Deactivate it with:
+
+```bash
+conda deactivate
+```
+
+This environment is expected to provide:
+
+- Ensembl VEP with the GRCh38 cache
+- GRCh38 reference FASTA
+- CADD resources
+- dbNSFP resources
+- any local annotation assets required by the script
+
+Note: `06_annotation.sh` unsets `PERL5LIB` and `PERL_LOCAL_LIB_ROOT` automatically to avoid WSL Perl conflicts.
+
+## Practical Execution by Stage
+
+### Stage 1. Sequencing QC
+
+```bash
+micromamba activate bam-steps
+./01_check_and_index.sh
+./02_dna_qc.sh
+./02b_more-qc.sh
+
+source tfm_env/bin/activate
+python 02c_zerocovinfo.py
+python 03_qc_visualisation.py
+python 04_technical_audit.py
+```
+
+Typical outputs:
+
+- coverage metrics
+- zero-coverage region reports
+- PCA and QC plots
+- technical audit summaries
+
+### Stage 2. Variant Calling and Annotation
+
+```bash
+micromamba activate bam-steps
+./05_variant_calling.sh
+
+conda activate vep_env
+./06_annotation.sh
+```
+
+Annotation resources used by the workflow include:
+
+- gnomAD allele frequencies
+- CADD
+- SIFT
+- PolyPhen-2
+- REVEL
+- DANN
+- COSMIC context where available in the annotation resources
+
+### Stage 3. Variant Processing and Enrichment
+
+```bash
+source tfm_env/bin/activate
+python 07_merge_annotations.py
+python 07b_variant_qc.py
+python 08_mapping.py
+python 09_gsdmb_only.py
+python 10_variant_stats.py
+python 11_SNPs.py
+python 12_stats_enrichment.py
+python 13_permutation_testing.py
+python 14_interactive_dashboard.py
+```
+
+This stage produces:
+
+- consolidated annotated variant tables
+- variant QC summaries
+- population-frequency filtered SNP summaries
+- enrichment and permutation results
+- interactive dashboards and descriptive plots
+
+### Stage 4. Haplotype Analysis
+
+```bash
+micromamba activate bam-steps
+./15_haplotypes.sh
+
+Rscript 15_haplotype_stats.R
+```
+
+This stage covers:
+
+- BEAGLE phasing
+- haplotype frequency estimation
+- haplotype association modelling
+
+### Stage 5. Clinical Harmonisation and Association Modelling
+
+```bash
+source tfm_env/bin/activate
+python 16b_excel_harmonisation.py
+python 17_snp_association.py
+python 18_haplotype_association.py
+```
 
 ## Configuration
 
@@ -113,8 +307,8 @@ Shared paths and thresholds are defined in [pipeline_config.toml](pipeline_confi
 
 Important points:
 
-- the current config uses **absolute local paths** from the original analysis environment
-- before reusing the pipeline on another machine, update those paths first
+- the current config uses absolute paths from the original analysis machine
+- update these paths before reusing the pipeline elsewhere
 - pooled-control behaviour is also defined there
 
 Current grouping logic includes:
@@ -151,6 +345,8 @@ The repository now includes a shared reproducibility layer:
 - [pipeline_utils.py](pipeline_utils.py) centralises shared transformations
 - [pipeline_validation.py](pipeline_validation.py) centralises common integrity checks
 - [association_runtime.py](association_runtime.py) keeps scripts 17 and 18 aligned
+- [environment.yml](environment.yml) provides a shared conda/micromamba environment definition
+- [requirements.txt](requirements.txt) supports the legacy `tfm_env` virtual-environment workflow
 
 Additional details are described in [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
 
@@ -164,16 +360,6 @@ If the repository is made public, it is usually best to:
 - exclude large derived result folders unless they are intentionally released
 - provide only de-identified example inputs where appropriate
 
-## Suggested Citation
+## Use and Reuse
 
-If you plan to publish or share this repository publicly, add a formal citation section here once the manuscript title, author list, and year are finalised.
-
-Example placeholder:
-
-```text
-Author(s). Title of study or repository. Year. GitHub repository.
-```
-
-## Contact
-
-For repository-specific questions, add the preferred contact details for the project maintainer here before publishing the repository.
+This repository is intended to document the analytical workflow clearly enough for academic review, reproducibility, and supervised reuse. When reused on another machine or dataset, update local paths in `pipeline_config.toml` and verify the required external bioinformatics tools are available.

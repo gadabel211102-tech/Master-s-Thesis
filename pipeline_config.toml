@@ -1,0 +1,22 @@
+[paths]
+project_root = "/home/gadeaalonsoj/tfm"
+results_dir = "/home/gadeaalonsoj/tfm/gsdmb_final_results"
+annotated_report = "/home/gadeaalonsoj/tfm/gsdmb_final_results/GSDMB_Annotated_Report_Fixed.xlsx"
+harmonised_master = "/home/gadeaalonsoj/tfm/MASTER_SNP_plus_clinical__HARMONISED_B_v4.xlsx"
+haplotype_phased = "/home/gadeaalonsoj/tfm/gsdmb_final_results/19_haplotype_phased/phased_genotypes.tsv"
+haplotype_results = "/home/gadeaalonsoj/tfm/gsdmb_final_results/19_haplo_stats_results/19_Haplotype_Results_v7_blocks_and_genes.xlsx"
+manifests_dir = "/home/gadeaalonsoj/tfm/manifests"
+
+[thresholds]
+min_nfe_af = 0.01
+fdr_threshold = 0.10
+min_carriers = 5
+min_hap_freq = 0.02
+min_events_logistic = 10
+n_permutations = 10000
+random_seed = 42
+
+[grouping]
+pool_normals_as_control = true
+internal_control_tissue = "Healthy"
+output_control_label = "Control"
