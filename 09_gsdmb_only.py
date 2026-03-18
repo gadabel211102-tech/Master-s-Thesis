@@ -26,6 +26,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from figure_style import COMPARATIVE_TAG, IMPACT_COLORS
 from pipeline_utils import compute_carrier_percentage, extract_rsid, find_col, get_paths
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_required_columns
 
@@ -106,13 +107,13 @@ def generate_gsdmb_map():
         col=tis_c,
         kind='scatter',
         markers=marker_map,
-        palette="flare",
+        palette=IMPACT_COLORS,
         s=150,
         alpha=0.8,
         edgecolor="black",
         height=5,
         aspect=1.4,
-        facet_kws={'sharex': True, 'sharey': False}
+        facet_kws={'sharex': True, 'sharey': True}
     )
 
     label_offsets = {
@@ -139,14 +140,15 @@ def generate_gsdmb_map():
         )
 
     g.set_axis_labels("Position on Chr17 (Mb)", "Carrier Percentage of Samples")
-    g.set_titles("{row_name} | {col_name}", fontweight='bold')
+    g.set_titles("{row_name} Cohort | {col_name} Samples", fontweight='bold')
 
     for ax in g.axes.flat:
+        ax.set_ylim(0, 100)
         ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x/1e6:.2f}'))
         ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, p: f'{y:.0f}%'))
 
     plt.subplots_adjust(top=0.9)
-    g.fig.suptitle('GSDMB Mutation Landscape: Comparison by Cohort and Tissue', fontsize=18, fontweight='bold')
+    g.fig.suptitle(f'Genomic Distribution of GSDMB Variants Across Cohorts and Tissues [{COMPARATIVE_TAG}]', fontsize=18, fontweight='bold')
 
     plt.savefig(output_image, dpi=300, bbox_inches='tight')
     print(f"SUCCESS: GSDMB-exclusive map saved to: {output_image}")

@@ -81,9 +81,10 @@ Typical scripts run here:
 - `12_stats_enrichment.py`
 - `13_permutation_testing.py`
 - `14_interactive_dashboard.py`
-- `16b_excel_harmonisation.py`
+- `16_excel_harmonisation.py`
 - `17_snp_association.py`
 - `18_haplotype_association.py`
+- `19_1000g_haplotype_comparison.py`
 
 ### `vep_env`
 
@@ -116,6 +117,13 @@ python3 -m venv tfm_env
 source tfm_env/bin/activate
 pip install -r requirements.txt
 ```
+
+
+The `19_1000g_haplotype_comparison.py` step additionally requires:
+
+- an indexed phased 1000 Genomes VCF or BCF
+- a matching 1000 Genomes sample panel containing sample, population, and super-population labels
+- the `pysam` dependency, now included in both `requirements.txt` and `environment.yml`
 
 ### `environment.yml`
 
@@ -188,7 +196,7 @@ These checks are intentionally simple but useful for catching broken inputs earl
 A practical lightweight verification routine is:
 
 ```bash
-python -m py_compile 07_merge_annotations.py 08_mapping.py 09_gsdmb_only.py 10_variant_stats.py 11_SNPs.py 12_stats_enrichment.py 13_permutation_testing.py 14_interactive_dashboard.py association_runtime.py pipeline_utils.py pipeline_validation.py 17_snp_association.py 18_haplotype_association.py
+python -m py_compile 07_merge_annotations.py 08_mapping.py 09_gsdmb_only.py 10_variant_stats.py 11_SNPs.py 12_stats_enrichment.py 13_permutation_testing.py 14_interactive_dashboard.py association_runtime.py pipeline_utils.py pipeline_validation.py 17_snp_association.py 18_haplotype_association.py 19_1000g_haplotype_comparison.py
 bash -n 01_check_and_index.sh 05_variant_calling.sh 06_annotation.sh
 Rscript -e "parse(file='15_haplotype_stats.R')"
 ```

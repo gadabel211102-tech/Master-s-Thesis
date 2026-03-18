@@ -22,6 +22,7 @@ import plotly.express as px
 import os
 import warnings
 
+from figure_style import COMPARATIVE_TAG, DASHBOARD_THEME, DESCRIPTIVE_TAG, IMPACT_COLORS, QUALITATIVE_COLORBLIND_SEQUENCE, SEQUENTIAL_COLORBLIND_SCALE, arm_color, cohort_color
 from pipeline_utils import combine_gnomad_nfe, find_col, get_paths, standardize_cohort_labels, standardize_tissue_labels
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_required_columns
 warnings.filterwarnings('ignore')
@@ -31,6 +32,21 @@ PATHS = get_paths()
 BASE_PATH = str(PATHS["results_dir"])
 INPUT_FILE = str(PATHS["annotated_report"])
 OUTPUT_HTML = str(PATHS["results_dir"] / "14_Interactive_Dashboard.html")
+
+
+def tagged_title(title, tag):
+    """Append a short interpretive tag to a dashboard plot title."""
+    return f"{title} [{tag}]"
+
+
+def cohort_color_map(values):
+    """Build a stable Plotly colour map for cohort labels present in the data."""
+    return {val: cohort_color(val) for val in values}
+
+
+def tissue_color_map(values):
+    """Build a stable Plotly colour map for tumour/control style groupings."""
+    return {val: arm_color(val) for val in values}
 
 
 def create_interactive_scatter(df, sym_c, pos_c, imp_c, coh_c, tis_c):
@@ -44,7 +60,7 @@ def create_interactive_scatter(df, sym_c, pos_c, imp_c, coh_c, tis_c):
         facet_row=coh_c,
         facet_col=tis_c,
         hover_data=['HGVSp', 'Consequence', 'Sample', 'gnomAD_NFE_Source'],
-        title='Interactive Genomic Landscape',
+        title=tagged_title('Interactive Genomic Landscape', DESCRIPTIVE_TAG),
         labels={
             pos_c: 'Genomic Position (Chr17)',
             'gnomAD_NFE_AF': 'gnomAD NFE AF',
@@ -52,7 +68,7 @@ def create_interactive_scatter(df, sym_c, pos_c, imp_c, coh_c, tis_c):
             imp_c: 'Impact'
         },
         height=800,
-        color_discrete_sequence=px.colors.qualitative.Set3
+        color_discrete_sequence=QUALITATIVE_COLORBLIND_SEQUENCE
     )
 
     fig.update_layout(
@@ -77,7 +93,7 @@ def create_variant_sunburst(df, sym_c, imp_c, con_c):
         values='Count',
         title='Variant Hierarchy: Gene → Impact → Consequence',
         color='Count',
-        color_continuous_scale='RdYlBu_r',
+        color_continuous_scale=SEQUENTIAL_COLORBLIND_SCALE,
         height=700
     )
 
@@ -96,7 +112,7 @@ def create_cohort_comparison_box(df, coh_c, tis_c):
         x=coh_c,
         y='Variant_Count',
         color=tis_c,
-        title='Variant Burden Distribution by Cohort and Tissue',
+        title=tagged_title('Variant Burden Distribution by Cohort and Tissue', DESCRIPTIVE_TAG),
         labels={
             coh_c: 'Cancer Type',
             'Variant_Count': 'Number of Variants',
@@ -105,7 +121,7 @@ def create_cohort_comparison_box(df, coh_c, tis_c):
         points='all',
         hover_data=['Sample'],
         height=500,
-        color_discrete_map={'Tumour': '#e74c3c', 'Healthy': '#3498db'}
+        color_discrete_map=tissue_color_map(df[tis_c].dropna().unique())
     )
 
     fig.update_layout(
@@ -128,7 +144,7 @@ def create_impact_consequence_heatmap(df, imp_c, con_c):
         z=pivot_data.values,
         x=pivot_data.columns,
         y=pivot_data.index,
-        colorscale='YlOrRd',
+        colorscale=SEQUENTIAL_COLORBLIND_SCALE,
         text=pivot_data.values,
         texttemplate='%{text}',
         textfont={"size": 10},
@@ -137,7 +153,7 @@ def create_impact_consequence_heatmap(df, imp_c, con_c):
     ))
 
     fig.update_layout(
-        title='Impact vs Consequence Heatmap',
+        title=tagged_title('Impact vs Consequence Heatmap', DESCRIPTIVE_TAG),
         xaxis_title='Functional Consequence',
         yaxis_title='Variant Impact',
         height=500,
@@ -183,11 +199,11 @@ def create_gene_coverage_timeline(df, sym_c, sam_c, coh_c):
         x='Gene',
         y='Sample_Percentage',
         color='Cohort',
-        title='Top 10 Genes: Sample Carrier Percentage by Cohort',
+        title=tagged_title('Top 10 Genes: Sample Carrier Percentage by Cohort', COMPARATIVE_TAG),
         labels={'Sample_Percentage': 'Carrier Samples (%)', 'Gene': 'Gene'},
         barmode='group',
         height=500,
-        color_discrete_sequence=px.colors.qualitative.Bold,
+        color_discrete_map=cohort_color_map(timeline_df['Cohort'].dropna().unique()),
         hover_data={
             'Sample_Count': True,
             'Cohort_Total': True,
@@ -196,7 +212,7 @@ def create_gene_coverage_timeline(df, sym_c, sam_c, coh_c):
     )
 
     fig.update_layout(font=dict(size=12))
-    fig.update_yaxes(ticksuffix='%')
+    fig.update_yaxes(range=[0, 100], ticksuffix='%')
 
     return fig
 
@@ -248,7 +264,7 @@ def create_3d_scatter(df, pos_c, sym_c, imp_c):
             color=df_sample[imp_c].map({
                 'HIGH': 0, 'MODERATE': 1, 'MODIFIER': 2, 'LOW': 3
             }),
-            colorscale='RdYlGn_r',
+            colorscale=[[0.0, IMPACT_COLORS['HIGH']], [0.33, IMPACT_COLORS['MODERATE']], [0.66, IMPACT_COLORS['MODIFIER']], [1.0, IMPACT_COLORS['LOW']]],
             showscale=True,
             colorbar=dict(
                 title="Impact",
@@ -299,20 +315,20 @@ def create_interactive_table(df, sym_c, pos_c, imp_c, con_c):
     fig = go.Figure(data=[go.Table(
         header=dict(
             values=list(table_df.columns),
-            fill_color='#3498db',
+            fill_color=DASHBOARD_THEME['table_header'],
             font=dict(color='white', size=12),
             align='left'
         ),
         cells=dict(
             values=[table_df[col] for col in table_df.columns],
-            fill_color=[['#ecf0f1', 'white'] * (len(table_df)//2 + 1)],
+            fill_color=[[DASHBOARD_THEME['table_alt'], 'white'] * (len(table_df)//2 + 1)],
             align='left',
             font=dict(size=11)
         )
     )])
 
     fig.update_layout(
-        title='Top 100 Variants (Sortable Table)',
+        title=tagged_title('Top 100 Variants (Sortable Table)', DESCRIPTIVE_TAG),
         height=600
     )
 
@@ -359,7 +375,7 @@ def create_snp_benchmarking(df_snp):
     df_long['Tissue'] = df_long['Group'].str.split('_').str[1]
     df_long = df_long[df_long['Study_Frequency_%'] > 0].copy()
 
-    colour_map = {'Tumour': '#e74c3c', 'Healthy': '#3498db'}
+    colour_map = tissue_color_map(df_long['Tissue'].dropna().unique())
 
     fig = px.scatter(
         df_long,
@@ -378,7 +394,7 @@ def create_snp_benchmarking(df_snp):
             'Group': False
         },
         color_discrete_map=colour_map,
-        title='SNP Frequency Benchmarking: Study Cohort vs. gnomAD Population',
+        title=tagged_title('SNP Frequency Benchmarking: Study Cohort vs. gnomAD Population', COMPARATIVE_TAG),
         labels={
             'gnomAD_NFE_AF': 'gnomAD NFE AF',
             'Study_Frequency_%': 'Carrier Frequency in Study (%)',
@@ -401,6 +417,8 @@ def create_snp_benchmarking(df_snp):
         legend_title='Tissue / Cohort',
         font=dict(size=11)
     )
+    fig.update_xaxes(range=[0, 1], tickformat='.2f')
+    fig.update_yaxes(range=[0, 100], ticksuffix='%')
 
     return fig
 
@@ -450,18 +468,19 @@ def create_snp_heatmap(df_snp):
         z=z_data,
         x=x_labels,
         y=y_labels,
-        colorscale='YlOrRd',
+        colorscale=SEQUENTIAL_COLORBLIND_SCALE,
         text=[[f'{v:.1f}%' for v in row] for row in z_data],
         texttemplate='%{text}',
         textfont=dict(size=9),
         hovertext=hover_text,
         hovertemplate='%{hovertext}<extra></extra>',
         colorbar=dict(title='Carrier<br>Frequency (%)'),
-        zmin=0
+        zmin=0,
+        zmax=100
     ))
 
     fig.update_layout(
-        title='Top 40 SNPs: Carrier Frequency Across Cohort Groups',
+        title=tagged_title('Top 40 SNPs: Carrier Frequency Across Cohort Groups', COMPARATIVE_TAG),
         xaxis_title='Cohort / Tissue Group',
         yaxis_title='SNP (rsID / Gene)',
         height=900,
@@ -498,7 +517,7 @@ def create_snp_consequence_breakdown(df_snp):
         y='Consequence',
         color='SYMBOL',
         orientation='h',
-        title='SNP Distribution by Functional Consequence and Gene',
+        title=tagged_title('SNP Distribution by Functional Consequence and Gene', DESCRIPTIVE_TAG),
         labels={
             'Count': 'Number of Unique SNPs',
             'Consequence': 'Functional Consequence',
@@ -600,23 +619,22 @@ def create_dashboard():
             <div class="section-divider">
                 <h2 class="section-heading">SNP Analysis (Script 11)</h2>
                 <p class="section-desc">
-                    Established SNPs defined as variants with gnomAD NFE allele frequency above 1%.
-                    Carrier frequencies are calculated per cohort and tissue group across all samples.
+                    Established SNPs defined as variants with gnomAD NFE allele frequency above 1%. Comparative SNP panels use percentage-scaled frequencies; descriptive SNP panels remain explicitly count-based.
                 </p>
             </div>
 
             <div class="plot-section">
-                <h2 class="plot-title">8. SNP Frequency Benchmarking vs. gnomAD Population</h2>
+                <h2 class="plot-title">8. SNP Frequency Benchmarking vs. gnomAD Population [Comparative]</h2>
                 {fig8.to_html(include_plotlyjs=False, div_id='plot8')}
             </div>
 
             <div class="plot-section">
-                <h2 class="plot-title">9. SNP Carrier Frequency Heatmap (Top 40)</h2>
+                <h2 class="plot-title">9. SNP Carrier Frequency Heatmap (Top 40) [Comparative]</h2>
                 {fig9.to_html(include_plotlyjs=False, div_id='plot9')}
             </div>
 
             <div class="plot-section">
-                <h2 class="plot-title">10. SNP Distribution by Functional Consequence</h2>
+                <h2 class="plot-title">10. SNP Distribution by Functional Consequence [Descriptive]</h2>
                 {fig10.to_html(include_plotlyjs=False, div_id='plot10')}
             </div>"""
 
@@ -634,7 +652,7 @@ def create_dashboard():
                 background-color: #f5f5f5;
             }}
             .header {{
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                background: linear-gradient(135deg, {DASHBOARD_THEME['header_start']} 0%, {DASHBOARD_THEME['header_end']} 100%);
                 color: white;
                 padding: 30px;
                 text-align: center;
@@ -664,7 +682,7 @@ def create_dashboard():
             }}
             .plot-title {{
                 color: #333;
-                border-bottom: 3px solid #667eea;
+                border-bottom: 3px solid {DASHBOARD_THEME['section_accent']};
                 padding-bottom: 10px;
                 margin-bottom: 20px;
                 font-size: 1.5em;
@@ -685,14 +703,14 @@ def create_dashboard():
             .stat-number {{
                 font-size: 2.5em;
                 font-weight: bold;
-                color: #667eea;
+                color: {DASHBOARD_THEME['card_number']};
             }}
             .stat-label {{
                 color: #666;
                 margin-top: 10px;
             }}
             .section-divider {{
-                background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+                background: linear-gradient(135deg, {DASHBOARD_THEME['section_start']} 0%, {DASHBOARD_THEME['section_end']} 100%);
                 color: white;
                 padding: 20px 30px;
                 border-radius: 8px;
@@ -749,37 +767,37 @@ def create_dashboard():
             </div>
 
             <div class="plot-section">
-                <h2 class="plot-title">1. Genomic Landscape Explorer</h2>
+                <h2 class="plot-title">1. Genomic Landscape Explorer [Descriptive]</h2>
                 {fig1.to_html(include_plotlyjs='cdn', div_id='plot1')}
             </div>
 
             <div class="plot-section">
-                <h2 class="plot-title">2. Variant Hierarchy (Sunburst)</h2>
+                <h2 class="plot-title">2. Variant Hierarchy (Sunburst) [Descriptive]</h2>
                 {fig2.to_html(include_plotlyjs=False, div_id='plot2')}
             </div>
 
             <div class="plot-section">
-                <h2 class="plot-title">3. Variant Burden by Cohort</h2>
+                <h2 class="plot-title">3. Variant Burden by Cohort [Descriptive]</h2>
                 {fig3.to_html(include_plotlyjs=False, div_id='plot3')}
             </div>
 
             <div class="plot-section">
-                <h2 class="plot-title">4. Impact vs Consequence Matrix</h2>
+                <h2 class="plot-title">4. Impact vs Consequence Matrix [Descriptive]</h2>
                 {fig4.to_html(include_plotlyjs=False, div_id='plot4')}
             </div>
 
             <div class="plot-section">
-                <h2 class="plot-title">5. Gene Mutation Frequency</h2>
+                <h2 class="plot-title">5. Gene Mutation Frequency [Comparative]</h2>
                 {fig5.to_html(include_plotlyjs=False, div_id='plot5')}
             </div>
 
             <div class="plot-section">
-                <h2 class="plot-title">6. 3D Variant Explorer</h2>
+                <h2 class="plot-title">6. 3D Variant Explorer [Descriptive]</h2>
                 {fig6.to_html(include_plotlyjs=False, div_id='plot6')}
             </div>
 
             <div class="plot-section">
-                <h2 class="plot-title">7. Variant Data Table (Top 100)</h2>
+                <h2 class="plot-title">7. Variant Data Table (Top 100) [Descriptive]</h2>
                 {fig7.to_html(include_plotlyjs=False, div_id='plot7')}
             </div>
 

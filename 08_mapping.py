@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from pipeline_utils import compute_carrier_percentage, extract_rsid, find_col, get_paths
+from figure_style import COMPARATIVE_TAG, QUALITATIVE_COLORBLIND_SEQUENCE
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_required_columns
 
 # Centralised path configuration keeps this plotting script aligned with the
@@ -82,6 +83,7 @@ def generate_clean_all_impact_map():
         .reset_index()
     )
     variant_counts = variant_counts.merge(variant_labels, on=group_cols, how='left')
+    sample_sizes = df.groupby([coh_c, tis_c])[sam_c].nunique().to_dict()
 
     # Plot all variants in the same genomic coordinate system, while using marker
     # shape to distinguish impact classes and colour to distinguish genes.
@@ -112,10 +114,10 @@ def generate_clean_all_impact_map():
         s=120,
         alpha=0.7,
         edgecolor="black",
-        palette="husl",
+        palette=QUALITATIVE_COLORBLIND_SEQUENCE,
         height=5,
         aspect=1.6,
-        facet_kws={'sharex': True, 'sharey': False}
+        facet_kws={'sharex': True, 'sharey': True}
     )
 
     # Only the higher-priority consequence classes receive labels, and those
@@ -146,14 +148,18 @@ def generate_clean_all_impact_map():
     # Present coordinates in Mb and frequencies as percentages so the figure is
     # immediately publication-friendly without requiring post-processing.
     g.set_axis_labels("Genomic Position on Chr17 (Mb)", "Carrier Percentage of Samples")
-    g.set_titles("{row_name} | {col_name}", fontweight='bold')
+
+    for (cohort_label, tissue_label), ax in g.axes_dict.items():
+        n_samples = sample_sizes.get((cohort_label, tissue_label), 0)
+        ax.set_title(f"{cohort_label} Cohort | {tissue_label} Samples\n(n={n_samples})", fontweight='bold')
 
     for ax in g.axes.flat:
+        ax.set_ylim(0, 100)
         ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x/1e6:.2f}'))
         ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, p: f'{y:.0f}%'))
 
     plt.subplots_adjust(top=0.92)
-    g.fig.suptitle('Landscape of Variants', fontsize=18, fontweight='bold')
+    g.fig.suptitle(f'Genomic Distribution of Variants Across Cohorts and Tissues [{COMPARATIVE_TAG}]', fontsize=18, fontweight='bold')
 
     plt.savefig(output_image, dpi=300, bbox_inches='tight')
     print(f"SUCCESS: Clean map with all impacts saved to: {output_image}")

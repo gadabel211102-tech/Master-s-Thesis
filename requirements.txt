@@ -10,3 +10,4 @@ plotly
 biopython
 tqdm
 scikit-learn
+pysam

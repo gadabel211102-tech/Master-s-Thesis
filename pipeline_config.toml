@@ -6,6 +6,7 @@ harmonised_master = "/home/gadeaalonsoj/tfm/MASTER_SNP_plus_clinical__HARMONISED
 haplotype_phased = "/home/gadeaalonsoj/tfm/gsdmb_final_results/19_haplotype_phased/phased_genotypes.tsv"
 haplotype_results = "/home/gadeaalonsoj/tfm/gsdmb_final_results/19_haplo_stats_results/19_Haplotype_Results_v7_blocks_and_genes.xlsx"
 manifests_dir = "/home/gadeaalonsoj/tfm/manifests"
+thousand_genomes_results = "/home/gadeaalonsoj/tfm/gsdmb_final_results/20_1000g_haplotype_comparison"
 
 [thresholds]
 min_nfe_af = 0.01

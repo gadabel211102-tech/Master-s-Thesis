@@ -129,6 +129,7 @@ from scipy import stats
 from scipy.stats import false_discovery_control, fisher_exact, mannwhitneyu
 
 from association_runtime import script17_defaults
+from figure_style import COMPARATIVE_TAG, COHORT_COLORS, GENOTYPE_COLORS, IMPACT_COLORS, arm_color, cohort_color
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_percentage_columns
 
 # lifelines optional — only needed for survival plots
@@ -152,6 +153,7 @@ warnings.filterwarnings("ignore", message=".*More than 20 figures.*")
 DEFAULT_GSDMB  = Path("/home/gadeaalonsoj/tfm/gsdmb_final_results/GSDMB_Annotated_Report_Fixed.xlsx")
 DEFAULT_MASTER = Path("/home/gadeaalonsoj/tfm/MASTER_SNP_plus_clinical__HARMONISED_B_v4.xlsx")
 DEFAULT_OUT    = Path("/home/gadeaalonsoj/tfm/gsdmb_final_results/")
+DEFAULT_VARIANT_WHITELIST = Path("/home/gadeaalonsoj/tfm/gsdmb_final_results/11_Master_Unique_SNP_Summary.xlsx")
 
 # Pass-BAM manifests — one file per cohort, listing QC-passed BAMs
 # These are the ground truth for which samples have actually been sequenced.
@@ -385,8 +387,48 @@ def _zscore(series: pd.Series) -> pd.Series:
 
 # ── DATA LOADING & MERGING ────────────────────────────────────────────────────
 
+def _ki67_fraction_from_pct(val) -> Optional[float]:
+    if pd.isna(val):
+        return None
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return None
+    return round(v / 100.0, 4) if 0.0 <= v <= 100.0 else None
+
+
+def _build_variant_ids(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
+    rsid = df["Existing_variation"].astype(str).str.extract(r"(rs\d+)", expand=False)
+    fallback = df["SYMBOL"].astype(str) + ":" + df["HGVSp"].astype(str)
+    base_id = rsid.fillna(fallback)
+    pos = pd.to_numeric(df["POS"], errors="coerce").astype("Int64").astype(str)
+    allele_suffix = pos + "_" + df["REF"].astype(str).str.strip() + ">" + df["ALT"].astype(str).str.strip()
+    variant_id = base_id.copy()
+    ambiguous = rsid.notna() & rsid.duplicated(keep=False)
+    variant_id.loc[ambiguous] = variant_id.loc[ambiguous] + "|" + allele_suffix.loc[ambiguous]
+    return variant_id, base_id
+
+
+def _load_variant_whitelist(path: Optional[Path]) -> Optional[set[str]]:
+    if path is None:
+        return None
+    whitelist_path = Path(path)
+    if not whitelist_path.exists():
+        raise FileNotFoundError(f"Variant whitelist not found: {whitelist_path}")
+    df = pd.read_excel(whitelist_path)
+    if "Variant_ID" not in df.columns:
+        raise ValueError(f"Variant whitelist is missing required Variant_ID column: {whitelist_path}")
+    allowed = {
+        str(v).strip()
+        for v in df["Variant_ID"]
+        if pd.notna(v) and str(v).strip()
+    }
+    return allowed or None
+
+
 def load_and_merge(gsdmb_path: Path, master_path: Path,
-                   manifest_paths: Optional[Dict[str, Path]] = None) -> pd.DataFrame:
+                   manifest_paths: Optional[Dict[str, Path]] = None,
+                   whitelist_path: Optional[Path] = None) -> pd.DataFrame:
     """
     Load GSDMB variant report + clinical master; join on snp_code.
     Adds derived clinical columns with _DERIVED suffix.
@@ -412,10 +454,8 @@ def load_and_merge(gsdmb_path: Path, master_path: Path,
     gsdmb["Tissue"] = gsdmb["Tissue"].astype(str).str.strip().replace(
         {"Normal": "Healthy", "Control": "Healthy", "Tumor": "Tumour"}
     )
+    gsdmb["Variant_ID"], gsdmb["Variant_ID_Base"] = _build_variant_ids(gsdmb)
     gsdmb["rsID"] = gsdmb["Existing_variation"].astype(str).str.extract(r"(rs\d+)")
-    gsdmb["Variant_ID"] = gsdmb["rsID"].fillna(
-        gsdmb["SYMBOL"].astype(str) + ":" + gsdmb["HGVSp"].astype(str)
-    )
     # Use gnomAD NFE AF with exome-first, genome-fallback logic
     if "gnomADg_NFE_AF" not in gsdmb.columns:
         raise ValueError("Missing required gnomADg_NFE_AF column in GSDMB report")
@@ -429,6 +469,13 @@ def load_and_merge(gsdmb_path: Path, master_path: Path,
     )
     gsdmb = gsdmb[gsdmb["gnomAD_NFE_AF"] > MIN_NFE_AF].copy()
     print(f"      {len(gsdmb)} rows after gnomAD NFE AF > {MIN_NFE_AF} filter")
+
+    allowed_variants = _load_variant_whitelist(whitelist_path)
+    if allowed_variants:
+        before = len(gsdmb)
+        keep_mask = gsdmb["Variant_ID"].isin(allowed_variants) | gsdmb["Variant_ID_Base"].isin(allowed_variants)
+        gsdmb = gsdmb[keep_mask].copy()
+        print(f"      {len(gsdmb)} rows after thesis SNP whitelist filter ({before} -> {len(gsdmb)})")
 
     print("[2/4] Loading harmonised clinical master …")
     master = pd.read_excel(master_path, sheet_name="harmonised_plus_canon")
@@ -471,54 +518,42 @@ def load_and_merge(gsdmb_path: Path, master_path: Path,
 
     # ── Derived columns ──────────────────────────────────────────────────────
     # Breast tumour
-    master_dna["BREAST_RECURRENCE_DERIVED"] = master_dna["clin_dcs__Recaida/Progresión"].apply(_derive_breast_recurrence)
+    master_dna["BREAST_RECURRENCE_DERIVED"] = master_dna["clin_dcs__Recaida/Progresi\u00f3n"].apply(_derive_breast_recurrence)
     master_dna["BREAST_EXITUS_DERIVED"]     = master_dna["clin_dcs__Exitus"].apply(_derive_breast_exitus)
     master_dna["BREAST_METASTASIS_DERIVED"] = master_dna["clin_dcs__MTxDISTANCIA"].apply(_derive_breast_metastasis)
     master_dna["BREAST_HER2_SUBTYPE"]       = master_dna["clin_her2__DX"].apply(_derive_her2_subtype)
     master_dna["BREAST_ER_BIN"]             = master_dna["canon__er_status"].map({"Positive": 1, "Negative": 0})
     master_dna["BREAST_PR_BIN"]             = master_dna["canon__pr_status"].map({"Positive": 1, "Negative": 0})
-    master_dna["BREAST_KI67_NUMERIC"]       = master_dna["clin_dcs__KI67"].apply(_derive_ki67_numeric)
-    master_dna["BREAST_OS_MONTHS_DERIVED"]  = master_dna.apply(_derive_breast_os, axis=1)
-    master_dna["BREAST_GRADE_NUMERIC"]      = pd.to_numeric(master_dna["clin_dcs__GRADO"], errors="coerce")
+    master_dna["BREAST_KI67_NUMERIC"]       = master_dna["canon__ki67_pct"].apply(_ki67_fraction_from_pct)
+    breast_os_raw = master_dna["canon__os_months"] if "canon__os_months" in master_dna.columns else pd.Series(np.nan, index=master_dna.index)
+    master_dna["BREAST_OS_MONTHS_DERIVED"]  = pd.to_numeric(breast_os_raw, errors="coerce").combine_first(master_dna.apply(_derive_breast_os, axis=1))
+    master_dna["BREAST_GRADE_NUMERIC"]      = pd.to_numeric(master_dna["canon__grade"], errors="coerce")
     master_dna["BREAST_P53_NUMERIC"]        = pd.to_numeric(master_dna["clin_dcs__p53"], errors="coerce")
-    master_dna["BREAST_BMI_NUMERIC"]        = pd.to_numeric(master_dna["clin_dcs__BMI"], errors="coerce")
+    master_dna["BREAST_BMI_NUMERIC"]        = pd.to_numeric(master_dna["canon__bmi"], errors="coerce")
     master_dna["BREAST_MENARCHE_NUMERIC"]   = pd.to_numeric(master_dna["canon__menarche_age"], errors="coerce")
     master_dna["BREAST_MENOPAUSE_NUMERIC"]  = pd.to_numeric(master_dna["canon__menopause_age"], errors="coerce")
-    # Breast DX type (CDI vs CDIS vs other)
     master_dna["BREAST_DX_TYPE"] = master_dna["clin_dcs__Dx"].apply(
         lambda x: "CDI" if pd.notna(x) and "CDI" in str(x).upper() and "CDIS" not in str(x).upper()
         else ("CDIS" if pd.notna(x) and "CDIS" in str(x).upper() else (str(x).strip() if pd.notna(x) else None))
     )
-    # Any metastasis binary: SI (distant) OR NO-LOCAL (local) = 1, NO = 0
-    # Replaces the broken BREAST_LOCAL_MET_BIN which incorrectly grouped
-    # distant metastasis (SI) with no metastasis (NO) as the reference.
     master_dna["BREAST_ANY_METASTASIS_BIN"] = master_dna["clin_dcs__MTxDISTANCIA"].map(
         {"NO": 0, "NO-LOCAL": 1, "SI": 1}
     )
 
-    # Endometrial AU tumour
-    master_dna["ENDO_FIGO_NUMERIC"]         = master_dna["clin_au_endo__FIGO_STAGE"].apply(_derive_figo_numeric)
-    master_dna["ENDO_GRADE_NUMERIC"]        = master_dna["clin_au_endo__GRADE"].apply(_derive_endo_grade)
-    master_dna["ENDO_LVSI_BIN"]             = master_dna["clin_au_endo__LVSI"].map({"YES": 1, "NO": 0})
-    master_dna["ENDO_MYOINV_BIN"]           = master_dna["clin_au_endo__MYOMETRIAL_INFILTRATION"].map({"<50%": 0, ">50%": 1})
+    # Endometrial tumour
+    master_dna["ENDO_FIGO_NUMERIC"]         = master_dna["canon__figo_stage"].apply(_derive_figo_numeric)
+    master_dna["ENDO_GRADE_NUMERIC"]        = pd.to_numeric(master_dna["canon__grade"], errors="coerce")
+    master_dna["ENDO_LVSI_BIN"]             = master_dna["canon__lvsi"].map({"Yes": 1, "No": 0})
+    master_dna["ENDO_MYOINV_BIN"]           = master_dna["canon__myometrial_invasion"].map({"<50%": 0, ">50%": 1})
     master_dna["ENDO_MSI_BIN"]              = master_dna["canon__msi_status"].map({"Unstable": 1, "Stable": 0})
     master_dna["ENDO_NEEC_BIN"]             = master_dna["clin_au_endo__HISTOLOGY_GROUP"].map({"NEEC": 1, "EEC": 0})
-    master_dna["ENDO_PD_BIN"]               = master_dna["clin_au_endo__PD_STATUS"].map({"PD": 1, "NO PD": 0})
-    master_dna["ENDO_EXITUS_BIN"]           = master_dna["clin_au_endo__EXITUS"].map({"YES": 1, "NO": 0})
+    master_dna["ENDO_PD_BIN"]               = pd.to_numeric(master_dna.get("canon__pd_flag", pd.Series(pd.NA, index=master_dna.index)), errors="coerce")
+    master_dna["ENDO_EXITUS_BIN"]           = pd.to_numeric(master_dna.get("canon__exitus_flag", pd.Series(pd.NA, index=master_dna.index)), errors="coerce")
     master_dna["ENDO_EXITUS_DISEASE_BIN"]   = master_dna["clin_au_endo__EXITUS_DISEASE"].map({"YES": 1, "NO": 0})
-    master_dna["ENDO_RISK_ORDINAL"]         = master_dna["clin_au_endo__RISK_OF_RECURRENCE"].apply(_derive_risk_ordinal)
+    master_dna["ENDO_RISK_ORDINAL"]         = master_dna["canon__risk_group"].apply(_derive_risk_ordinal)
     master_dna["ENDO_ER_BIN"]               = master_dna["canon__er_status"].map({"Positive": 1, "Negative": 0})
     master_dna["ENDO_PR_BIN"]               = master_dna["canon__pr_status"].map({"Positive": 1, "Negative": 0})
-    # 16b outputs canon__p53_ihc (unified numeric fraction) + canon__p53_status
-    # ("Aberrant" / "Normal").  Map "Aberrant" → 1, "Normal" → 0.
-    master_dna["ENDO_TP53_ABN_BIN"]         = master_dna["canon__p53_status"].map(
-        {"Aberrant": 1, "Normal": 0}
-    ) if "canon__p53_status" in master_dna.columns else (
-        master_dna["canon__p53_ihc"].apply(
-            lambda x: 0 if pd.notna(x) and str(x).strip().upper() == "WT"
-            else (1 if pd.notna(x) else None)
-        ) if "canon__p53_ihc" in master_dna.columns else pd.NA
-    )
+    master_dna["ENDO_TP53_ABN_BIN"]         = master_dna["canon__p53_status"].map({"Aberrant": 1, "Normal": 0})
     master_dna["ENDO_GENE_AMP_BIN"]         = master_dna["clin_au_endo__Gene amplification"].map({"YES": 1, "NO": 0})
     master_dna["ENDO_ITH_BIN"]              = master_dna["clin_au_endo__ITH: intratumor heterogeneity"].map({"YES": 1, "NO": 0})
     master_dna["ENDO_CTDNA_BIN"]            = master_dna["clin_au_endo__BLOOD_BASAL_CTDNA"].map({"POSITIVE": 1, "NEGATIVE": 0})
@@ -526,7 +561,7 @@ def load_and_merge(gsdmb_path: Path, master_path: Path,
     master_dna["ENDO_CFDN_CONC_NUMERIC"]    = pd.to_numeric(master_dna["clin_au_endo__BLOOD_BASAL_CFDNA_CONCENTRATION"], errors="coerce")
     master_dna["ENDO_PDL1_NUMERIC"]         = pd.to_numeric(master_dna["clin_au_endo__FFPE_PDL1 POLAND RESULTS"], errors="coerce")
     master_dna["ENDO_CD8_NUMERIC"]          = pd.to_numeric(master_dna["clin_au_endo__FFPE_CD8"], errors="coerce")
-    master_dna["ENDO_KI67_NUMERIC"]         = master_dna["clin_au_endo__FFPE_KI67"].apply(_derive_ki67_numeric)
+    master_dna["ENDO_KI67_NUMERIC"]         = master_dna["canon__ki67_pct"].apply(_ki67_fraction_from_pct)
     master_dna["ENDO_PTEN_BIN"]             = master_dna["clin_au_endo__FFPE_PTEN"].map({"CONSERVED": 0, "LOST/REDUCED": 1})
     master_dna["ENDO_MLH1_BIN"]             = master_dna["clin_au_endo__FFPE_MLH1"].map({"CONSERVED": 0, "LOST/REDUCED": 1})
     master_dna["ENDO_N_STAGE_BIN"]          = master_dna["clin_au_endo__N"].apply(
@@ -1310,7 +1345,7 @@ SURVIVAL_COHORTS = {
     },
 }
 
-_GENO_COLS  = {"WT": "#1976D2", "Het": "#F57C00", "Hom": "#C62828"}
+_GENO_COLS  = GENOTYPE_COLORS.copy()
 
 
 def survival_analysis(df: pd.DataFrame) -> Tuple[pd.DataFrame, List]:
@@ -1552,9 +1587,9 @@ def survival_analysis(df: pd.DataFrame) -> Tuple[pd.DataFrame, List]:
 
 # ── VISUALISATION ─────────────────────────────────────────────────────────────
 # Shared style
-_PALETTE   = {"carrier": "#D32F2F", "non_carrier": "#1976D2"}
-_IMPACT_C  = {"HIGH": "#b71c1c", "MODERATE": "#e65100", "LOW": "#2e7d32", "MODIFIER": "#78909c"}
-_COHORT_C  = {"Breast": "#AD1457", "Endometrial": "#00695C"}
+_PALETTE   = {"carrier": arm_color('Tumour'), "non_carrier": arm_color('Control')}
+_IMPACT_C  = IMPACT_COLORS.copy()
+_COHORT_C  = {"Breast": cohort_color('Breast'), "Endometrial": cohort_color('Endometrial')}
 
 def _style_ax(ax, grid=True):
     """Apply consistent clean style to an axis."""
@@ -1629,7 +1664,12 @@ def _draw_volcano(tvh, p_col, sig_col, thresh, title_suffix, out_path):
         # Axis labels and styling
         ax.set_xlabel("log₂(Odds Ratio)  [tumour enriched →]", fontsize=10)
         ax.set_ylabel("-log₁₀(p-value)", fontsize=10)
-        ax.set_title(grp, fontsize=12, fontweight="bold", pad=8)
+        if not sub.empty:
+            n_tumour = int(sub['N_Tumour'].iloc[0])
+            n_control = int(sub['N_Control'].iloc[0])
+            ax.set_title(f"{grp} Cohort\nTumour samples: n={n_tumour}; controls: n={n_control}", fontsize=12, fontweight="bold", pad=8)
+        else:
+            ax.set_title(f"{grp} Cohort", fontsize=12, fontweight="bold", pad=8)
         _style_ax(ax, grid=False)
         ax.xaxis.grid(True, linestyle=":", color="#cccccc", alpha=0.5)
         ax.yaxis.grid(True, linestyle=":", color="#cccccc", alpha=0.5)
@@ -1654,8 +1694,12 @@ def _draw_volcano(tvh, p_col, sig_col, thresh, title_suffix, out_path):
                bbox_to_anchor=(1.01, 0.5), loc="center left",
                frameon=True, framealpha=0.9, edgecolor="#cccccc")
 
-    fig.suptitle(f"GSDMB SNPs — Tumour vs Control  ({title_suffix})",
-                 fontsize=13, fontweight="bold", y=1.01)
+    fig.suptitle(
+        f"Association Between GSDMB SNPs and Tumour-Control Status ({title_suffix})",
+        fontsize=13,
+        fontweight="bold",
+        y=1.01,
+    )
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
@@ -1735,8 +1779,12 @@ def _draw_heatmap(clin_res, p_col, title_suffix, out_path, filter_thresh=0.20):
                  transform=cbar.ax.transAxes, va="center",
                  fontsize=7, color="#c62828")
 
-    ax.set_title(f"GSDMB SNPs × Clinical Variables — {title_suffix}",
-                 fontsize=11, fontweight="bold", pad=10)
+    ax.set_title(
+        f"Associations Between GSDMB SNPs and Clinical Variables ({title_suffix})",
+        fontsize=11,
+        fontweight="bold",
+        pad=10,
+    )
     ax.set_xlabel("Clinical variable", fontsize=9, labelpad=8)
     ax.set_ylabel("Variant", fontsize=9, labelpad=8)
     plt.xticks(rotation=40, ha="right", fontsize=10)
@@ -1781,6 +1829,51 @@ def make_heatmaps(breast_clin, endo_clin, out_dir):
 
 
 # ── 3. FOREST PLOT (OR with 95% CI) ──────────────────────────────────────────
+
+def _select_heatmap_focus_rows(clin_res: pd.DataFrame, p_col: str, max_rows: int = 12) -> pd.DataFrame:
+    """Return a cleaner subset of heatmap rows for main-text presentation."""
+    if clin_res.empty or p_col not in clin_res.columns:
+        return clin_res
+
+    focus = clin_res[clin_res[p_col].notna()].copy()
+    if focus.empty:
+        return clin_res
+
+    if "Contrast" in focus.columns:
+        focus["_focus_row"] = focus["Variant_ID"].astype(str) + " [" + focus["Contrast"].astype(str) + "]"
+    else:
+        focus["_focus_row"] = focus["Variant_ID"].astype(str)
+
+    rank_df = (focus.groupby("_focus_row", as_index=False)[p_col]
+               .min()
+               .sort_values(p_col))
+
+    if "FDR_Unadj" in focus.columns and (focus["FDR_Unadj"] < FDR_THRESHOLD).any():
+        keep = rank_df[rank_df["_focus_row"].isin(focus.loc[focus["FDR_Unadj"] < FDR_THRESHOLD, "_focus_row"])].head(max_rows)
+    elif "Nominal_Sig_Unadj" in focus.columns and focus["Nominal_Sig_Unadj"].any():
+        keep = rank_df[rank_df["_focus_row"].isin(focus.loc[focus["Nominal_Sig_Unadj"], "_focus_row"])].head(max_rows)
+    else:
+        keep = rank_df.head(max_rows)
+
+    keep_rows = set(keep["_focus_row"])
+    out = focus[focus["_focus_row"].isin(keep_rows)].copy()
+    return out.drop(columns=["_focus_row"], errors="ignore")
+
+
+def make_main_text_heatmaps(breast_clin, endo_clin, out_dir):
+    """Generate cleaner focused heatmaps for main-text presentation."""
+    for clin_res, label in [(breast_clin, "Breast"), (endo_clin, "Endometrial")]:
+        if clin_res.empty:
+            continue
+        focused = _select_heatmap_focus_rows(clin_res, "P_Unadj", max_rows=12)
+        _draw_heatmap(
+            focused,
+            "P_Unadj",
+            f"Main-text overview ? {label}",
+            out_dir / f"17_SNP_Heatmap_{label}_MainText.png",
+            filter_thresh=0.20,
+        )
+
 
 def make_forest_plots(breast_clin, endo_clin, out_dir):
     """
@@ -1867,8 +1960,12 @@ def make_forest_plots(breast_clin, endo_clin, out_dir):
         ax.set_yticks(ypos)
         ax.set_yticklabels(sub["label"].values, fontsize=8)
         ax.set_xlabel("Odds Ratio (age-adjusted, 95% CI)", fontsize=10)
-        ax.set_title(f"{label} — Age-adjusted OR for GSDMB carrier status",
-                     fontsize=11, fontweight="bold", pad=10)
+        ax.set_title(
+            f"{label}: Age-Adjusted Associations of GSDMB SNP Carrier Status With Binary Clinical Outcomes",
+            fontsize=11,
+            fontweight="bold",
+            pad=10,
+        )
         _style_ax(ax, grid=False)
         ax.xaxis.grid(True, linestyle=":", color="#cccccc", alpha=0.6)
         ax.set_axisbelow(True)
@@ -2008,15 +2105,19 @@ def make_distribution_plots(breast_clin, endo_clin, merged, out_dir):
             snp   = var_id
             contrast_lbl = f" [{row['Contrast']}]" if "Contrast" in row and pd.notna(row.get("Contrast")) else ""
             title = f"{gene}  [{snp}]{contrast_lbl}" if gene and gene != snp else f"{snp}{contrast_lbl}"
-            ax.set_title(title, fontsize=9, fontweight="bold")
+            ax.set_title(f"Variant-Level Distribution Plot\n{title}", fontsize=9, fontweight="bold")
             _style_ax(ax)
 
         # Hide unused subplots
         for ax in axes_flat[n_plots:]:
             ax.set_visible(False)
 
-        fig.suptitle(f"{label} — Carrier vs Non-carrier: top continuous associations",
-                     fontsize=12, fontweight="bold", y=1.01)
+        fig.suptitle(
+            f"Continuous Clinical Variables According to GSDMB SNP Carrier Status in {label}",
+            fontsize=12,
+            fontweight="bold",
+            y=1.01,
+        )
         plt.tight_layout()
         out_path = out_dir / f"17_Distribution_{label}.png"
         plt.savefig(out_path, dpi=300, bbox_inches="tight")
@@ -2183,7 +2284,7 @@ def make_binary_bar_plots(breast_clin, endo_clin, merged, out_dir):
             contrast_lbl = f" [{row['Contrast']}]" if "Contrast" in row.index and pd.notna(row.get("Contrast")) else ""
             title = (f"{gene}  [{snp}]{contrast_lbl}\n{row['Clin_Label']}"
                      if gene and gene != snp else f"{snp}{contrast_lbl}\n{row['Clin_Label']}")
-            ax.set_title(title, fontsize=8.5, fontweight="bold")
+            ax.set_title(f"Variant-Level Binary Outcome Plot\n{title}", fontsize=8.5, fontweight="bold")
             _style_ax(ax)
 
         # Hide unused subplots
@@ -2207,7 +2308,7 @@ def make_binary_bar_plots(breast_clin, endo_clin, merged, out_dir):
 
 # ── 5b. VIOLIN STRIP — continuous outcomes by genotype (WT / Het / Hom) ───────
 
-_GENO_PLOT_C = {"WT": "#1976D2", "Het": "#F57C00", "Hom": "#C62828"}
+_GENO_PLOT_C = GENOTYPE_COLORS.copy()
 
 def make_genotype_distribution_plots(breast_clin, endo_clin, merged, out_dir):
     """
@@ -2358,15 +2459,17 @@ def make_genotype_distribution_plots(breast_clin, endo_clin, merged, out_dir):
             ax.set_ylabel(row["Clin_Label"], fontsize=9)
             gene  = row.get("Gene", "") or ""
             title = f"{gene}  [{var_id}]" if gene and gene != var_id else var_id
-            ax.set_title(title, fontsize=9, fontweight="bold")
+            ax.set_title(f"Variant-Level Distribution Plot\n{title}", fontsize=9, fontweight="bold")
             _style_ax(ax)
 
         for ax in axes_flat[n_plots:]:
             ax.set_visible(False)
 
         fig.suptitle(
-            f"{label} — WT / Het / Hom: top continuous associations",
-            fontsize=12, fontweight="bold", y=1.01,
+            f"Continuous Clinical Variables According to GSDMB SNP Genotype in {label}",
+            fontsize=12,
+            fontweight="bold",
+            y=1.01,
         )
         plt.tight_layout()
         out_path = out_dir / f"17_GenoDistribution_{label}.png"
@@ -2530,8 +2633,9 @@ def make_genotype_binary_bar_plots(breast_clin, endo_clin, merged, out_dir):
             gene  = row.get("Gene", "") or ""
             snp_label = f"{gene}  [{var_id}]" if gene and gene != var_id else var_id
             ax.set_title(
-                f"{snp_label}\n{row['Clin_Label']}",
-                fontsize=8.5, fontweight="bold",
+                f"{snp_label}\nBinary Outcome: {row['Clin_Label']}",
+                fontsize=8.5,
+                fontweight="bold",
             )
             _style_ax(ax)
 
@@ -2539,8 +2643,9 @@ def make_genotype_binary_bar_plots(breast_clin, endo_clin, merged, out_dir):
             ax.set_visible(False)
 
         fig.suptitle(
-            f"{label} — % positive by genotype: WT / Het / Hom",
-            fontsize=12, fontweight="bold",
+            f"Binary Clinical Outcomes According to GSDMB SNP Genotype in {label}",
+            fontsize=12,
+            fontweight="bold",
             y=0.98,
         )
         plt.tight_layout(rect=[0, 0, 1, 0.96])
@@ -2551,6 +2656,192 @@ def make_genotype_binary_bar_plots(breast_clin, endo_clin, merged, out_dir):
 
 
 # ── 6. KAPLAN-MEIER (improved) ────────────────────────────────────────────────
+
+# ?? 5d. GENOTYPE COMPOSITION ? case/control comparison using WT / Het / Hom ??
+
+def make_genotype_composition_plots(tvh, merged, out_dir):
+    """
+    For the top SNPs in each tumour-vs-control comparison, show the sample
+    composition of WT, heterozygous, and homozygous genotypes within each arm.
+    Bars are normalised to percentages so the visual comparison is not biased by
+    unequal sample sizes.
+    """
+    if tvh.empty:
+        return
+    if "GT" not in merged.columns:
+        print("  Genotype composition plots: no GT column ? skipped")
+        return
+
+    TOP_N = 8
+    GT_MAP = {"0/0": "WT", "0/1": "Het", "1/0": "Het", "1/1": "Hom"}
+    GENO_ORDER = ["WT", "Het", "Hom"]
+
+    sample_manifest = (
+        merged[~merged["is_replicate"]]
+        .drop_duplicates("Sample")
+        .copy()
+    )
+    pooled_controls = sample_manifest[sample_manifest["Tissue"] == "Healthy"].copy()
+
+    comparison_defs = {
+        "Breast": {
+            "tumour_mask": (sample_manifest["Tissue"] == "Tumour")
+                           & sample_manifest["Cohort"].astype(str).str.contains("Breast", case=False, na=False),
+            "tumour_label": "Breast tumour",
+            "control_label": "Pooled control",
+        },
+        "Endometrium": {
+            "tumour_mask": (sample_manifest["Tissue"] == "Tumour")
+                           & sample_manifest["Cohort"].astype(str).str.contains("Endometri", case=False, na=False),
+            "tumour_label": "Endometrium tumour",
+            "control_label": "Pooled control",
+        },
+        "Global": {
+            "tumour_mask": sample_manifest["Tissue"] == "Tumour",
+            "tumour_label": "All tumours",
+            "control_label": "All controls",
+        },
+    }
+
+    for analysis_group, cfg in comparison_defs.items():
+        sub = (
+            tvh[tvh["Analysis_Group"] == analysis_group]
+            .sort_values(["FDR_Sig", "Nominal_Sig", "P_Value"], ascending=[False, False, True])
+            .drop_duplicates("Variant_ID")
+            .copy()
+        )
+        if sub.empty:
+            continue
+
+        if sub["Nominal_Sig"].any() or sub["FDR_Sig"].any():
+            chosen = sub[sub["Nominal_Sig"] | sub["FDR_Sig"]].head(TOP_N).copy()
+        else:
+            chosen = sub.head(TOP_N).copy()
+        if chosen.empty:
+            continue
+
+        tumour_samples = sample_manifest.loc[cfg["tumour_mask"]].copy()
+        control_samples = pooled_controls.copy()
+        if tumour_samples.empty or control_samples.empty:
+            continue
+
+        arm_df = pd.concat(
+            [
+                control_samples.assign(_arm=cfg["control_label"]),
+                tumour_samples.assign(_arm=cfg["tumour_label"]),
+            ],
+            ignore_index=True,
+        )[["Sample", "_arm"]]
+
+        n_plots = len(chosen)
+        ncols = min(3, n_plots)
+        nrows = int(np.ceil(n_plots / ncols))
+        fig, axes = plt.subplots(
+            nrows, ncols,
+            figsize=(5.0 * ncols, 4.2 * nrows),
+            squeeze=False,
+            facecolor="white",
+        )
+        axes_flat = axes.flatten()
+
+        for ax in axes_flat:
+            ax.set_facecolor("white")
+
+        for idx, (_, row) in enumerate(chosen.iterrows()):
+            ax = axes_flat[idx]
+            var_id = row["Variant_ID"]
+            gene = row.get("Gene", "") or ""
+
+            gt_lookup = (
+                merged[(merged["Variant_ID"] == var_id) & (~merged["is_replicate"])]
+                .drop_duplicates("Sample")
+                .set_index("Sample")["GT"]
+                .apply(lambda g: GT_MAP.get(str(g), "WT"))
+            )
+
+            plot_df = arm_df.copy()
+            plot_df["Genotype"] = plot_df["Sample"].map(gt_lookup).fillna("WT")
+
+            counts = (
+                plot_df.groupby(["_arm", "Genotype"])
+                .size()
+                .unstack(fill_value=0)
+                .reindex(index=[cfg["control_label"], cfg["tumour_label"]], columns=GENO_ORDER, fill_value=0)
+            )
+            totals = counts.sum(axis=1)
+            if (totals == 0).any():
+                ax.set_visible(False)
+                continue
+            perc = counts.div(totals, axis=0) * 100
+
+            xpos = np.arange(len(counts.index))
+            bottoms = np.zeros(len(counts.index))
+            for geno in GENO_ORDER:
+                vals = perc[geno].to_numpy(dtype=float)
+                ax.bar(
+                    xpos,
+                    vals,
+                    bottom=bottoms,
+                    color=_GENO_PLOT_C[geno],
+                    edgecolor="white",
+                    linewidth=1.0,
+                    width=0.58,
+                    label=geno,
+                )
+                for xi, val, bottom in zip(xpos, vals, bottoms):
+                    if val >= 9:
+                        ax.text(
+                            xi,
+                            bottom + val / 2,
+                            f"{val:.0f}%",
+                            ha="center",
+                            va="center",
+                            fontsize=8.5,
+                            color="white",
+                            fontweight="bold",
+                        )
+                bottoms += vals
+
+            ax.set_ylim(0, 100)
+            ax.set_xticks(xpos)
+            ax.set_xticklabels([
+                f"{label}\n(n={int(totals.loc[label])})" for label in counts.index
+            ], fontsize=8.5)
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+            ax.set_ylabel("Genotype composition (%)", fontsize=9)
+            snp_label = f"{gene} [{var_id}]" if gene and gene != var_id else var_id
+            sig = "FDR" if bool(row.get("FDR_Sig", False)) else ("p<0.05" if bool(row.get("Nominal_Sig", False)) else "top hit")
+            p_val = row.get("FDR_P_Value") if bool(row.get("FDR_Sig", False)) else row.get("P_Value")
+            or_text = row.get("Odds_Ratio", np.nan)
+            ax.set_title(
+                f"Genotype Composition for {snp_label}\nOR={or_text:.2f} | p={p_val:.3g} ({sig})",
+                fontsize=8.5,
+                fontweight="bold",
+            )
+            _style_ax(ax)
+
+        for ax in axes_flat[n_plots:]:
+            ax.set_visible(False)
+
+        handles = [
+            plt.Rectangle((0, 0), 1, 1, facecolor=_GENO_PLOT_C[g], edgecolor="white")
+            for g in GENO_ORDER
+        ]
+        fig.legend(handles, GENO_ORDER, title="Genotype",
+                   loc="upper center", ncol=3, frameon=False,
+                   bbox_to_anchor=(0.5, 1.02))
+        fig.suptitle(
+            f"Genotype Composition in Tumour and Control Samples: {analysis_group} Comparison [{COMPARATIVE_TAG}]",
+            fontsize=12,
+            fontweight="bold",
+            y=1.04,
+        )
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        out_path = out_dir / f"17_GenotypeComposition_{analysis_group}.png"
+        plt.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved: {out_path}")
+
 
 def save_km_pdf(km_pages, out_path):
     """Save pre-built KM figures — replaced by make_km_plots below."""
@@ -2599,7 +2890,7 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
     # ── Panel A: SNP frequency in tumour vs control ───────────────────────
     if not tvh.empty:
         # Use actual Analysis_Group values from tumour_vs_control()
-        grp_colour_map = {"Breast": "#AD1457", "Endometrium": "#00695C"}
+        grp_colour_map = {"Breast": cohort_color("Breast"), "Endometrium": cohort_color("Endometrium")}
         plotted_any = False
         for grp, col in grp_colour_map.items():
             sub = tvh[tvh["Analysis_Group"] == grp].copy()
@@ -2617,8 +2908,14 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
         if plotted_any:
             ax_freq.set_yticks([])
             ax_freq.set_xlabel("Frequency (%)", fontsize=9)
-            ax_freq.set_title("A  SNP frequency: \u25cf tumour  \u25c6 control\n(top 20 per cohort)",
-                               fontsize=9, fontweight="bold", loc="left")
+            ax_freq.set_xlim(0, 100)
+            ax_freq.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+            ax_freq.set_title(
+                "A  Distribution of GSDMB SNP Frequencies in Tumour and Control Samples\n(top 20 variants per cohort)",
+                fontsize=9,
+                fontweight="bold",
+                loc="left",
+            )
             ax_freq.legend(fontsize=7.5, frameon=False)
             _style_ax(ax_freq)
         else:
@@ -2661,7 +2958,7 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
             labels = hit_rates["Variant_ID"] + "\n(" + hit_rates["Cohort"].str.replace("_Tumour", "") + ")"
             ax_hits.set_yticklabels(labels.values, fontsize=7.5)
             ax_hits.set_xlabel("Nominal association rate (% of tests, p < 0.05)", fontsize=9)
-            ax_hits.set_title("B  Nominally significant clinical association rate per variant",
+            ax_hits.set_title("B  Rate of nominally significant SNP-clinical associations",
                                fontsize=9, fontweight="bold", loc="left")
             for y, rate, hits, tests in zip(ypos, hit_rates["Hit_Rate_%"], hit_rates["N_hits"], hit_rates["N_tests"]):
                 ax_hits.text(rate + 1.0, y, f"{int(hits)}/{int(tests)}", va="center", fontsize=7, color="#555555")
@@ -2699,8 +2996,12 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
             rotation=45, ha="right", fontsize=6.5
         )
         ax_dots.set_ylabel("-log₁₀(p-value)", fontsize=9)
-        ax_dots.set_title("C  Top SNP × clinical associations (unadjusted)",
-                           fontsize=9, fontweight="bold", loc="left")
+        ax_dots.set_title(
+            "C  Most Significant Unadjusted Associations Between GSDMB SNPs and Clinical Variables",
+            fontsize=9,
+            fontweight="bold",
+            loc="left",
+        )
         ax_dots.legend(fontsize=7.5, frameon=False)
         _style_ax(ax_dots, grid=False)
         ax_dots.yaxis.grid(True, linestyle=":", alpha=0.4)
@@ -2763,8 +3064,12 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
             ax_hr.set_yticklabels(sr_plot["_label"].values, fontsize=7)
             ax_hr.set_xlabel("Hazard Ratio (95% CI) — additive Cox", fontsize=9)
             note = f" ({n_unstable} unstable models excluded)" if n_unstable else ""
-            ax_hr.set_title(f"D  Survival HR — all cohorts\n(★ p<0.05, colour = cohort){note}",
-                             fontsize=9, fontweight="bold", loc="left")
+            ax_hr.set_title(
+                f"D  Survival Associations of GSDMB SNPs Across Cohorts\n(* denotes p<0.05; colour = cohort){note}",
+                fontsize=9,
+                fontweight="bold",
+                loc="left",
+            )
             _style_ax(ax_hr, grid=False)
             ax_hr.xaxis.grid(True, linestyle=":", alpha=0.4)
     else:
@@ -2773,8 +3078,12 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
                    transform=ax_hr.transAxes, color="#aaaaaa", fontsize=11)
         ax_hr.set_axis_off()
 
-    fig.suptitle("GSDMB SNP Association Analysis — Overview",
-                 fontsize=14, fontweight="bold", y=1.01)
+    fig.suptitle(
+        "Overview of GSDMB SNP Association Analyses",
+        fontsize=14,
+        fontweight="bold",
+        y=1.01,
+    )
     out_path = out_dir / "17_Summary_Panel.png"
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
@@ -2788,6 +3097,8 @@ def parse_args():
     p.add_argument("--gsdmb",   default=str(DEFAULT_GSDMB))
     p.add_argument("--master",  default=str(DEFAULT_MASTER))
     p.add_argument("--out_dir", default=str(DEFAULT_OUT))
+    p.add_argument("--variant_whitelist", default=str(DEFAULT_VARIANT_WHITELIST),
+                   help="Excel whitelist from script 11 defining the thesis SNP backbone")
     p.add_argument("--manifest_endo_tumour", default=str(DEFAULT_MANIFESTS["endometrium-tumour"]),
                    help="Pass-BAM manifest for AU endometrial tumour")
     p.add_argument("--manifest_endo_normal", default=str(DEFAULT_MANIFESTS["endometrium-normal"]),
@@ -3233,10 +3544,14 @@ def make_risk_forest_plot(risk_res: pd.DataFrame, out_dir: Path):
         ax.set_yticks(ypos)
         ax.set_yticklabels(labels.values, fontsize=8)
         ax.set_xlabel("Odds Ratio for cancer risk\n(age-adjusted, 95% CI)", fontsize=10)
-        ax.set_title(f"{cohort} cancer — SNP carrier risk\n"
-                     f"(cases n={risk_res.loc[risk_res['Cohort']==cohort, 'N_Cases'].iloc[0]}, "
-                     f"controls n={risk_res.loc[risk_res['Cohort']==cohort, 'N_Controls'].iloc[0]})",
-                     fontsize=11, fontweight="bold", pad=10)
+        ax.set_title(
+            f"Age-Adjusted Association Between GSDMB SNP Carrier Status and {cohort} Cancer Risk\n"
+            f"(cases n={risk_res.loc[risk_res['Cohort']==cohort, 'N_Cases'].iloc[0]}, "
+            f"controls n={risk_res.loc[risk_res['Cohort']==cohort, 'N_Controls'].iloc[0]})",
+            fontsize=11,
+            fontweight="bold",
+            pad=10,
+        )
 
         xlims = ax.get_xlim()
         ax.axvspan(1, xlims[1], alpha=0.04, color="#c62828")
@@ -3249,8 +3564,12 @@ def make_risk_forest_plot(risk_res: pd.DataFrame, out_dir: Path):
         ax.xaxis.grid(True, linestyle=":", color="#cccccc", alpha=0.6)
         ax.set_axisbelow(True)
 
-    fig.suptitle("GSDMB SNPs — Cancer Risk (Case-Control, Age-Adjusted)",
-                 fontsize=13, fontweight="bold", y=1.01)
+    fig.suptitle(
+        "Age-Adjusted Associations Between GSDMB SNPs and Cancer Risk",
+        fontsize=13,
+        fontweight="bold",
+        y=1.01,
+    )
     plt.tight_layout()
     out_path = out_dir / "17_Forest_CancerRisk.png"
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
@@ -3265,6 +3584,9 @@ def main():
     out_dir = Path(args.out_dir)
     validate_file_exists(gsdmb, "Script 17 GSDMB input")
     validate_file_exists(master, "Script 17 master input")
+    variant_whitelist = Path(args.variant_whitelist) if args.variant_whitelist else None
+    if variant_whitelist is not None:
+        validate_file_exists(variant_whitelist, "Script 17 variant whitelist")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_xlsx = out_dir / "17_SNP_Clinical_Association_Results.xlsx"
 
@@ -3279,7 +3601,7 @@ def main():
             "breast-normal":      Path(args.manifest_breast_normal),
         }
 
-    merged = load_and_merge(gsdmb, master, manifest_paths=manifest_paths)
+    merged = load_and_merge(gsdmb, master, manifest_paths=manifest_paths, whitelist_path=variant_whitelist)
     print_validation_summary(merged, "Sample", "Script 17 merged analysis input", ["Cohort", "Tissue"])
 
     # Analysis 1
@@ -3374,6 +3696,7 @@ def main():
     print("=== Generating plots ===")
     make_volcano_plots(tvh, out_dir)
     make_heatmaps(breast_clin, endo_clin, out_dir)
+    make_main_text_heatmaps(breast_clin, endo_clin, out_dir)
     make_forest_plots(breast_clin, endo_clin, out_dir)
     make_distribution_plots(breast_clin, endo_clin, merged, out_dir)
     make_binary_bar_plots(breast_clin, endo_clin, merged, out_dir)
@@ -3382,6 +3705,7 @@ def main():
     make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir)
     make_genotype_distribution_plots(breast_clin, endo_clin, merged, out_dir)
     make_genotype_binary_bar_plots(breast_clin, endo_clin, merged, out_dir)
+    make_genotype_composition_plots(tvh, merged, out_dir)
 
     # Final summary
     print("\n" + "="*60)

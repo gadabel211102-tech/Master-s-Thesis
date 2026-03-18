@@ -344,7 +344,7 @@ def plot_qc_summary(titv: dict, df: pd.DataFrame,
                     logger: logging.Logger):
     """Three-panel QC figure: Ti/Tv bar, allelic balance histogram, batch CV."""
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    fig.suptitle("Variant-Level QC Summary", fontsize=14, fontweight="bold", y=1.01)
+    fig.suptitle("Overview of Variant-Level Quality Control Metrics", fontsize=14, fontweight="bold", y=1.01)
 
     # ── Panel 1: Ti/Tv ──────────────────────────────────────────────────────
     ax = axes[0]
@@ -354,7 +354,7 @@ def plot_qc_summary(titv: dict, df: pd.DataFrame,
                color=["#3498db", "#e74c3c"], edgecolor="black", linewidth=1.2)
         t = THRESHOLDS["titv"]
         ax.set_title(
-            f"Ti/Tv Ratio: {titv['ratio']:.3f}\n{titv['status']}",
+            f"Transition-Transversion Ratio: {titv['ratio']:.3f}\nQC classification: {titv['status']}",
             fontweight="bold", color=titv["colour"], fontsize=11)
         ax.text(0.5, 0.02,
                 f"Optimal {t['optimal_min']}–{t['optimal_max']}  |  "
@@ -387,14 +387,14 @@ def plot_qc_summary(titv: dict, df: pd.DataFrame,
 
         n_flagged = (df["AB_Flag"].str.startswith("IMBALANCED") == True).sum()
         ax.set_title(
-            f"Allelic Balance (heterozygous calls)\n"
+            f"Allelic Balance Among Heterozygous Calls\n"
             f"n={len(het_af)}  flagged={n_flagged} ({n_flagged/len(het_af)*100:.1f}%)",
             fontweight="bold", fontsize=11)
         ax.legend(loc="upper right", fontsize=7)
     else:
         ax.text(0.5, 0.5, "No allelic fraction data\n(AF column missing or all homozygous)",
                 transform=ax.transAxes, ha="center", va="center", fontsize=11)
-        ax.set_title("Allelic Balance", fontweight="bold")
+        ax.set_title("Allelic Balance Among Heterozygous Calls", fontweight="bold")
     ax.set_xlabel("Allele Fraction (AF)")
     ax.set_ylabel("Count")
     ax.set_xlim(0, 1)
@@ -417,13 +417,13 @@ def plot_qc_summary(titv: dict, df: pd.DataFrame,
         ax.axvline(t_cv["poor"],       color="#e74c3c", linestyle="--",
                    linewidth=1.5, label=f"Poor (<{t_cv['poor']}%)")
         ax.set_xlabel("CV% of variant counts across samples")
-        ax.set_title("Batch Effects\n(variant count variability per group)",
+        ax.set_title("Batch-Level Variability of Variant Counts\n(variation in variant burden across groups)",
                      fontweight="bold", fontsize=11)
         ax.legend(loc="lower right", fontsize=7)
     else:
         ax.text(0.5, 0.5, "No batch data", transform=ax.transAxes,
                 ha="center", va="center", fontsize=12)
-        ax.set_title("Batch Effects", fontweight="bold")
+        ax.set_title("Batch-Level Variability of Variant Counts", fontweight="bold")
     ax.grid(axis="x", alpha=0.3)
 
     plt.tight_layout()

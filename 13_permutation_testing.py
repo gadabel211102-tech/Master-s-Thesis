@@ -386,7 +386,7 @@ def generate_comparison_plots(results_df):
 
     ax1.set_xlabel("Fisher's Exact Test (-log10 raw p)", fontweight="bold")
     ax1.set_ylabel("Permutation Test (-log10 raw p)", fontweight="bold")
-    ax1.set_title("Raw P-Value Comparison: Permutation vs Fisher", fontweight="bold", fontsize=12)
+    ax1.set_title("Comparison of Raw Significance Estimates From Permutation Testing and Fisher's Exact Test", fontweight="bold", fontsize=12)
     ax1.legend(loc="best")
     ax1.grid(True, alpha=0.3)
 
@@ -406,7 +406,7 @@ def generate_comparison_plots(results_df):
     ax2.axhline(sig_line, color="red", linestyle=":", alpha=0.5, label="p=0.05")
     ax2.set_xlabel("Effect Size (Cohen's h)", fontweight="bold")
     ax2.set_ylabel("Permutation Test (-log10 raw p)", fontweight="bold")
-    ax2.set_title("Effect Size vs Raw Statistical Significance", fontweight="bold", fontsize=12)
+    ax2.set_title("Relationship Between Effect Size and Raw Statistical Significance", fontweight="bold", fontsize=12)
     ax2.legend(loc="best")
     ax2.grid(True, alpha=0.3)
 
@@ -427,7 +427,7 @@ def generate_comparison_plots(results_df):
     ax3.axvline(0, color="black", linestyle="--", alpha=0.5, label="No difference")
     ax3.set_xlabel("Frequency Difference (Tumour - Control %)", fontweight="bold")
     ax3.set_ylabel("Density", fontweight="bold")
-    ax3.set_title("Distribution of Frequency Differences (Normalised)", fontweight="bold", fontsize=12)
+    ax3.set_title("Distribution of Tumour-Control Frequency Differences", fontweight="bold", fontsize=12)
     ax3.legend(loc="best")
     ax3.grid(True, alpha=0.3, axis="y")
 
@@ -461,14 +461,14 @@ def generate_comparison_plots(results_df):
     )
     ax4.set_xlabel("Cohort", fontweight="bold")
     ax4.set_ylabel("Percentage of SNPs", fontweight="bold")
-    ax4.set_title("Test Agreement Analysis (FDR, % of SNPs)", fontweight="bold", fontsize=12)
+    ax4.set_title("Concordance Between Fisher and Permutation Results at the FDR Threshold", fontweight="bold", fontsize=12)
     ax4.legend(title="Significance", bbox_to_anchor=(1.05, 1), loc="upper left")
     plt.setp(ax4.xaxis.get_majorticklabels(), rotation=0)
     ax4.set_ylim(0, 100)
     ax4.grid(True, alpha=0.3, axis="y")
 
     plt.suptitle(
-        f"Permutation Testing vs Fisher's Exact Test Comparison\n"
+        f"Overall Comparison of Permutation Testing and Fisher's Exact Test\n"
         f"({N_PERMUTATIONS:,} permutations per SNP, combined NFE AF filter)",
         fontsize=16,
         fontweight="bold",

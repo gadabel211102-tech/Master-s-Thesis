@@ -102,6 +102,7 @@ from scipy import stats
 from scipy.stats import false_discovery_control, fisher_exact, mannwhitneyu
 
 from association_runtime import script18_defaults
+from figure_style import COMPARATIVE_TAG, COHORT_COLORS, HAPLOTYPE_STATUS_COLORS, arm_color, cohort_color
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_percentage_columns
 
 try:
@@ -122,8 +123,9 @@ DEFAULT_OUT          = Path("/home/gadeaalonsoj/tfm/gsdmb_final_results/")
 DEFAULT_HAPLO_RESULTS = Path("/home/gadeaalonsoj/tfm/gsdmb_final_results/19_haplo_stats_results/19_Haplotype_Results_v7_blocks_and_genes.xlsx")
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
-MIN_HAP_FREQ        = 0.02   # global frequency threshold — rare haplotypes skipped
+MIN_HAP_FREQ        = 0.02   # global frequency threshold ? rare haplotypes skipped
 MIN_CARRIERS        = 5      # minimum carriers (or non-carriers) to run a test
+MIN_COMPARISON_CARRIERS = 3  # minimum callable carriers within a specific case-control comparison
 MIN_EVENTS_LOGISTIC = 10     # minimum events per predictor (EPV rule) for stable logistic regression
 FDR_THRESHOLD       = 0.10
 
@@ -206,7 +208,7 @@ RISK_COHORTS = {
 }
 
 # ── STYLE ─────────────────────────────────────────────────────────────────────
-_COHORT_C = {"Breast": "#AD1457", "Endometrial": "#00695C"}
+_COHORT_C = {"Breast": cohort_color("Breast"), "Endometrial": cohort_color("Endometrial")}
 
 def _style_ax(ax, grid=True):
     ax.spines["top"].set_visible(False)
@@ -438,24 +440,34 @@ def load_phased_genotypes(phased_path: Path, keep_positions: List[int], ref_snp_
     print("  Loading phased genotype TSV …")
     geno = pd.read_csv(phased_path, sep="\t", dtype=str)
 
-    # Keep only established SNP positions
     geno["POS"] = pd.to_numeric(geno["POS"], errors="coerce")
-    geno = geno[geno["POS"].isin(keep_positions)].copy()
-    geno = geno.sort_values("POS").reset_index(drop=True)
+    geno["REF"] = geno["REF"].astype(str).str.strip().str.upper()
+    geno["ALT"] = geno["ALT"].astype(str).str.strip().str.upper()
+    geno["SNP_Label"] = (
+        geno["POS"].astype("Int64").astype(str) + "_" +
+        geno["REF"] + ">" + geno["ALT"]
+    )
+
+    # Prefer exact backbone matching by POS+REF+ALT when reference labels are available.
+    if ref_snp_labels:
+        ref_label_set = {str(lbl).strip() for lbl in ref_snp_labels}
+        geno = geno[geno["SNP_Label"].isin(ref_label_set)].copy()
+    else:
+        geno = geno[geno["POS"].isin(keep_positions)].copy()
+
+    geno = geno.sort_values("POS").drop_duplicates(subset=["SNP_Label"]).reset_index(drop=True)
 
     n_snps = len(geno)
     print(f"  {n_snps} established SNPs retained in phased matrix")
     if n_snps == 0:
         raise ValueError(
-            "No SNPs remain after filtering phased genotypes to established positions.\n"
-            "Check that POS values in the TSV match those in the annotated report."
+            "No SNPs remain after filtering phased genotypes to the requested haplotype backbone.\n"
+            "Check that POS/REF/ALT labels in the phased TSV match the reference haplotype definition."
         )
 
-    snp_labels = (geno["POS"].astype(str) + "_" +
-                  geno["REF"].astype(str) + ">" +
-                  geno["ALT"].astype(str)).tolist()
+    snp_labels = geno["SNP_Label"].tolist()
 
-    sample_cols = [c for c in geno.columns if c not in ("CHROM", "POS", "REF", "ALT")]
+    sample_cols = [c for c in geno.columns if c not in ("CHROM", "POS", "ID", "REF", "ALT", "SNP_Label")]
 
     # Parse phased GTs: "0|1" -> allele1=0, allele2=1
     hap1_rows, hap2_rows = [], []
@@ -526,15 +538,21 @@ def enumerate_haplotypes(hap_df: pd.DataFrame,
         for samp in hap_df.index:
             h1 = hap_df.loc[samp, "hap1"]
             h2 = hap_df.loc[samp, "hap2"]
-            dosage = (int(h1 == hap_str) if "N" not in h1 else 0) + \
-                     (int(h2 == hap_str) if "N" not in h2 else 0)
+            callable_hap = int("N" not in h1 and "N" not in h2)
+            if callable_hap:
+                dosage = int(h1 == hap_str) + int(h2 == hap_str)
+                carrier = int(dosage >= 1)
+            else:
+                dosage = np.nan
+                carrier = np.nan
             rows.append({
                 "Sample_phased": samp,
                 "Haplotype_ID":  hap_id,
                 "Haplotype":     hap_str,
                 "Global_Freq":   freq_row["Global_Freq"],
                 "Dosage":        dosage,
-                "Carrier":       int(dosage >= 1),
+                "Carrier":       carrier,
+                "Callable":      callable_hap,
             })
     carrier_df = pd.DataFrame(rows)
     return freq_df, carrier_df
@@ -617,6 +635,16 @@ def _derive_breast_os(row):
     except Exception: return None
 
 
+def _ki67_fraction_from_pct(val):
+    if pd.isna(val):
+        return None
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return None
+    return round(v / 100.0, 4) if 0.0 <= v <= 100.0 else None
+
+
 def load_clinical_master(master_path: Path) -> pd.DataFrame:
     """
     Load 'harmonised_plus_canon' sheet, restrict to DNA rows, build Tissue,
@@ -664,31 +692,42 @@ def load_clinical_master(master_path: Path) -> pd.DataFrame:
 
     # Breast derived columns
     for src, dst, fn in [
-        ("clin_dcs__Recaida/Progresión", "BREAST_RECURRENCE_DERIVED", _derive_breast_recurrence),
+        ("clin_dcs__Recaida/Progresi\u00f3n", "BREAST_RECURRENCE_DERIVED", _derive_breast_recurrence),
         ("clin_dcs__Exitus",             "BREAST_EXITUS_DERIVED",     _derive_breast_exitus),
         ("clin_dcs__MTxDISTANCIA",       "BREAST_METASTASIS_DERIVED", _derive_breast_metastasis),
         ("clin_her2__DX",                "BREAST_HER2_SUBTYPE",       _derive_her2_subtype),
     ]:
-        if src in master.columns: master[dst] = master[src].apply(fn)
+        if src in master.columns:
+            master[dst] = master[src].apply(fn)
     if "clin_dcs__MTxDISTANCIA" in master.columns:
-        # Any metastasis: local (NO-LOCAL) OR distant (SI) = 1, none = 0
-        # Replaces broken BREAST_LOCAL_MET_BIN (grouped distant met with no met).
         master["BREAST_ANY_METASTASIS_BIN"] = master["clin_dcs__MTxDISTANCIA"].map(
             {"NO": 0, "NO-LOCAL": 1, "SI": 1}
         )
     if "canon__er_status" in master.columns:
         master["BREAST_ER_BIN"] = master["canon__er_status"].map({"Positive": 1, "Negative": 0})
-        master["ENDO_ER_BIN"]   = master["BREAST_ER_BIN"]
+        master["ENDO_ER_BIN"]   = master["canon__er_status"].map({"Positive": 1, "Negative": 0})
     if "canon__pr_status" in master.columns:
         master["BREAST_PR_BIN"] = master["canon__pr_status"].map({"Positive": 1, "Negative": 0})
-        master["ENDO_PR_BIN"]   = master["BREAST_PR_BIN"]
-    for src, dst in [("clin_dcs__KI67","BREAST_KI67_NUMERIC"), ("clin_dcs__GRADO","BREAST_GRADE_NUMERIC"),
-                     ("clin_dcs__p53","BREAST_P53_NUMERIC"),    ("clin_dcs__BMI","BREAST_BMI_NUMERIC"),
-                     ("canon__menarche_age","BREAST_MENARCHE_NUMERIC"), ("canon__menopause_age","BREAST_MENOPAUSE_NUMERIC")]:
-        if src in master.columns:
-            master[dst] = (master[src].apply(_derive_ki67_numeric) if "KI67" in dst
-                           else pd.to_numeric(master[src], errors="coerce"))
-    master["BREAST_OS_MONTHS_DERIVED"] = master.apply(_derive_breast_os, axis=1)
+        master["ENDO_PR_BIN"]   = master["canon__pr_status"].map({"Positive": 1, "Negative": 0})
+
+    ki67_pct = master["canon__ki67_pct"] if "canon__ki67_pct" in master.columns else pd.Series(np.nan, index=master.index)
+    grade = master["canon__grade"] if "canon__grade" in master.columns else pd.Series(np.nan, index=master.index)
+    bmi = master["canon__bmi"] if "canon__bmi" in master.columns else pd.Series(np.nan, index=master.index)
+    breast_os_raw = master["canon__os_months"] if "canon__os_months" in master.columns else pd.Series(np.nan, index=master.index)
+    figo = master["canon__figo_stage"] if "canon__figo_stage" in master.columns else pd.Series(np.nan, index=master.index)
+    lvsi = master["canon__lvsi"] if "canon__lvsi" in master.columns else pd.Series(pd.NA, index=master.index)
+    myoinv = master["canon__myometrial_invasion"] if "canon__myometrial_invasion" in master.columns else pd.Series(pd.NA, index=master.index)
+    risk = master["canon__risk_group"] if "canon__risk_group" in master.columns else pd.Series(pd.NA, index=master.index)
+    pd_flag = master["canon__pd_flag"] if "canon__pd_flag" in master.columns else pd.Series(pd.NA, index=master.index)
+    exitus_flag = master["canon__exitus_flag"] if "canon__exitus_flag" in master.columns else pd.Series(pd.NA, index=master.index)
+
+    master["BREAST_KI67_NUMERIC"]      = ki67_pct.apply(_ki67_fraction_from_pct)
+    master["BREAST_GRADE_NUMERIC"]     = pd.to_numeric(grade, errors="coerce")
+    master["BREAST_P53_NUMERIC"]       = pd.to_numeric(master.get("clin_dcs__p53", pd.Series(np.nan, index=master.index)), errors="coerce")
+    master["BREAST_BMI_NUMERIC"]       = pd.to_numeric(bmi, errors="coerce")
+    master["BREAST_MENARCHE_NUMERIC"]  = pd.to_numeric(master.get("canon__menarche_age", pd.Series(np.nan, index=master.index)), errors="coerce")
+    master["BREAST_MENOPAUSE_NUMERIC"] = pd.to_numeric(master.get("canon__menopause_age", pd.Series(np.nan, index=master.index)), errors="coerce")
+    master["BREAST_OS_MONTHS_DERIVED"] = pd.to_numeric(breast_os_raw, errors="coerce").combine_first(master.apply(_derive_breast_os, axis=1))
     if "clin_dcs__Dx" in master.columns:
         master["BREAST_DX_TYPE"] = master["clin_dcs__Dx"].apply(
             lambda x: "CDI" if pd.notna(x) and "CDI" in str(x).upper() and "CDIS" not in str(x).upper()
@@ -696,46 +735,31 @@ def load_clinical_master(master_path: Path) -> pd.DataFrame:
                   else (str(x).strip() if pd.notna(x) else None)))
 
     # Endometrial derived columns
-    for src, dst, fn in [
-        ("clin_au_endo__FIGO_STAGE",        "ENDO_FIGO_NUMERIC",   _derive_figo_numeric),
-        ("clin_au_endo__GRADE",             "ENDO_GRADE_NUMERIC",  _derive_endo_grade),
-        ("clin_au_endo__RISK_OF_RECURRENCE","ENDO_RISK_ORDINAL",   _derive_risk_ordinal),
-        ("clin_au_endo__FFPE_KI67",         "ENDO_KI67_NUMERIC",   _derive_ki67_numeric),
-    ]:
-        if src in master.columns: master[dst] = master[src].apply(fn)
-    for src, dst, mapping in [
-        ("clin_au_endo__LVSI",                    "ENDO_LVSI_BIN",          {"YES": 1, "NO": 0}),
-        ("clin_au_endo__MYOMETRIAL_INFILTRATION", "ENDO_MYOINVASION_BIN",   {"<50%": 0, ">50%": 1}),
-        ("canon__msi_status",                     "ENDO_MSI_BIN",           {"Unstable": 1, "Stable": 0}),
-        ("clin_au_endo__HISTOLOGY_GROUP",         "ENDO_NEEC_BIN",          {"NEEC": 1, "EEC": 0}),
-        ("clin_au_endo__PD_STATUS",               "ENDO_PD_BIN",            {"PD": 1, "NO PD": 0}),
-        ("clin_au_endo__EXITUS",                  "ENDO_EXITUS_BIN",        {"YES": 1, "NO": 0}),
-        ("clin_au_endo__EXITUS_DISEASE",          "ENDO_EXITUS_DISEASE_BIN",{"YES": 1, "NO": 0}),
-        ("clin_au_endo__Gene amplification",      "ENDO_GENE_AMP_BIN",      {"YES": 1, "NO": 0}),
-        ("clin_au_endo__ITH: intratumor heterogeneity","ENDO_ITH_BIN",      {"YES": 1, "NO": 0}),
-        ("clin_au_endo__BLOOD_BASAL_CTDNA",       "ENDO_CTDNA_BIN",         {"POSITIVE": 1, "NEGATIVE": 0}),
-        ("clin_au_endo__FFPE_PTEN",               "ENDO_PTEN_BIN",          {"CONSERVED": 0, "LOST/REDUCED": 1}),
-        ("clin_au_endo__FFPE_MLH1",               "ENDO_MLH1_BIN",          {"CONSERVED": 0, "LOST/REDUCED": 1}),
-    ]:
-        if src in master.columns: master[dst] = master[src].map(mapping)
-    for src, dst in [
-        ("clin_au_endo__BLOOD_BASAL_CTDNA_MAF",           "ENDO_CTDNA_MAF_NUMERIC"),
-        ("clin_au_endo__BLOOD_BASAL_CFDNA_CONCENTRATION", "ENDO_CFDN_CONC_NUMERIC"),
-        ("clin_au_endo__FFPE_PDL1 POLAND RESULTS",        "ENDO_PDL1_NUMERIC"),
-        ("clin_au_endo__FFPE_CD8",                        "ENDO_CD8_NUMERIC"),
-    ]:
-        if src in master.columns: master[dst] = pd.to_numeric(master[src], errors="coerce")
-    if "clin_au_endo__FFPE_KI67" in master.columns:
-        master["ENDO_KI67_NUMERIC"] = master["clin_au_endo__FFPE_KI67"].apply(_derive_ki67_numeric)
-    if "canon__tp53_ihc" in master.columns:
-        master["ENDO_TP53_ABN_BIN"] = master["canon__tp53_ihc"].apply(
-            lambda x: 0 if pd.notna(x) and str(x).strip().upper() == "WT" else (1 if pd.notna(x) else None))
-    for src, dst, ref in [("clin_au_endo__N","ENDO_N_STAGE_BIN","N0"), ("clin_au_endo__M","ENDO_M_STAGE_BIN","M0")]:
+    master["ENDO_FIGO_NUMERIC"]       = figo.apply(_derive_figo_numeric)
+    master["ENDO_GRADE_NUMERIC"]      = pd.to_numeric(grade, errors="coerce")
+    master["ENDO_RISK_ORDINAL"]       = risk.apply(_derive_risk_ordinal)
+    master["ENDO_KI67_NUMERIC"]       = ki67_pct.apply(_ki67_fraction_from_pct)
+    master["ENDO_LVSI_BIN"]           = lvsi.map({"Yes": 1, "No": 0})
+    master["ENDO_MYOINV_BIN"]         = myoinv.map({"<50%": 0, ">50%": 1})
+    master["ENDO_MSI_BIN"]            = master.get("canon__msi_status", pd.Series(pd.NA, index=master.index)).map({"Unstable": 1, "Stable": 0})
+    master["ENDO_NEEC_BIN"]           = master.get("clin_au_endo__HISTOLOGY_GROUP", pd.Series(pd.NA, index=master.index)).map({"NEEC": 1, "EEC": 0})
+    master["ENDO_PD_BIN"]             = pd.to_numeric(pd_flag, errors="coerce")
+    master["ENDO_EXITUS_BIN"]         = pd.to_numeric(exitus_flag, errors="coerce")
+    master["ENDO_EXITUS_DISEASE_BIN"] = master.get("clin_au_endo__EXITUS_DISEASE", pd.Series(pd.NA, index=master.index)).map({"YES": 1, "NO": 0})
+    master["ENDO_TP53_ABN_BIN"]       = master.get("canon__p53_status", pd.Series(pd.NA, index=master.index)).map({"Aberrant": 1, "Normal": 0})
+    master["ENDO_GENE_AMP_BIN"]       = master.get("clin_au_endo__Gene amplification", pd.Series(pd.NA, index=master.index)).map({"YES": 1, "NO": 0})
+    master["ENDO_ITH_BIN"]            = master.get("clin_au_endo__ITH: intratumor heterogeneity", pd.Series(pd.NA, index=master.index)).map({"YES": 1, "NO": 0})
+    master["ENDO_CTDNA_BIN"]          = master.get("clin_au_endo__BLOOD_BASAL_CTDNA", pd.Series(pd.NA, index=master.index)).map({"POSITIVE": 1, "NEGATIVE": 0})
+    master["ENDO_CTDNA_MAF_NUMERIC"]  = pd.to_numeric(master.get("clin_au_endo__BLOOD_BASAL_CTDNA_MAF", pd.Series(np.nan, index=master.index)), errors="coerce")
+    master["ENDO_CFDN_CONC_NUMERIC"]  = pd.to_numeric(master.get("clin_au_endo__BLOOD_BASAL_CFDNA_CONCENTRATION", pd.Series(np.nan, index=master.index)), errors="coerce")
+    master["ENDO_PDL1_NUMERIC"]       = pd.to_numeric(master.get("clin_au_endo__FFPE_PDL1 POLAND RESULTS", pd.Series(np.nan, index=master.index)), errors="coerce")
+    master["ENDO_CD8_NUMERIC"]        = pd.to_numeric(master.get("clin_au_endo__FFPE_CD8", pd.Series(np.nan, index=master.index)), errors="coerce")
+    master["ENDO_PTEN_BIN"]           = master.get("clin_au_endo__FFPE_PTEN", pd.Series(pd.NA, index=master.index)).map({"CONSERVED": 0, "LOST/REDUCED": 1})
+    master["ENDO_MLH1_BIN"]           = master.get("clin_au_endo__FFPE_MLH1", pd.Series(pd.NA, index=master.index)).map({"CONSERVED": 0, "LOST/REDUCED": 1})
+    for src, dst, ref in [("clin_au_endo__N", "ENDO_N_STAGE_BIN", "N0"), ("clin_au_endo__M", "ENDO_M_STAGE_BIN", "M0")]:
         if src in master.columns:
             master[dst] = master[src].apply(
                 lambda x, r=ref: 0 if pd.notna(x) and str(x).strip().upper() == r else (1 if pd.notna(x) else None))
-    if "ENDO_MYOINVASION_BIN" in master.columns:
-        master["ENDO_MYOINV_BIN"] = master["ENDO_MYOINVASION_BIN"]
     if "canon__bmi" not in master.columns:
         master["canon__bmi"] = np.nan
 
@@ -786,24 +810,32 @@ def tumour_vs_control(merged: pd.DataFrame) -> pd.DataFrame:
     for hap_id, hdf in df.groupby("Haplotype_ID"):
         hap_str  = hdf["Haplotype"].iloc[0]
         hap_freq = hdf["Global_Freq"].iloc[0]
+        sample_hdf = hdf.drop_duplicates("snp_code").copy()
+        if "Callable" in sample_hdf.columns:
+            sample_hdf = sample_hdf[sample_hdf["Callable"] == 1]
+        sample_hdf = sample_hdf.dropna(subset=["Carrier"])
+        if sample_hdf.empty:
+            continue
         for cohort_label in ["Breast", "Endometrial"]:
             coh_filter = "Breast" if cohort_label == "Breast" else "Endometri"
-            tum_df = hdf[
-                hdf["Cohort"].str.contains(coh_filter, case=False, na=False)
-                & (hdf["Tissue"] == "Tumour")
+            tum_df = sample_hdf[
+                sample_hdf["Cohort"].str.contains(coh_filter, case=False, na=False)
+                & (sample_hdf["Tissue"] == "Tumour")
             ]
-            hlt_df = hdf[hdf["Tissue"] == "Healthy"]
+            hlt_df = sample_hdf[sample_hdf["Tissue"] == "Healthy"]
             if tum_df.empty or hlt_df.empty:
                 continue
 
             tum_samp = tum_df.drop_duplicates("snp_code")
             hlt_samp = hlt_df.drop_duplicates("snp_code")
-            a = tum_samp["Carrier"].sum()
+            if len(tum_samp) < MIN_CARRIERS or len(hlt_samp) < MIN_CARRIERS:
+                continue
+            a = int(tum_samp["Carrier"].sum())
             b = len(tum_samp) - a
-            c = hlt_samp["Carrier"].sum()
+            c = int(hlt_samp["Carrier"].sum())
             d = len(hlt_samp) - c
 
-            if a + c < MIN_CARRIERS:
+            if (a + c) < MIN_COMPARISON_CARRIERS or (b + d) < MIN_COMPARISON_CARRIERS:
                 continue
 
             _, p = fisher_exact([[a, b], [c, d]])
@@ -846,6 +878,9 @@ def _run_clin_for_cohort(df_t: pd.DataFrame,
         hap_str  = hdf["Haplotype"].iloc[0]
         hap_freq = hdf["Global_Freq"].iloc[0]
         sample_data = hdf.drop_duplicates("snp_code").set_index("snp_code")
+        if "Callable" in sample_data.columns:
+            sample_data = sample_data[sample_data["Callable"] == 1]
+        sample_data = sample_data.dropna(subset=["Carrier"])
         c_df  = sample_data[sample_data["Carrier"] == 1]
         nc_df = sample_data[sample_data["Carrier"] == 0]
         if len(c_df) < MIN_CARRIERS or len(nc_df) < MIN_CARRIERS:
@@ -954,6 +989,9 @@ def haplotype_dose_analysis(merged: pd.DataFrame,
     rows = []
     for hap_id in top_haplotypes:
         hdf = df[df["Haplotype_ID"] == hap_id].drop_duplicates("snp_code").set_index("snp_code")
+        if "Callable" in hdf.columns:
+            hdf = hdf[hdf["Callable"] == 1]
+        hdf = hdf.dropna(subset=["Dosage"])
         if hdf.empty:
             continue
         hap_str = hdf["Haplotype"].iloc[0]
@@ -1079,9 +1117,16 @@ def survival_analysis(merged: pd.DataFrame) -> Tuple[pd.DataFrame, List]:
                 if len(valid) < 6:
                     continue
 
-                carrier = s.loc[valid.index, "Carrier"].fillna(0).astype(int)
-                n_c   = carrier.sum()
-                n_nc  = (carrier == 0).sum()
+                if "Callable" in s.columns:
+                    s = s[s["Callable"] == 1].copy()
+                carrier = pd.to_numeric(s.loc[valid.index, "Carrier"], errors="coerce")
+                callable_idx = carrier.dropna().index
+                if len(callable_idx) < 6:
+                    continue
+                valid = valid.loc[callable_idx].copy()
+                carrier = carrier.loc[callable_idx].astype(int)
+                n_c   = int(carrier.sum())
+                n_nc  = int((carrier == 0).sum())
                 if n_c < MIN_CARRIERS or n_nc < MIN_CARRIERS:
                     continue
 
@@ -1132,8 +1177,8 @@ def survival_analysis(merged: pd.DataFrame) -> Tuple[pd.DataFrame, List]:
 
                 # KM plot
                 fig, ax = plt.subplots(figsize=(6, 4))
-                for grp_val, grp_label, col in [(0, "Non-carrier", "#1976D2"),
-                                                 (1, "Carrier",     "#D32F2F")]:
+                for grp_val, grp_label, col in [(0, "Non-carrier", HAPLOTYPE_STATUS_COLORS["Non-carrier"]),
+                                                 (1, "Carrier",     HAPLOTYPE_STATUS_COLORS["Heterozygous carrier"])]:
                     mask = carrier == grp_val
                     if mask.sum() < 2:
                         continue
@@ -1141,9 +1186,11 @@ def survival_analysis(merged: pd.DataFrame) -> Tuple[pd.DataFrame, List]:
                     kmf.fit(T[mask], E[mask],
                             label=f"{grp_label} (n={mask.sum()})")
                     kmf.plot_survival_function(ax=ax, ci_show=True, color=col)
-                ax.set_title(f"{hap_id} [{hap_str}]  —  {cohort_label} | {endpoint}\n"
-                             f"Log-rank p={lr_p:.4f}",
-                             fontsize=9)
+                ax.set_title(
+                    f"Kaplan-Meier Analysis of {endpoint} According to {hap_id} Carrier Status\n"
+                    f"{cohort_label} | Log-rank p={lr_p:.4f}",
+                    fontsize=9,
+                )
                 ax.set_xlabel(f"{endpoint} (months)")
                 ax.set_ylabel("Survival probability")
                 ax.legend(fontsize=8)
@@ -1176,34 +1223,32 @@ def cancer_risk_analysis(merged: pd.DataFrame) -> pd.DataFrame:
     for cohort_label, cfg in RISK_COHORTS.items():
         case_df    = df[df["sheet"] == cfg["case_sheet"]].copy()
         control_df = df[df["sheet"] == cfg["control_sheet"]].copy()
+        if "Callable" in case_df.columns:
+            case_df = case_df[case_df["Callable"] == 1].copy()
+        if "Callable" in control_df.columns:
+            control_df = control_df[control_df["Callable"] == 1].copy()
+        case_df = case_df.dropna(subset=["Carrier"])
+        control_df = control_df.dropna(subset=["Carrier"])
 
-        case_samp    = case_df.drop_duplicates("snp_code").set_index("snp_code")
-        control_samp = control_df.drop_duplicates("snp_code").set_index("snp_code")
-        n_cases    = len(case_samp)
-        n_controls = len(control_samp)
-        print(f"  {cohort_label}: {n_cases} cases, {n_controls} controls")
-
-        if n_cases < MIN_CARRIERS or n_controls < MIN_CARRIERS:
-            print("    Too few samples — skipping.")
-            continue
-
-        for hap_id in df["Haplotype_ID"].unique():
+        for hap_i, hap_id in enumerate(df["Haplotype_ID"].unique()):
             hap_str  = df[df["Haplotype_ID"] == hap_id]["Haplotype"].iloc[0]
             hap_freq = df[df["Haplotype_ID"] == hap_id]["Global_Freq"].iloc[0]
 
-            c_case    = case_samp[case_samp.index.isin(
-                case_df[case_df["Haplotype_ID"] == hap_id]["snp_code"])]
-            c_control = control_samp[control_samp.index.isin(
-                control_df[control_df["Haplotype_ID"] == hap_id]["snp_code"])]
+            hap_case = case_df[case_df["Haplotype_ID"] == hap_id].drop_duplicates("snp_code").set_index("snp_code")
+            hap_control = control_df[control_df["Haplotype_ID"] == hap_id].drop_duplicates("snp_code").set_index("snp_code")
+            n_cases = len(hap_case)
+            n_controls = len(hap_control)
+            if hap_i == 0:
+                print(f"  {cohort_label}: {n_cases} callable cases, {n_controls} callable controls")
+            if n_cases < MIN_CARRIERS or n_controls < MIN_CARRIERS:
+                continue
 
-            a = int(case_df[(case_df["Haplotype_ID"] == hap_id) &
-                            (case_df["Carrier"] == 1)]["snp_code"].nunique())
+            a = int(hap_case["Carrier"].sum())
             b = n_cases - a
-            c = int(control_df[(control_df["Haplotype_ID"] == hap_id) &
-                               (control_df["Carrier"] == 1)]["snp_code"].nunique())
+            c = int(hap_control["Carrier"].sum())
             d = n_controls - c
 
-            if a + c < MIN_CARRIERS:
+            if (a + c) < MIN_COMPARISON_CARRIERS or (b + d) < MIN_COMPARISON_CARRIERS:
                 continue
 
             _, p_unadj = fisher_exact([[a, b], [c, d]])
@@ -1239,18 +1284,8 @@ def cancer_risk_analysis(merged: pd.DataFrame) -> pd.DataFrame:
 
             # Age-adjusted logistic
             all_samp = pd.concat([
-                case_samp[["canon__age", "canon__bmi"]].assign(
-                    cancer=1,
-                    carrier=case_samp.index.map(
-                        lambda s: 1 if s in
-                        set(case_df[case_df["Haplotype_ID"] == hap_id]["snp_code"])
-                        else 0)),
-                control_samp[["canon__age", "canon__bmi"]].assign(
-                    cancer=0,
-                    carrier=control_samp.index.map(
-                        lambda s: 1 if s in
-                        set(control_df[control_df["Haplotype_ID"] == hap_id]["snp_code"])
-                        else 0)),
+                hap_case[["canon__age", "canon__bmi", "Carrier"]].rename(columns={"Carrier": "carrier"}).assign(cancer=1),
+                hap_control[["canon__age", "canon__bmi", "Carrier"]].rename(columns={"Carrier": "carrier"}).assign(cancer=0),
             ])
             all_samp["canon__age"] = pd.to_numeric(all_samp["canon__age"], errors="coerce")
             all_samp["canon__bmi"] = pd.to_numeric(all_samp["canon__bmi"], errors="coerce")
@@ -1304,7 +1339,7 @@ def make_volcano(tvh: pd.DataFrame, out_dir: Path):
             continue
         ax.scatter(sub["OR"].apply(lambda x: np.log2(x)),
                    -np.log10(sub["P_Value"]),
-                   c=col, label=cohort, alpha=0.7, s=60, zorder=3)
+                   c=col, label=f"{cohort} (tumour n={int(sub['N_Tumour'].iloc[0])}, control n={int(sub['N_Control'].iloc[0])})", alpha=0.7, s=60, zorder=3)
         for _, row in sub[sub["Nominal_Sig"]].iterrows():
             ax.annotate(row["Haplotype_ID"],
                         (np.log2(row["OR"]), -np.log10(row["P_Value"])),
@@ -1313,7 +1348,7 @@ def make_volcano(tvh: pd.DataFrame, out_dir: Path):
     ax.axvline(0, ls=":", c="#cccccc", lw=0.8)
     ax.set_xlabel("log₂(OR)  —  tumour vs control")
     ax.set_ylabel("-log₁₀(p)")
-    ax.set_title("Haplotype: Tumour vs Control", fontweight="bold")
+    ax.set_title(f"Association Between Haplotype Carrier Status and Tumour-Control Status [{COMPARATIVE_TAG}]", fontweight="bold")
     ax.legend(fontsize=9)
     _style_ax(ax)
     plt.tight_layout()
@@ -1431,7 +1466,7 @@ def make_heatmap(clin_res: pd.DataFrame, cohort_label: str,
                 vmin=0, vmax=vmax_p,
                 cbar_kws={"label": "-log10(p)", "shrink": 0.55},
                 xticklabels=True, yticklabels=True)
-    ax_p.set_title(f"-log10(p)  [{title_suffix}]", fontsize=9, fontweight="bold", pad=6)
+    ax_p.set_title(f"Statistical significance [{title_suffix}]", fontsize=9, fontweight="bold", pad=6)
     ax_p.set_xlabel("")
     ax_p.set_ylabel("Haplotype", fontsize=9)
     # Rotate x labels; auto-size font to avoid overlap
@@ -1471,7 +1506,7 @@ def make_heatmap(clin_res: pd.DataFrame, cohort_label: str,
                 center=0, vmin=-abs_max, vmax=abs_max,
                 cbar_kws={"label": cbar_label, "shrink": 0.55},
                 xticklabels=True, yticklabels=False)
-    ax_es.set_title("Effect size", fontsize=9, fontweight="bold", pad=6)
+    ax_es.set_title("Effect size estimate", fontsize=9, fontweight="bold", pad=6)
     ax_es.set_xlabel("")
     ax_es.set_ylabel("")
     ax_es.tick_params(axis="x", rotation=45, labelsize=x_fs)
@@ -1488,7 +1523,7 @@ def make_heatmap(clin_res: pd.DataFrame, cohort_label: str,
     ax_bar.set_ylim(0, n_haps)
     ax_bar.set_yticks([])
     ax_bar.set_xlabel("Global\nfreq (%)", fontsize=7.5)
-    ax_bar.set_title("Freq", fontsize=9, fontweight="bold")
+    ax_bar.set_title("Global frequency", fontsize=9, fontweight="bold")
     ax_bar.tick_params(axis="x", labelsize=7)
     ax_bar.spines["top"].set_visible(False)
     ax_bar.spines["right"].set_visible(False)
@@ -1498,10 +1533,12 @@ def make_heatmap(clin_res: pd.DataFrame, cohort_label: str,
                         va="center", fontsize=6.5, color="#333333")
 
     fig.suptitle(
-        f"Haplotype × Clinical Associations  —  {cohort_label}  ({title_suffix})\n"
-        f"All haplotypes ≥ {MIN_HAP_FREQ*100:.0f}% global frequency  |  "
-        f"* p < 0.05   ** p < 0.01",
-        fontsize=10, fontweight="bold", y=0.97
+        f"Associations Between GSDMB Haplotypes and Clinical Variables in {cohort_label} ({title_suffix})\n"
+        f"All haplotypes >= {MIN_HAP_FREQ*100:.0f}% global frequency  |  "
+        f"* p<0.05   ** p<0.01",
+        fontsize=10,
+        fontweight="bold",
+        y=0.97,
     )
 
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
@@ -1527,7 +1564,10 @@ def make_forest(clin_res: pd.DataFrame, cohort_label: str, out_path: Path):
     ax.set_yticklabels([f"{r['Haplotype_ID']} | {r['Clin_Label']}"
                         for _, r in sub.iterrows()], fontsize=8)
     ax.set_xlabel("Odds Ratio (unadjusted)")
-    ax.set_title(f"Haplotype Forest  —  {cohort_label}", fontweight="bold")
+    ax.set_title(
+        f"Associations Between GSDMB Haplotypes and Binary Clinical Outcomes in {cohort_label}",
+        fontweight="bold",
+    )
     _style_ax(ax, grid=False)
     ax.xaxis.grid(True, linestyle=":", alpha=0.4)
     plt.tight_layout()
@@ -1592,7 +1632,11 @@ def make_risk_forest(risk_res: pd.DataFrame, out_path: Path):
     ax.set_yticklabels([f"{r['Haplotype_ID']}  ({r['Cohort']})"
                         for _, r in df.iterrows()], fontsize=8.5)
     ax.set_xlabel("Odds Ratio — unadjusted (95% CI)", fontsize=10)
-    ax.set_title("Haplotype Cancer Risk  —  Case-Control", fontweight="bold", fontsize=11)
+    ax.set_title(
+        "Associations Between GSDMB Haplotypes and Cancer Risk",
+        fontweight="bold",
+        fontsize=11,
+    )
 
     # Log scale x-axis helps when CIs are very wide
     all_vals = pd.concat([df["OR_Unadj"],
@@ -1622,6 +1666,143 @@ def make_risk_forest(risk_res: pd.DataFrame, out_path: Path):
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"  Saved: {out_path}")
+
+
+def _select_haplotype_heatmap_focus_rows(clin_res: pd.DataFrame, p_col: str, max_rows: int = 10) -> pd.DataFrame:
+    """Return a cleaner subset of haplotypes for main-text heatmap presentation."""
+    if clin_res.empty or p_col not in clin_res.columns:
+        return clin_res
+    focus = clin_res[clin_res[p_col].notna()].copy()
+    if focus.empty:
+        return clin_res
+    rank_df = (focus.groupby('Haplotype_ID', as_index=False)[p_col]
+               .min()
+               .sort_values(p_col))
+    if 'FDR_Sig_Unadj' in focus.columns and focus['FDR_Sig_Unadj'].any():
+        keep = rank_df[rank_df['Haplotype_ID'].isin(focus.loc[focus['FDR_Sig_Unadj'], 'Haplotype_ID'])].head(max_rows)
+    elif 'Nominal_Sig_Unadj' in focus.columns and focus['Nominal_Sig_Unadj'].any():
+        keep = rank_df[rank_df['Haplotype_ID'].isin(focus.loc[focus['Nominal_Sig_Unadj'], 'Haplotype_ID'])].head(max_rows)
+    else:
+        keep = rank_df.head(max_rows)
+    return focus[focus['Haplotype_ID'].isin(set(keep['Haplotype_ID']))].copy()
+
+
+def make_main_text_heatmaps(b_clin: pd.DataFrame, e_clin: pd.DataFrame, out_dir: Path):
+    """Generate focused haplotype heatmaps suitable for main-text presentation."""
+    for clin_res, cohort_label in [(b_clin, 'Breast'), (e_clin, 'Endometrial')]:
+        if clin_res.empty:
+            continue
+        focused = _select_haplotype_heatmap_focus_rows(clin_res, 'P_Unadj', max_rows=10)
+        make_heatmap(
+            focused,
+            cohort_label,
+            'P_Unadj',
+            'Focused main-text view',
+            out_dir / f'18_Haplo_Heatmap_{cohort_label}_MainText.png',
+        )
+
+
+def make_haplotype_composition_plots(tvh: pd.DataFrame, merged: pd.DataFrame, out_dir: Path):
+    """Plot non-carrier / heterozygous / homozygous haplotype composition by comparison arm."""
+    if tvh.empty:
+        return
+
+    top_n = 8
+    status_order = ['Non-carrier', 'Heterozygous carrier', 'Homozygous carrier']
+    dosage_labels = {0: 'Non-carrier', 1: 'Heterozygous carrier', 2: 'Homozygous carrier'}
+
+    sample_manifest = merged[~merged['is_replicate']].drop_duplicates('snp_code').copy()
+    pooled_controls = sample_manifest[sample_manifest['Tissue'] == 'Healthy'].copy()
+
+    comparison_defs = {
+        'Breast': {
+            'tumour_mask': (sample_manifest['Tissue'] == 'Tumour') & sample_manifest['Cohort'].astype(str).str.contains('Breast', case=False, na=False),
+            'tumour_label': 'Breast tumour',
+            'control_label': 'Pooled control',
+        },
+        'Endometrial': {
+            'tumour_mask': (sample_manifest['Tissue'] == 'Tumour') & sample_manifest['Cohort'].astype(str).str.contains('Endometri', case=False, na=False),
+            'tumour_label': 'Endometrium tumour',
+            'control_label': 'Pooled control',
+        },
+    }
+
+    for cohort, cfg in comparison_defs.items():
+        sub = (tvh[tvh['Cohort'] == cohort]
+               .sort_values(['FDR_Sig', 'Nominal_Sig', 'P_Value'], ascending=[False, False, True])
+               .drop_duplicates('Haplotype_ID'))
+        if sub.empty:
+            continue
+        chosen = sub[sub['Nominal_Sig'] | sub['FDR_Sig']].head(top_n).copy() if (sub['Nominal_Sig'].any() or sub['FDR_Sig'].any()) else sub.head(top_n).copy()
+        if chosen.empty:
+            continue
+
+        tumour_samples = sample_manifest.loc[cfg['tumour_mask'], ['snp_code']].copy()
+        control_samples = pooled_controls[['snp_code']].copy()
+        if tumour_samples.empty or control_samples.empty:
+            continue
+
+        arm_df = pd.concat([
+            control_samples.assign(_arm=cfg['control_label']),
+            tumour_samples.assign(_arm=cfg['tumour_label']),
+        ], ignore_index=True)
+
+        n_plots = len(chosen)
+        ncols = min(3, n_plots)
+        nrows = int(np.ceil(n_plots / ncols))
+        fig, axes = plt.subplots(nrows, ncols, figsize=(5.1 * ncols, 4.3 * nrows), squeeze=False, facecolor='white')
+        axes_flat = axes.flatten()
+
+        for ax in axes_flat:
+            ax.set_facecolor('white')
+
+        for idx, (_, row) in enumerate(chosen.iterrows()):
+            ax = axes_flat[idx]
+            hap_id = row['Haplotype_ID']
+            hap_lookup = (merged[(~merged['is_replicate']) & (merged['Haplotype_ID'] == hap_id)]
+                          .drop_duplicates('snp_code')
+                          .set_index('snp_code')['Dosage'])
+            plot_df = arm_df.copy()
+            plot_df['_dosage'] = plot_df['snp_code'].map(hap_lookup)
+            plot_df = plot_df[plot_df['_dosage'].notna()].copy()
+            plot_df['Status'] = plot_df['_dosage'].astype(int).map(dosage_labels)
+
+            counts = (plot_df.groupby(['_arm', 'Status']).size().unstack(fill_value=0)
+                      .reindex(index=[cfg['control_label'], cfg['tumour_label']], columns=status_order, fill_value=0))
+            totals = counts.sum(axis=1)
+            perc = counts.div(totals, axis=0) * 100
+
+            xpos = np.arange(len(counts.index))
+            bottoms = np.zeros(len(counts.index))
+            for status in status_order:
+                vals = perc[status].to_numpy(dtype=float)
+                ax.bar(xpos, vals, bottom=bottoms, color=HAPLOTYPE_STATUS_COLORS[status], edgecolor='white', linewidth=1.0, width=0.58)
+                for xi, val, bottom in zip(xpos, vals, bottoms):
+                    if val >= 9:
+                        ax.text(xi, bottom + val / 2, f'{val:.0f}%', ha='center', va='center', fontsize=8.5, color='white', fontweight='bold')
+                bottoms += vals
+
+            ax.set_ylim(0, 100)
+            ax.set_xticks(xpos)
+            ax.set_xticklabels([f'{label}\n(n={int(totals.loc[label])})' for label in counts.index], fontsize=8.5)
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f'{v:.0f}%'))
+            ax.set_ylabel('Haplotype composition (%)', fontsize=9)
+            p_val = row['FDR_P_Value'] if bool(row.get('FDR_Sig', False)) else row['P_Value']
+            sig_label = 'FDR' if bool(row.get('FDR_Sig', False)) else ('p<0.05' if bool(row.get('Nominal_Sig', False)) else 'top hit')
+            ax.set_title(f'Haplotype {hap_id}\nOR={row["OR"]:.2f} | p={p_val:.3g} ({sig_label})', fontsize=8.5, fontweight='bold')
+            _style_ax(ax)
+
+        for ax in axes_flat[n_plots:]:
+            ax.set_visible(False)
+
+        handles = [plt.Rectangle((0, 0), 1, 1, facecolor=HAPLOTYPE_STATUS_COLORS[s], edgecolor='white') for s in status_order]
+        fig.legend(handles, status_order, title='Haplotype status', loc='upper center', ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.02))
+        fig.suptitle(f'Haplotype Composition in Tumour and Control Samples: {cohort} Comparison [{COMPARATIVE_TAG}]', fontsize=12, fontweight='bold', y=1.04)
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        out_path = out_dir / f'18_HaplotypeComposition_{cohort}.png'
+        plt.savefig(out_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f'  Saved: {out_path}')
 
 
 def make_km_pdf(km_pages: List, out_path: Path):
@@ -1794,21 +1975,28 @@ def build_carrier_matrix_from_reference(
         for samp in hap_df.index:
             h1 = hap1_sub[samp]
             h2 = hap2_sub[samp]
-            dosage = (int(h1 == hap_str) if "N" not in h1 else 0) +                      (int(h2 == hap_str) if "N" not in h2 else 0)
+            callable_hap = int("N" not in h1 and "N" not in h2)
+            if callable_hap:
+                dosage = int(h1 == hap_str) + int(h2 == hap_str)
+                carrier = int(dosage >= 1)
+            else:
+                dosage = np.nan
+                carrier = np.nan
             rec = {
                 "Sample_phased": samp,
                 "Haplotype_ID":  hap_id,
                 "Haplotype":     hap_str,
                 "Global_Freq":   gfreq,
                 "Dosage":        dosage,
-                "Carrier":       int(dosage >= 1),
+                "Carrier":       carrier,
+                "Callable":      callable_hap,
             }
             for mc in meta_cols:
                 rec[mc] = freq_row.get(mc, np.nan)
             rows.append(rec)
 
     carrier_df = pd.DataFrame(rows) if rows else pd.DataFrame(
-        columns=["Sample_phased","Haplotype_ID","Haplotype","Global_Freq","Dosage","Carrier"]
+        columns=["Sample_phased","Haplotype_ID","Haplotype","Global_Freq","Dosage","Carrier","Callable"]
     )
 
     n_carriers = carrier_df[carrier_df["Carrier"] == 1]["Sample_phased"].nunique() if not carrier_df.empty else 0
@@ -2056,6 +2244,7 @@ def main():
         return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
     freq_df  = _cat("freq_df")
+    merged   = _cat("merged")
     tvh      = _cat("tvh")
     b_clin   = _cat("b_clin")
     e_clin   = _cat("e_clin")
@@ -2143,25 +2332,28 @@ def main():
 
     # Heatmaps: unadjusted p-values
     make_heatmap(
-        b_clin, "Breast", "P_Unadj", "Unadjusted",
+        b_clin, "Breast", "P_Unadj", "Unadjusted (full view)",
         out_dir / "18_Haplo_Heatmap_Breast.png",
     )
     make_heatmap(
-        e_clin, "Endometrial", "P_Unadj", "Unadjusted",
+        e_clin, "Endometrial", "P_Unadj", "Unadjusted (full view)",
         out_dir / "18_Haplo_Heatmap_Endometrial.png",
     )
+    make_main_text_heatmaps(b_clin, e_clin, out_dir)
 
     # Heatmaps: age-adjusted p-values (if available)
     if not b_clin.empty and "P_Adj_Age" in b_clin.columns and b_clin["P_Adj_Age"].notna().any():
         make_heatmap(
-            b_clin, "Breast", "P_Adj_Age", "Age-adjusted",
+            b_clin, "Breast", "P_Adj_Age", "Age-adjusted (full view)",
             out_dir / "18_Haplo_Heatmap_Breast_AgeAdj.png",
         )
     if not e_clin.empty and "P_Adj_Age" in e_clin.columns and e_clin["P_Adj_Age"].notna().any():
         make_heatmap(
-            e_clin, "Endometrial", "P_Adj_Age", "Age-adjusted",
+            e_clin, "Endometrial", "P_Adj_Age", "Age-adjusted (full view)",
             out_dir / "18_Haplo_Heatmap_Endometrial_AgeAdj.png",
         )
+
+    make_haplotype_composition_plots(tvh, merged, out_dir)
 
     # Forest plots: binary clinical associations
     make_forest(b_clin, "Breast",      out_dir / "18_Haplo_Forest_Breast.png")

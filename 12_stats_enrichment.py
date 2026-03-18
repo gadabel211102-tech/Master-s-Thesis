@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from statsmodels.stats.multitest import multipletests
 
+from figure_style import COMPARATIVE_TAG, IMPACT_COLORS, arm_color
 from pipeline_utils import build_variant_id_series, combine_gnomad_nfe, find_col, get_paths, get_thresholds, pooled_control_frame, standardize_cohort_labels, standardize_tissue_labels
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_nonempty, validate_percentage_columns, validate_required_columns, validate_tissue_values
 
@@ -229,7 +230,7 @@ def run_snp_association_analysis():
 
         ax.axhline(
             y_thresh,
-            color="red",
+            color=arm_color('Tumour'),
             linestyle="--",
             alpha=0.7,
             linewidth=2,
@@ -238,7 +239,7 @@ def run_snp_association_analysis():
 
         ax.axvline(
             1,
-            color="blue",
+            color=arm_color('Control'),
             linestyle="--",
             alpha=0.7,
             linewidth=2,
@@ -248,12 +249,16 @@ def run_snp_association_analysis():
         xlim = ax.get_xlim()
         ylim = ax.get_ylim()
 
-        ax.axvspan(xlim[0], 1, alpha=0.05, color="blue", label="Protective (OR<1)")
-        ax.axvspan(1, xlim[1], alpha=0.05, color="red", label="Risk (OR>1)")
-        ax.axhspan(y_thresh, ylim[1], alpha=0.08, color="red", label="Above threshold")
+        ax.axvspan(xlim[0], 1, alpha=0.05, color=arm_color('Control'), label="Protective (OR<1)")
+        ax.axvspan(1, xlim[1], alpha=0.05, color=arm_color('Tumour'), label="Risk (OR>1)")
+        ax.axhspan(y_thresh, ylim[1], alpha=0.08, color=arm_color('Tumour'), label="Above threshold")
 
         group_data = data[data["Analysis_Group"] == group_name]
         labelled = group_data[group_data[label_col] != ""]
+        if not group_data.empty:
+            n_tumour = int(group_data['Tumour_Total'].iloc[0])
+            n_control = int(group_data['Control_Total'].iloc[0])
+            ax.set_title(f"{group_name}\nTumour samples: n={n_tumour}; controls: n={n_control}", fontweight='bold')
 
         for _, row in labelled.iterrows():
             ax.annotate(
@@ -287,7 +292,7 @@ def run_snp_association_analysis():
             col="Analysis_Group",
             hue="Impact",
             col_order=group_order,
-            palette="Set1",
+            palette=IMPACT_COLORS,
             height=5.8,
             aspect=1.15,
             despine=False,
@@ -322,7 +327,7 @@ def run_snp_association_analysis():
             g._legend._loc = 6
 
         g.fig.subplots_adjust(top=0.82, right=0.86, wspace=0.08)
-        g.fig.suptitle(title, fontsize=16, fontweight="bold", y=0.98)
+        g.fig.suptitle(f"Association Between Variant Frequency and Case-Control Status: {title} [{COMPARATIVE_TAG}]", fontsize=16, fontweight="bold", y=0.98)
 
         g.savefig(output_path, dpi=300, bbox_inches="tight")
         plt.close(g.fig)
