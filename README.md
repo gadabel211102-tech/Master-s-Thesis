@@ -68,7 +68,7 @@ The launcher now handles the expected environment split automatically:
 - shell-based BAM/QC/calling/phasing steps use `bam-steps`
 - Python analysis steps prefer the active virtual environment, then `/home/gadeaalonsoj/tfm_env/bin/python`, then a repo-local `tfm_env` if present
 - VEP annotation uses the repo-local `miniconda3/envs/vep_env/bin` when available, otherwise falls back to another `vep_env` on `conda`/`micromamba`, and finally to the local `ensembl-vep` checkout
-- the R haplotype statistics step uses `Rscript`
+- the R haplotype statistics step uses `Rscript` and the script now bootstraps missing R packages such as `haplo.stats` when needed
 
 If you prefer to run by hand instead of using the launcher, the expected environments are documented below.
 
@@ -329,6 +329,7 @@ Current grouping logic includes:
 - pooled controls = `Breast normal + Endometrium normal`
 - cohort-specific comparisons = tumour cohort vs pooled controls
 - global comparisons = all tumours vs all controls
+- cancer-risk comparisons in scripts `17` and `18` also use the same pooled healthy control arm
 
 ## Outputs
 
