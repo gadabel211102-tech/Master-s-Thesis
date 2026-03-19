@@ -23,15 +23,15 @@ import os
 import warnings
 
 from figure_style import COMPARATIVE_TAG, DASHBOARD_THEME, DESCRIPTIVE_TAG, IMPACT_COLORS, QUALITATIVE_COLORBLIND_SEQUENCE, SEQUENTIAL_COLORBLIND_SCALE, arm_color, cohort_color
-from pipeline_utils import combine_gnomad_nfe, find_col, get_paths, standardize_cohort_labels, standardize_tissue_labels
+from pipeline_utils import combine_gnomad_nfe, ensure_directory, find_col, get_paths, standardize_cohort_labels, standardize_tissue_labels
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_required_columns
 warnings.filterwarnings('ignore')
 
 # --- CONFIGURATION ---
 PATHS = get_paths()
-BASE_PATH = str(PATHS["results_dir"])
+OUTPUT_DIR = ensure_directory(PATHS["interactive_dashboard_dir"])
 INPUT_FILE = str(PATHS["annotated_report"])
-OUTPUT_HTML = str(PATHS["results_dir"] / "14_Interactive_Dashboard.html")
+OUTPUT_HTML = str(OUTPUT_DIR / "GSDMB_Interactive_Variant_Dashboard.html")
 
 
 def tagged_title(title, tag):
@@ -340,8 +340,8 @@ def load_snp_data():
     Load the SNP summary produced by script 11.
     Returns None gracefully if the file is not yet available.
     """
-    snp_file = os.path.join(BASE_PATH, "11_Master_Unique_SNP_Summary.xlsx")
-    if not os.path.exists(snp_file):
+    snp_file = PATHS["common_snps_dir"] / "GSDMB_Common_SNP_Frequency_Summary.xlsx"
+    if not snp_file.exists():
         print(f"  WARNING: SNP summary not found at {snp_file}")
         print("  Run script 11 first to enable SNP panels.")
         return None

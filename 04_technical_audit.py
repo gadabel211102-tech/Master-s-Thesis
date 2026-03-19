@@ -536,7 +536,7 @@ def run_comprehensive_audit(
                     f"n_samples_zero, n_samples_low per cohort")
     
     # Export
-    output_file = os.path.join(output_dir, "TFM_GSDMB_Final_Audit.csv")
+    output_file = os.path.join(output_dir, "GSDMB_Technical_Audit.csv")
     bed.sort_values(by='Global_Failure_%', ascending=False, na_position='last').to_csv(
         output_file, index=False
     )
@@ -680,7 +680,7 @@ EXAMPLES:
     
     parser.add_argument(
         '--bed',
-        default="/home/gadeaalonsoj/tfm/IAD255368_167_Submitted.bed",
+        default="/home/gadeaalonsoj/tfm/dna_bed/IAD255368_167_Submitted.bed",
         help='Path to BED file'
     )
     
@@ -692,25 +692,25 @@ EXAMPLES:
     
     parser.add_argument(
         '--coverage',
-        default="/home/gadeaalonsoj/tfm/gsdmb_final_results/individual_sample_coverage/**/*.coverage.tsv.gz",
+        default="/home/gadeaalonsoj/tfm/analysis_results/03_qc_visualisation/sample_level_coverage_tables/**/*.coverage.tsv.gz",
         help='Glob pattern for individual coverage files (for comprehensive mode)'
     )
     
     parser.add_argument(
         '--zero',
-        default="/home/gadeaalonsoj/tfm/**/zero_cov_fast/zero_cov_*.tsv",
+        default="/home/gadeaalonsoj/tfm/**/zero_coverage/zero_cov_*.tsv",
         help='Glob pattern for zero-coverage reports (for comprehensive mode)'
     )
     
     parser.add_argument(
         '--panels',
-        default="/home/gadeaalonsoj/tfm/gsdmb_final_results/GSDMB_*_FullPanel.csv",
+        default="/home/gadeaalonsoj/tfm/analysis_results/03_qc_visualisation/GSDMB_*_FullPanel.csv",
         help='Glob pattern for panel files (for quick mode)'
     )
     
     parser.add_argument(
         '--output', '-o',
-        default=".",
+        default="/home/gadeaalonsoj/tfm/analysis_results/04_technical_audit",
         help='Output directory'
     )
     

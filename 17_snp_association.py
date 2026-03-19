@@ -5,7 +5,7 @@
 =======================================================================
 SNP–Clinical Variable Association Analysis
 
-Joins the GSDMB variant report (GSDMB_Annotated_Report_Fixed.xlsx) with the
+Joins the GSDMB variant report (GSDMB_Annotated_Report.xlsx) with the
 harmonised clinical master (MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx)
 and tests each SNP for association with clinical variables.
 
@@ -103,8 +103,8 @@ OUTPUTS
 RUN
 ---
 python3 17_snp_association.py \\
-  --gsdmb   /path/to/GSDMB_Annotated_Report_Fixed.xlsx \\
-  --master  /path/to/MASTER_SNP_plus_clinical__HARMONISED_B_v4.xlsx \\
+  --gsdmb   /path/to/GSDMB_Annotated_Report.xlsx \\
+  --master  /path/to/MASTER_SNP_plus_clinical_HARMONISED.xlsx \\
   --out_dir /path/to/output/
 """
 
@@ -150,10 +150,11 @@ warnings.filterwarnings("ignore", message=".*tight_layout.*")
 warnings.filterwarnings("ignore", message=".*More than 20 figures.*")
 
 # ── DEFAULT PATHS ─────────────────────────────────────────────────────────────
-DEFAULT_GSDMB  = Path("/home/gadeaalonsoj/tfm/gsdmb_final_results/GSDMB_Annotated_Report_Fixed.xlsx")
-DEFAULT_MASTER = Path("/home/gadeaalonsoj/tfm/MASTER_SNP_plus_clinical__HARMONISED_B_v4.xlsx")
-DEFAULT_OUT    = Path("/home/gadeaalonsoj/tfm/gsdmb_final_results/")
-DEFAULT_VARIANT_WHITELIST = Path("/home/gadeaalonsoj/tfm/gsdmb_final_results/11_Master_Unique_SNP_Summary.xlsx")
+DEFAULTS = script17_defaults()
+DEFAULT_GSDMB  = DEFAULTS["gsdmb"]
+DEFAULT_MASTER = DEFAULTS["master"]
+DEFAULT_OUT    = DEFAULTS["out_dir"]
+DEFAULT_VARIANT_WHITELIST = DEFAULTS["variant_whitelist"]
 
 # Pass-BAM manifests — one file per cohort, listing QC-passed BAMs
 # These are the ground truth for which samples have actually been sequenced.
@@ -1667,9 +1668,9 @@ def _draw_volcano(tvh, p_col, sig_col, thresh, title_suffix, out_path):
         if not sub.empty:
             n_tumour = int(sub['N_Tumour'].iloc[0])
             n_control = int(sub['N_Control'].iloc[0])
-            ax.set_title(f"{grp} Cohort\nTumour samples: n={n_tumour}; controls: n={n_control}", fontsize=12, fontweight="bold", pad=8)
+            ax.set_title(f"{grp} | Tumour n={n_tumour}, Control n={n_control}", fontsize=12, fontweight="bold", pad=8)
         else:
-            ax.set_title(f"{grp} Cohort", fontsize=12, fontweight="bold", pad=8)
+            ax.set_title(f"{grp}", fontsize=12, fontweight="bold", pad=8)
         _style_ax(ax, grid=False)
         ax.xaxis.grid(True, linestyle=":", color="#cccccc", alpha=0.5)
         ax.yaxis.grid(True, linestyle=":", color="#cccccc", alpha=0.5)
@@ -1695,7 +1696,7 @@ def _draw_volcano(tvh, p_col, sig_col, thresh, title_suffix, out_path):
                frameon=True, framealpha=0.9, edgecolor="#cccccc")
 
     fig.suptitle(
-        f"Association Between GSDMB SNPs and Tumour-Control Status ({title_suffix})",
+        f"GSDMB SNP Volcano ({title_suffix})",
         fontsize=13,
         fontweight="bold",
         y=1.01,
@@ -1780,7 +1781,7 @@ def _draw_heatmap(clin_res, p_col, title_suffix, out_path, filter_thresh=0.20):
                  fontsize=7, color="#c62828")
 
     ax.set_title(
-        f"Associations Between GSDMB SNPs and Clinical Variables ({title_suffix})",
+        f"SNP-Clinical Heatmap ({title_suffix})",
         fontsize=11,
         fontweight="bold",
         pad=10,
@@ -2861,7 +2862,7 @@ def make_km_plots(surv_df, km_pages, out_dir):
     if not _HAS_LIFELINES or not km_pages:
         return
 
-    out_pdf = out_dir / "17_KM_Curves_All_Cohorts.pdf"
+    out_pdf = out_dir / "GSDMB_SNP_KM_Curves_All_Cohorts.pdf"
     with pdf_backend.PdfPages(out_pdf) as pdf:
         for fig in km_pages:
             pdf.savefig(fig, bbox_inches="tight")
@@ -3084,7 +3085,7 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
         fontweight="bold",
         y=1.01,
     )
-    out_path = out_dir / "17_Summary_Panel.png"
+    out_path = out_dir / "GSDMB_SNP_Association_Summary_Panel.png"
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"  Saved: {out_path}")
@@ -3151,7 +3152,7 @@ def cancer_risk_analysis(df: pd.DataFrame) -> pd.DataFrame:
     Analysis 5: Case-control logistic regression for cancer risk.
 
     For each cohort (breast, endometrial) and each variant, compares
-    carrier frequency in tumour cases vs matched healthy controls.
+    carrier frequency in tumour cases vs pooled healthy controls (breast + endometrial).
     Reports unadjusted OR (Fisher) and age- / age+BMI-adjusted OR
     (logistic regression), plus genotypic Het-vs-WT and Hom-vs-WT contrasts.
     """
@@ -3166,9 +3167,11 @@ def cancer_risk_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
     rows = []
 
+    pooled_controls = df[df["Tissue"] == "Healthy"].copy()
+
     for cohort_label, cfg in RISK_COHORTS.items():
         case_df    = df[df["sheet"] == cfg["case_sheet"]].copy()
-        control_df = df[df["sheet"] == cfg["control_sheet"]].copy()
+        control_df = pooled_controls.copy()
 
         # One row per sample — use sample-level data (not variant-level rows)
         case_samples    = case_df.drop_duplicates("Sample").set_index("Sample")
@@ -3177,15 +3180,16 @@ def cancer_risk_analysis(df: pd.DataFrame) -> pd.DataFrame:
         n_cases    = len(case_samples)
         n_controls = len(control_samples)
 
-        print(f"  {cohort_label}: {n_cases} cases, {n_controls} controls")
+        print(f"  {cohort_label}: {n_cases} cases, {n_controls} pooled controls")
         if n_cases < MIN_CARRIERS or n_controls < MIN_CARRIERS:
             print(f"    Too few samples — skipping.")
             continue
 
-        # All variants present in either group
-        all_variants = df[df["sheet"].isin(
-            [cfg["case_sheet"], cfg["control_sheet"]]
-        )]["Variant_ID"].unique()
+        # All variants present in either the tumour cohort or the pooled healthy arm
+        all_variants = pd.concat([
+            case_df[["Variant_ID"]],
+            control_df[["Variant_ID"]],
+        ], ignore_index=True)["Variant_ID"].dropna().unique()
 
         for var_id in all_variants:
             # Carrier sets
@@ -3588,7 +3592,7 @@ def main():
     if variant_whitelist is not None:
         validate_file_exists(variant_whitelist, "Script 17 variant whitelist")
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_xlsx = out_dir / "17_SNP_Clinical_Association_Results.xlsx"
+    out_xlsx = out_dir / "GSDMB_SNP_Clinical_Association_Results.xlsx"
 
     # Build manifest dict (None if --no_manifests flag set)
     if args.no_manifests:

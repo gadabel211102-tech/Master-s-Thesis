@@ -27,14 +27,58 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from figure_style import COMPARATIVE_TAG, IMPACT_COLORS
-from pipeline_utils import compute_carrier_percentage, extract_rsid, find_col, get_paths
+from pipeline_utils import compute_carrier_percentage, ensure_directory, extract_rsid, find_col, get_paths
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_required_columns
 
 # Use the shared pipeline configuration so that this gene-focused figure reads
 # from the same canonical inputs as the rest of the analytical workflow.
 PATHS = get_paths()
 input_file = str(PATHS["annotated_report"])
-output_image = str(PATHS["results_dir"] / "GSDMB_exclusive_landscape.png")
+output_dir = ensure_directory(PATHS.get("gsdmb_landscape_dir", PATHS["results_dir"] / "09_gsdmb_landscape"))
+output_image = str(output_dir / "GSDMB_Target_Gene_Variant_Landscape.png")
+LABEL_MODE = "high_only"  # valid options: "high_only", "both"
+
+
+def label_impacts():
+    """Return the impact classes that should receive text labels."""
+    return ["HIGH"] if LABEL_MODE == "high_only" else ["HIGH", "MODERATE"]
+
+
+def annotate_panel_variants(ax, panel_df, pos_c, impact_c):
+    """Place readable labels while skipping crowded overlaps in each panel."""
+    offsets = [(6, 6), (6, -10), (-10, 8), (-12, -10), (10, 14), (-10, 14)]
+    placed = []
+
+    priority = {impact: rank for rank, impact in enumerate(label_impacts())}
+    panel_df = panel_df.assign(_label_rank=panel_df[impact_c].map(priority).fillna(99))
+    panel_df = panel_df.sort_values(
+        by=["_label_rank", "Carrier_Percentage", pos_c],
+        ascending=[True, False, True]
+    )
+
+    for _, row in panel_df.iterrows():
+        x_val = float(row[pos_c])
+        y_val = float(row["Carrier_Percentage"])
+        too_close = any(
+            abs(x_val - placed_x) < 20000 and abs(y_val - placed_y) < 5
+            for placed_x, placed_y in placed
+        )
+        if too_close:
+            continue
+
+        offset = offsets[len(placed) % len(offsets)]
+        ax.annotate(
+            row["Variant_Label"],
+            xy=(x_val, y_val),
+            xytext=offset,
+            textcoords='offset points',
+            fontsize=8,
+            fontweight='bold' if row[impact_c] == "HIGH" else "normal",
+            color='black',
+            bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='none', alpha=0.75),
+            arrowprops=dict(arrowstyle='-', color='0.5', lw=0.5, alpha=0.5)
+        )
+        placed.append((x_val, y_val))
 
 
 def generate_gsdmb_map():
@@ -116,31 +160,17 @@ def generate_gsdmb_map():
         facet_kws={'sharex': True, 'sharey': True}
     )
 
-    label_offsets = {
-        'HIGH': (6, 6),
-        'MODERATE': (6, -10)
-    }
     labelled = variant_counts[
-        variant_counts[imp_c].isin(['HIGH', 'MODERATE']) & variant_counts['Variant_Label'].notna()
+        variant_counts[imp_c].isin(label_impacts()) & variant_counts['Variant_Label'].notna()
     ].copy()
-    for _, row in labelled.iterrows():
-        ax = g.axes_dict.get((row[coh_c], row[tis_c]))
+    for (cohort_label, tissue_label), panel_df in labelled.groupby([coh_c, tis_c], sort=False):
+        ax = g.axes_dict.get((cohort_label, tissue_label))
         if ax is None:
             continue
-        offset = label_offsets.get(row[imp_c], (6, 6))
-        ax.annotate(
-            row['Variant_Label'],
-            xy=(row[pos_c], row['Carrier_Percentage']),
-            xytext=offset,
-            textcoords='offset points',
-            fontsize=8,
-            fontweight='bold' if row[imp_c] == 'HIGH' else 'normal',
-            color='black',
-            bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='none', alpha=0.7)
-        )
+        annotate_panel_variants(ax, panel_df, pos_c, imp_c)
 
-    g.set_axis_labels("Position on Chr17 (Mb)", "Carrier Percentage of Samples")
-    g.set_titles("{row_name} Cohort | {col_name} Samples", fontweight='bold')
+    g.set_axis_labels("Chr17 Position (Mb)", "Carrier Frequency (%)")
+    g.set_titles("{row_name} | {col_name}", fontweight='bold')
 
     for ax in g.axes.flat:
         ax.set_ylim(0, 100)
@@ -148,7 +178,11 @@ def generate_gsdmb_map():
         ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, p: f'{y:.0f}%'))
 
     plt.subplots_adjust(top=0.9)
-    g.fig.suptitle(f'Genomic Distribution of GSDMB Variants Across Cohorts and Tissues [{COMPARATIVE_TAG}]', fontsize=18, fontweight='bold')
+    g.fig.suptitle(
+        'GSDMB Variant Landscape',
+        fontsize=16,
+        fontweight='bold'
+    )
 
     plt.savefig(output_image, dpi=300, bbox_inches='tight')
     print(f"SUCCESS: GSDMB-exclusive map saved to: {output_image}")

@@ -28,7 +28,7 @@ from tqdm import tqdm
 import warnings
 from statsmodels.stats.multitest import multipletests
 
-from pipeline_utils import build_variant_id_series, combine_gnomad_nfe, find_col, get_paths, get_thresholds, pooled_control_frame, standardize_cohort_labels, standardize_tissue_labels
+from pipeline_utils import build_variant_id_series, combine_gnomad_nfe, ensure_directory, find_col, get_paths, get_thresholds, pooled_control_frame, standardize_cohort_labels, standardize_tissue_labels
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_nonempty, validate_percentage_columns, validate_required_columns, validate_tissue_values
 
 warnings.filterwarnings("ignore")
@@ -36,10 +36,10 @@ warnings.filterwarnings("ignore")
 # --- CONFIGURATION ---
 PATHS = get_paths()
 THRESHOLDS = get_thresholds()
-BASE_PATH = str(PATHS["results_dir"])
+OUTPUT_DIR = ensure_directory(PATHS["permutation_testing_dir"])
 INPUT_FILE = str(PATHS["annotated_report"])
-OUTPUT_XLSX = str(PATHS["results_dir"] / "13_Permutation_Test_Results.xlsx")
-OUTPUT_PLOT = str(PATHS["results_dir"] / "13_Permutation_Comparison.png")
+OUTPUT_XLSX = str(OUTPUT_DIR / "GSDMB_SNP_Permutation_Test_Results.xlsx")
+OUTPUT_PLOT = str(OUTPUT_DIR / "GSDMB_SNP_Permutation_Comparison.png")
 
 # Permutation parameters
 N_PERMUTATIONS = THRESHOLDS["n_permutations"]
@@ -386,7 +386,7 @@ def generate_comparison_plots(results_df):
 
     ax1.set_xlabel("Fisher's Exact Test (-log10 raw p)", fontweight="bold")
     ax1.set_ylabel("Permutation Test (-log10 raw p)", fontweight="bold")
-    ax1.set_title("Comparison of Raw Significance Estimates From Permutation Testing and Fisher's Exact Test", fontweight="bold", fontsize=12)
+    ax1.set_title("Raw p-value Concordance", fontweight="bold", fontsize=12)
     ax1.legend(loc="best")
     ax1.grid(True, alpha=0.3)
 
@@ -406,7 +406,7 @@ def generate_comparison_plots(results_df):
     ax2.axhline(sig_line, color="red", linestyle=":", alpha=0.5, label="p=0.05")
     ax2.set_xlabel("Effect Size (Cohen's h)", fontweight="bold")
     ax2.set_ylabel("Permutation Test (-log10 raw p)", fontweight="bold")
-    ax2.set_title("Relationship Between Effect Size and Raw Statistical Significance", fontweight="bold", fontsize=12)
+    ax2.set_title("Effect Size vs Raw Significance", fontweight="bold", fontsize=12)
     ax2.legend(loc="best")
     ax2.grid(True, alpha=0.3)
 
@@ -427,7 +427,7 @@ def generate_comparison_plots(results_df):
     ax3.axvline(0, color="black", linestyle="--", alpha=0.5, label="No difference")
     ax3.set_xlabel("Frequency Difference (Tumour - Control %)", fontweight="bold")
     ax3.set_ylabel("Density", fontweight="bold")
-    ax3.set_title("Distribution of Tumour-Control Frequency Differences", fontweight="bold", fontsize=12)
+    ax3.set_title("Tumour-Control Frequency Shift", fontweight="bold", fontsize=12)
     ax3.legend(loc="best")
     ax3.grid(True, alpha=0.3, axis="y")
 
@@ -461,15 +461,15 @@ def generate_comparison_plots(results_df):
     )
     ax4.set_xlabel("Cohort", fontweight="bold")
     ax4.set_ylabel("Percentage of SNPs", fontweight="bold")
-    ax4.set_title("Concordance Between Fisher and Permutation Results at the FDR Threshold", fontweight="bold", fontsize=12)
+    ax4.set_title("FDR Concordance by Test", fontweight="bold", fontsize=12)
     ax4.legend(title="Significance", bbox_to_anchor=(1.05, 1), loc="upper left")
     plt.setp(ax4.xaxis.get_majorticklabels(), rotation=0)
     ax4.set_ylim(0, 100)
     ax4.grid(True, alpha=0.3, axis="y")
 
     plt.suptitle(
-        f"Overall Comparison of Permutation Testing and Fisher's Exact Test\n"
-        f"({N_PERMUTATIONS:,} permutations per SNP, combined NFE AF filter)",
+        f"Permutation vs Fisher Comparison\n"
+        f"{N_PERMUTATIONS:,} permutations per SNP",
         fontsize=16,
         fontweight="bold",
         y=0.995

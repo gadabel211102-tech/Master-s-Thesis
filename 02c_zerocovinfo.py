@@ -38,6 +38,7 @@ Usage:
 import argparse
 import sys
 import os
+from pathlib import Path
 import pandas as pd
 import numpy as np
 from openpyxl import Workbook
@@ -105,7 +106,11 @@ def safe(v):
 def load_zero_cov(paths):
     frames = []
     for path in paths:
-        cohort = os.path.basename(path).replace('zero_cov_', '').replace('.tsv', '')
+        path_obj = Path(path)
+        if len(path_obj.parts) >= 4 and path_obj.parts[-2] == 'zero_coverage':
+            cohort = f"{path_obj.parts[-4]}_{path_obj.parts[-3]}"
+        else:
+            cohort = path_obj.stem.replace('zero_cov_', '')
         df = pd.read_csv(path, sep='\t')
         if 'amplicon_length_bp' not in df.columns:
             print(f"ERROR: {path} is in the OLD format from script 02b.")
@@ -116,7 +121,7 @@ def load_zero_cov(paths):
             sys.exit(1)
         df['cohort'] = cohort
         n_samples = sum(1 for c in df.columns if c.endswith('_zero_bases'))
-        print(f"  Loaded {os.path.basename(path)}: {len(df)} amplicons, {n_samples} samples")
+        print(f"  Loaded {path_obj.name} for {cohort}: {len(df)} amplicons, {n_samples} samples")
         frames.append(df)
     return pd.concat(frames, ignore_index=True)
 
@@ -262,9 +267,9 @@ def build_problem_detail(df, qc_df, pct_zero_thr, pct_low_thr):
                     'Sample':                sample,
                     'Script02_QC_Status':    qc_status,
                     'Script02_Fail_Reasons': fail_reasons,
-                    'Zero_Bases':            int(amp[f'{sample}_zero_bases']),
+                    'Zero_Bases':            _safe_int(amp[f'{sample}_zero_bases']),
                     'Pct_Zero':              round(pz, 2),
-                    'Low_Bases':             int(amp[f'{sample}_low_bases']),
+                    'Low_Bases':             _safe_int(amp[f'{sample}_low_bases']),
                     'Pct_Low_200x':          round(pl, 2),
                     'Flag':                  flag,
                 })
@@ -273,6 +278,14 @@ def build_problem_detail(df, qc_df, pct_zero_thr, pct_low_thr):
         return pd.DataFrame()
     out = pd.DataFrame(rows)
     return out.sort_values(['Flag', 'Pct_Zero'], ascending=[True, False])
+
+
+
+def _safe_int(value):
+    """Convert numeric values to int while treating missing values as zero."""
+    if pd.isna(value):
+        return 0
+    return int(value)
 
 # ============================================================================
 # EXCEL SHEETS

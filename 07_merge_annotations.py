@@ -17,7 +17,7 @@ generic text-processing tools.
 
 Output
 ------
-- Biological_Annotations sheet in GSDMB_Annotated_Report_Fixed.xlsx.
+- Biological_Annotations sheet in GSDMB_Annotated_Report.xlsx.
 """
 
 import pandas as pd
@@ -31,8 +31,9 @@ from pipeline_validation import print_validation_summary, validate_required_colu
 
 # --- Configuration ---
 PATHS = get_paths()
-results_dir = str(PATHS["results_dir"])
-output_file = os.path.join(results_dir, "GSDMB_Annotated_Report_Fixed.xlsx")
+results_dir = str(PATHS["annotated_variants_dir"])
+os.makedirs(results_dir, exist_ok=True)
+output_file = os.path.join(results_dir, "GSDMB_Annotated_Variants.xlsx")
 tfm_root = str(PATHS["project_root"])
 
 

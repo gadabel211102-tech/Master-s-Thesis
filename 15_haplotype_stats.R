@@ -18,6 +18,19 @@
 # =============================================================================
 
 suppressPackageStartupMessages({
+  install_if_missing <- function(pkg, ...) {
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+      install.packages(pkg, repos = "https://cloud.r-project.org", ...)
+    }
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+      stop(sprintf("Required R package could not be installed: %s", pkg))
+    }
+  }
+
+  for (pkg in c("haplo.stats", "ggplot2", "dplyr", "tidyr", "openxlsx", "readxl", "stringr", "scales", "forcats")) {
+    install_if_missing(pkg)
+  }
+
   library(haplo.stats)
   library(ggplot2)
   library(dplyr)
@@ -115,16 +128,16 @@ format_threshold_label <- function(threshold) {
 # =============================================================================
 # 1. CONFIGURATION
 # =============================================================================
-BASE_DIR  <- "/home/gadeaalonsoj/tfm/gsdmb_final_results"
-HAPLO_DIR <- file.path(BASE_DIR, "19_haplotype_phased")
-OUT_DIR   <- file.path(BASE_DIR, "19_haplo_stats_results")
+BASE_DIR  <- "/home/gadeaalonsoj/tfm/analysis_results"
+HAPLO_DIR <- file.path(BASE_DIR, "15_haplotype_phasing")
+OUT_DIR   <- file.path(BASE_DIR, "15_haplotype_statistics")
 
 GENO_FILE <- file.path(HAPLO_DIR, "phased_genotypes.tsv")
 META_FILE <- file.path(HAPLO_DIR, "sample_metadata.tsv")
-WHITELIST <- file.path(BASE_DIR, "11_Master_Unique_SNP_Summary.xlsx")
-ANNOTATED <- file.path(BASE_DIR, "GSDMB_Annotated_Report_Fixed.xlsx")
+WHITELIST <- file.path(BASE_DIR, "11_common_snps", "GSDMB_Common_SNP_Frequency_Summary.xlsx")
+ANNOTATED <- file.path(BASE_DIR, "07_annotated_variants", "GSDMB_Annotated_Variants.xlsx")
 
-OUT_XLSX  <- file.path(OUT_DIR, "19_Haplotype_Results_v7_blocks_and_genes.xlsx")
+OUT_XLSX  <- file.path(OUT_DIR, "GSDMB_Haplotype_Results.xlsx")
 
 if (!dir.exists(OUT_DIR)) dir.create(OUT_DIR, recursive = TRUE)
 
@@ -505,7 +518,7 @@ make_ld_plot <- function(ld_matrix, snp_meta, out_file, ld_blocks = NULL) {
       labels   = percent_format(accuracy = 1),
       name     = expression(r^2)
     ) +
-    labs(title    = "Pairwise linkage disequilibrium across the selected SNP panel",
+    labs(title    = "LD Matrix Across the SNP Panel",
          subtitle = expression(paste("Pairwise ", r^2, " estimated from phased dosages | red boxes = LD blocks")),
          x = NULL, y = NULL) +
     theme(axis.text.x    = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 7),
@@ -594,7 +607,7 @@ make_forest_plot <- function(assoc_df, region_name, out_file) {
                   labels = c("0.1", "0.25", "0.5", "1", "2", "4", "10")) +
     coord_cartesian(clip = "off") +
     facet_wrap(~Comparison, ncol = 1, scales = "free_y") +
-    labs(title    = sprintf("Association between haplotypes and tumour-control status - %s", region_name),
+    labs(title    = sprintf("Haplotype Association: %s", region_name),
          subtitle = "Firth-penalised logistic regression | OR (95% CI) | log10 x-axis | label = Haplotype ID (global freq%)",
          x = "Odds ratio (log scale)", y = NULL) +
     theme(axis.text.y  = element_text(size = 8.5, face = "bold"),
@@ -650,7 +663,7 @@ make_haplotype_composition_plot <- function(freq_df, snp_meta_sub, region_name, 
                   label = sprintf("%.1f%%", Frequency * 100)),
               inherit.aes = FALSE, size = 3, hjust = 0) +
     coord_cartesian(clip = "off") +
-    labs(title    = sprintf("Allelic composition of haplotypes - %s", region_name),
+    labs(title    = sprintf("Haplotype Allelic Composition: %s", region_name),
          subtitle = "Red = alt allele carried | rows ordered by global frequency",
          x = NULL, y = "Haplotype") +
     theme(
@@ -728,7 +741,7 @@ make_freq_comparison_plot <- function(assoc_df, region_name, out_file,
       breaks = seq(0, 100, by = 20),
       labels = function(x) sprintf("%d%%", as.integer(x))
     ) +
-    labs(title    = sprintf("Haplotype carrier frequency in tumour and control samples - %s (%s)",
+    labs(title    = sprintf("Haplotype Carrier Frequency: %s (%s)",
                             region_name, comparison),
          subtitle = "* p\u202f<\u202f0.05 (Fisher)   ** FDR\u202f<\u202f0.05   bars show carrier frequency",
          x = NULL, y = "Haplotype frequency (%)") +
@@ -871,7 +884,7 @@ make_haplotype_dosage_plot <- function(a1_mat, a2_mat, assoc_df, metadata_df,
       labels = function(x) sprintf("%.0f%%", x)
     ) +
     labs(
-      title = sprintf("Haplotype dosage composition - %s (%s)", region_name, comparison),
+      title = sprintf("Haplotype Dosage Composition: %s (%s)", region_name, comparison),
       subtitle = "Bars are proportional within each arm and show non-carriers, heterozygous carriers, and homozygous carriers",
       x = NULL,
       y = "Samples within comparison arm (%)"
@@ -939,7 +952,7 @@ make_association_overview_plot <- function(summary_df, out_file) {
              y = -log10(0.05 / n_tests) + 0.1,
              label = sprintf("Bonferroni (n=%d tests)", n_tests),
              hjust = 1.1, size = 3, colour = "#D55E00") +
-    labs(title    = "Overview of haplotype associations across genomic regions",
+    labs(title    = "Regional Haplotype Association Overview",
          subtitle = "-log10(best Fisher p) per region | bubble size = haplotypes tested",
          x = NULL, y = expression(-log[10](p))) +
     theme(axis.text.x   = element_text(angle = 40, hjust = 1, size = 7.5),
@@ -1025,7 +1038,7 @@ make_cohort_freq_plot <- function(a1_mat, a2_mat, freq_df, metadata_df,
     geom_col(colour = "white", linewidth = 0.3) +
     scale_fill_manual(values = hap_pal, name = "Haplotype") +
     scale_y_continuous(expand = c(0, 0), limits = c(0, 102)) +
-    labs(title    = sprintf("Haplotype frequency distribution by cohort - %s", region_name),
+    labs(title    = sprintf("Haplotype Frequency by Cohort: %s", region_name),
          subtitle = "Stacked bars show haplotype frequency within each group",
          x = NULL, y = "Frequency (%)") +
     theme(axis.text.x    = element_text(size = 9),
@@ -1080,7 +1093,7 @@ make_manhattan_hap_plot <- function(assoc_df, snp_meta, out_file,
     geom_point(alpha = 0.8) +
     scale_colour_manual(values = gene_cols, name = "Gene") +
     scale_size_continuous(range = c(2, 7), name = "Global freq (%)") +
-    labs(title    = sprintf("Genomic position of haplotype associations - %s comparison", comparison),
+    labs(title    = sprintf("Haplotype Association Position: %s", comparison),
          subtitle = "-log10(Fisher p) | point size = global haplotype frequency | coloured by gene",
          x = "Genomic position (Mb)", y = expression(-log[10](p))) +
     theme(legend.position = "right")
@@ -1520,7 +1533,7 @@ cat("----------------------------------------------------------------------\n")
 # ── 1. Full-region haplotype frequency bar chart ─────────────────────────────
 make_freq_plot(
   full_freq$shown,
-  title    = "Full-region global haplotype frequencies",
+  title    = "Full-Region Haplotype Frequencies",
   subtitle = sprintf("%d SNPs across %d samples | shown haplotypes >= %.1f%%",
                      n_snps, n_samples, MAIN_MIN_FREQ * 100),
   out_file = file.path(OUT_DIR, "19_FullRegion_Haplotype_Frequencies.png")
@@ -1552,7 +1565,7 @@ if (length(block_summary_rows) > 0) {
   p_blocks <- ggplot(block_plot_df, aes(x = Region, y = Haps_Shown)) +
     geom_col(fill = "#CC79A7", colour = "black", alpha = 0.85) +
     geom_text(aes(label = paste0(N_SNPs, " SNPs")), vjust = -0.35, size = 3.2) +
-    labs(title    = "Haplotype complexity across LD blocks",
+    labs(title    = "Haplotype Complexity Across LD Blocks",
          subtitle = sprintf("Shown haplotypes at >= %.1f%% frequency threshold",
                             SUPP_MIN_FREQ * 100),
          x = NULL, y = "Shown haplotypes") +
@@ -1591,7 +1604,7 @@ if (length(gene_summary_rows) > 0) {
   p_genes <- ggplot(gene_plot_df, aes(x = Region, y = Haps_Shown)) +
     geom_col(fill = "#009E73", colour = "black", alpha = 0.85) +
     geom_text(aes(label = paste0(N_SNPs, " SNPs")), vjust = -0.35, size = 3.2) +
-    labs(title    = "Gene-specific haplotype complexity summary",
+    labs(title    = "Gene-Specific Haplotype Complexity",
          subtitle = sprintf("Shown haplotypes at >= %.1f%% frequency threshold",
                             SUPP_MIN_FREQ * 100),
          x = NULL, y = "Shown haplotypes") +

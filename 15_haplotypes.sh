@@ -66,8 +66,8 @@ set -euo pipefail
 # =============================================================================
 
 BASE="/home/gadeaalonsoj/tfm"
-RESULTS="${BASE}/gsdmb_final_results"
-HAPLO_DIR="${RESULTS}/19_haplotype_phased"
+RESULTS="${BASE}/analysis_results"
+HAPLO_DIR="${RESULTS}/15_haplotype_phasing"
 BEAGLE="${BASE}/beagle.jar"
 THREADS=4
 

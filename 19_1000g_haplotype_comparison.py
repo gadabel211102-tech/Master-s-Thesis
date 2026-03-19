@@ -534,11 +534,11 @@ def plot_block_overlap_heatmap(overlap_df: pd.DataFrame, out_dir: Path) -> None:
             cbar_kws={"label": "Jaccard overlap"},
             ax=ax,
         )
-        ax.set_title(f"Overlap Between Study-Derived and 1000 Genomes LD Blocks ({population}, {threshold_label})", loc="left", weight="bold")
+        ax.set_title(f"LD Block Overlap: {population} ({threshold_label})", loc="left", weight="bold")
         ax.set_xlabel("1000 Genomes block")
         ax.set_ylabel("Study block")
         fig.tight_layout()
-        fig.savefig(out_dir / f"20_1000G_BlockOverlap_{population}_{threshold_label}.png", dpi=300, bbox_inches="tight")
+        fig.savefig(out_dir / f"19_1000G_BlockOverlap_{population}_{threshold_label}.png", dpi=300, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -561,20 +561,28 @@ def plot_concordance_summary(summary_df: pd.DataFrame, out_dir: Path) -> None:
             s=100,
             ax=ax,
         )
+        placed = []
+        offsets = [(0.012, 0.008), (0.012, -0.012), (-0.08, 0.008), (-0.08, -0.012)]
         for row in subset.itertuples(index=False):
+            x_val = float(row.Shared_Frequency_Mass)
+            y_val = float(row.Jensen_Shannon_Distance)
+            if any(abs(x_val - px) < 0.05 and abs(y_val - py) < 0.05 for px, py in placed):
+                continue
+            dx, dy = offsets[len(placed) % len(offsets)]
             ax.text(
-                row.Shared_Frequency_Mass + 0.01,
-                row.Jensen_Shannon_Distance + 0.005,
+                x_val + dx,
+                y_val + dy,
                 str(row.Region).replace("LD_Block_", ""),
                 fontsize=8,
             )
-        ax.set_title(f"Concordance Between Study-Derived and 1000 Genomes Haplotypes ({population})", loc="left", weight="bold")
+            placed.append((x_val, y_val))
+        ax.set_title(f"Haplotype Concordance: {population}", loc="left", weight="bold")
         ax.set_xlabel("Shared haplotype-frequency mass")
         ax.set_ylabel("Jensen-Shannon distance")
         ax.set_xlim(-0.02, 1.02)
         ax.set_ylim(-0.02, 1.02)
         fig.tight_layout()
-        fig.savefig(out_dir / f"20_1000G_HaplotypeConcordance_{population}.png", dpi=300, bbox_inches="tight")
+        fig.savefig(out_dir / f"19_1000G_HaplotypeConcordance_{population}.png", dpi=300, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -726,7 +734,7 @@ def main() -> None:
     freq_compare_df = pd.concat(frequency_comparisons, ignore_index=True) if frequency_comparisons else pd.DataFrame()
     concordance_df = pd.DataFrame(concordance_rows)
 
-    with pd.ExcelWriter(out_dir / "20_1000G_Haplotype_Comparison.xlsx", engine="openpyxl") as writer:
+    with pd.ExcelWriter(out_dir / "19_1000G_Haplotype_Comparison.xlsx", engine="openpyxl") as writer:
         population_summary.to_excel(writer, sheet_name="Population_Summary", index=False)
         region_summary.to_excel(writer, sheet_name="Study_LD_Regions", index=False)
         if not local_blocks.empty:
@@ -750,7 +758,7 @@ def main() -> None:
 
     print("1000 Genomes haplotype comparison complete")
     print(f"Output directory: {out_dir}")
-    print(f"Workbook: {out_dir / '20_1000G_Haplotype_Comparison.xlsx'}")
+    print(f"Workbook: {out_dir / '19_1000G_Haplotype_Comparison.xlsx'}")
 
 
 if __name__ == "__main__":

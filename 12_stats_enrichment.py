@@ -28,19 +28,19 @@ import seaborn as sns
 from statsmodels.stats.multitest import multipletests
 
 from figure_style import COMPARATIVE_TAG, IMPACT_COLORS, arm_color
-from pipeline_utils import build_variant_id_series, combine_gnomad_nfe, find_col, get_paths, get_thresholds, pooled_control_frame, standardize_cohort_labels, standardize_tissue_labels
+from pipeline_utils import build_variant_id_series, combine_gnomad_nfe, ensure_directory, find_col, get_paths, get_thresholds, pooled_control_frame, standardize_cohort_labels, standardize_tissue_labels
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_nonempty, validate_percentage_columns, validate_required_columns, validate_tissue_values
 
 # --- 1. PATH CONFIGURATION ---
 PATHS = get_paths()
 THRESHOLDS = get_thresholds()
-base_path = str(PATHS["results_dir"])
+output_dir = ensure_directory(PATHS["snp_enrichment_dir"])
 input_file = str(PATHS["annotated_report"])
-output_xlsx = str(PATHS["results_dir"] / "12_SNP_Enrichment_Results.xlsx")
+output_xlsx = str(output_dir / "GSDMB_SNP_Enrichment_Results.xlsx")
 
 # Separate volcano outputs
-output_plot_raw = str(PATHS["results_dir"] / "12_SNP_Volcano_Plots_RAW.png")
-output_plot_fdr = str(PATHS["results_dir"] / "12_SNP_Volcano_Plots_FDR.png")
+output_plot_raw = str(output_dir / "GSDMB_SNP_Enrichment_Volcano_RAW.png")
+output_plot_fdr = str(output_dir / "GSDMB_SNP_Enrichment_Volcano_FDR.png")
 
 
 def run_snp_association_analysis():
@@ -327,7 +327,7 @@ def run_snp_association_analysis():
             g._legend._loc = 6
 
         g.fig.subplots_adjust(top=0.82, right=0.86, wspace=0.08)
-        g.fig.suptitle(f"Association Between Variant Frequency and Case-Control Status: {title} [{COMPARATIVE_TAG}]", fontsize=16, fontweight="bold", y=0.98)
+        g.fig.suptitle(f"SNP Enrichment Volcano: {title} [{COMPARATIVE_TAG}]", fontsize=16, fontweight="bold", y=0.97)
 
         g.savefig(output_path, dpi=300, bbox_inches="tight")
         plt.close(g.fig)
@@ -339,7 +339,7 @@ def run_snp_association_analysis():
         label_col="Label_RAW",
         threshold_p=0.05,
         y_label="-log10(raw P-value)",
-        title="SNP Association Analysis: Tumour vs. Control Cohorts\n(Raw P-value Volcano Plots)",
+        title="Raw p-values",
         output_path=output_plot_raw
     )
 
@@ -350,7 +350,7 @@ def run_snp_association_analysis():
         label_col="Label_FDR",
         threshold_p=0.05,
         y_label="-log10(FDR-adjusted P-value)",
-        title="SNP Association Analysis: Tumour vs. Control Cohorts\n(FDR-adjusted Volcano Plots)",
+        title="FDR-adjusted",
         output_path=output_plot_fdr
     )
 

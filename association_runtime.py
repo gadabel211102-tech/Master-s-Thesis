@@ -19,7 +19,7 @@ def script17_defaults() -> dict[str, object]:
     return {
         "gsdmb": paths["annotated_report"],
         "master": paths["harmonised_master"],
-        "out_dir": paths["results_dir"],
+        "out_dir": paths["snp_clinical_dir"],
         "manifests": {
             "endometrium-tumour": manifests_dir / "endometrium-tumour-pass_manifest.txt",
             "endometrium-normal": manifests_dir / "endometrium-normal-pass_manifest.txt",
@@ -41,7 +41,7 @@ def script18_defaults() -> dict[str, object]:
         "phased": paths["haplotype_phased"],
         "master": paths["harmonised_master"],
         "annot": paths["annotated_report"],
-        "out_dir": paths["results_dir"],
+        "out_dir": paths["haplotype_clinical_dir"],
         "haplotype_results": paths["haplotype_results"],
         "min_hap_freq": thresholds["min_hap_freq"],
         "min_carriers": thresholds["min_carriers"],
@@ -49,3 +49,16 @@ def script18_defaults() -> dict[str, object]:
         "fdr_threshold": thresholds["fdr_threshold"],
         "grouping": get_grouping(),
     }
+
+
+def script19_defaults() -> dict[str, object]:
+    """Return the canonical configuration bundle for 1000 Genomes haplotype comparison."""
+    paths = get_paths()
+    out_dir = paths.get("thousand_genomes_results", paths["results_dir"] / "19_1000g_haplotype_comparison")
+    return {
+        "annot": paths["annotated_report"],
+        "haplotype_results": paths["haplotype_results"],
+        "out_dir": out_dir,
+        "populations": ["EUR", "ALL", "IBS"],
+    }
+

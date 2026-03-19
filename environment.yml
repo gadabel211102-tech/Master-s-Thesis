@@ -18,3 +18,4 @@ dependencies:
   - biopython
   - lifelines
   - tqdm
+  - pysam

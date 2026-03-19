@@ -51,38 +51,26 @@ pipeline_validation.py           Shared validation helpers
 association_runtime.py           Shared runtime defaults for scripts 17, 18, and 19
 environment.yml                  Shared conda/micromamba environment specification
 requirements.txt                 Shared pip specification for the legacy tfm_env workflow
-PIPELINE.md                      Short pipeline notes and doc pointers
+docs/notes/PIPELINE.md           Short pipeline notes and doc pointers
 ```
 
 ## Quick Start
 
-If you want the shortest practical version of the workflow, use the environments like this:
-
-1. Activate `bam-steps` for shell-based bioinformatics work.
+If you want the shortest practical version of the workflow on this machine, use:
 
 ```bash
-micromamba activate bam-steps
+cd /home/gadeaalonsoj/tfm
+./run_full_pipeline.sh
 ```
 
-2. Activate `tfm_env` for the Python analysis scripts.
+The launcher now handles the expected environment split automatically:
 
-```bash
-source tfm_env/bin/activate
-```
+- shell-based BAM/QC/calling/phasing steps use `bam-steps`
+- Python analysis steps prefer the active virtual environment, then `/home/gadeaalonsoj/tfm_env/bin/python`, then a repo-local `tfm_env` if present
+- VEP annotation uses the repo-local `miniconda3/envs/vep_env/bin` when available, otherwise falls back to another `vep_env` on `conda`/`micromamba`, and finally to the local `ensembl-vep` checkout
+- the R haplotype statistics step uses `Rscript`
 
-3. Activate `vep_env` only for annotation.
-
-```bash
-conda activate vep_env
-```
-
-4. Run by stage:
-
-- Stage 1 QC: `bam-steps` then `tfm_env`
-- Stage 2 calling: `bam-steps`
-- Stage 2 annotation: `vep_env`
-- Stages 3 and 5 analysis: `tfm_env`
-- Stage 4 phasing: `bam-steps`, then run `Rscript 15_haplotype_stats.R`
+If you prefer to run by hand instead of using the launcher, the expected environments are documented below.
 
 ## Recommended Run Order
 
@@ -112,7 +100,7 @@ conda activate vep_env
 
 ## Computational Environments
 
-The original workflow used **three separate environments** because bioinformatics processing, annotation, and statistical analysis rely on different toolchains.
+The original workflow used **three separate environments** because bioinformatics processing, annotation, and statistical analysis rely on different toolchains. On this analysis machine, those environments are not all located in the same place, so the actual paths are documented here.
 
 ### 1. Bioinformatics Environment: `bam-steps` (micromamba)
 
@@ -143,7 +131,7 @@ Core tools in this environment:
 - `bcftools` for VCF normalisation, filtering, and merging
 - `mosdepth` for per-base and per-region coverage metrics
 
-### 2. Python Analysis Environment: `tfm_env`
+### 2. Python Analysis Environment: `tfm_env` (virtual environment)
 
 Used for the Python-based analytical part of the pipeline:
 
@@ -164,18 +152,19 @@ Used for the Python-based analytical part of the pipeline:
 - `18_haplotype_association.py`
 - `19_1000g_haplotype_comparison.py`
 
-The original setup used a standard Python virtual environment:
+Recommended creation on this machine:
 
 ```bash
+cd /home/gadeaalonsoj
 python3 -m venv tfm_env
 source tfm_env/bin/activate
-pip install -r requirements.txt
+pip install -r /home/gadeaalonsoj/tfm/requirements.txt
 ```
 
 Activate it later with:
 
 ```bash
-source tfm_env/bin/activate
+source /home/gadeaalonsoj/tfm_env/bin/activate
 ```
 
 Deactivate it with:
@@ -184,27 +173,44 @@ Deactivate it with:
 deactivate
 ```
 
-This repository also includes [environment.yml](environment.yml) as a shared dependency specification for users who prefer `conda` or `micromamba`, but the historical workflow for Python analysis was the `tfm_env` virtual environment.
+Note:
 
-### 3. VEP Annotation Environment: `vep_env` (conda)
+- the launcher prefers an already-active virtual environment first
+- if no virtual environment is active, it then prefers `/home/gadeaalonsoj/tfm_env/bin/python`
+- a repo-local `tfm_env` is only used as a fallback if present and runnable
+
+### 3. VEP Annotation Runtime: repo-local `vep_env` and `ensembl-vep`
 
 Used specifically for:
 
 - `06_annotation.sh`
 
-Activate it with:
+On this machine, the annotation step is set up as a **repo-local runtime** rather than a global `conda` installation. The launcher currently prefers:
+
+1. `/home/gadeaalonsoj/tfm/miniconda3/envs/vep_env/bin`
+2. another `vep_env` found via `conda` or `micromamba`
+3. the local `/home/gadeaalonsoj/tfm/ensembl-vep` checkout
+
+The following repo-local components were found in this workspace:
+
+- `/home/gadeaalonsoj/tfm/miniconda3/envs/vep_env`
+- `/home/gadeaalonsoj/tfm/ensembl-vep`
+
+For manual execution without the launcher, the safest lightweight setup is:
 
 ```bash
-conda activate vep_env
+export PATH="/home/gadeaalonsoj/tfm/miniconda3/envs/vep_env/bin:$PATH"
+cd /home/gadeaalonsoj/tfm
+bash 06_annotation.sh
 ```
 
-Deactivate it with:
+Important note about creation:
 
-```bash
-conda deactivate
-```
+- this README documents how `bam-steps` and `tfm_env` are created from scratch
+- the exact original creation command for the repo-local `vep_env` is **not currently preserved** in this repository
+- in practice, this workspace uses the already-provisioned repo-local `vep_env` together with the local VEP resources under `.vep/` and `ensembl-vep/`
 
-This environment is expected to provide:
+This annotation runtime is expected to provide:
 
 - Ensembl VEP with the GRCh38 cache
 - GRCh38 reference FASTA
@@ -356,7 +362,7 @@ The repository now includes a shared reproducibility layer:
 - [environment.yml](environment.yml) provides a shared conda/micromamba environment definition
 - [requirements.txt](requirements.txt) supports the legacy `tfm_env` virtual-environment workflow
 
-Additional details are described in [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
+Additional details are described in [REPRODUCIBILITY.md](docs/notes/REPRODUCIBILITY.md).
 
 ## Data Availability
 

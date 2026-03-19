@@ -36,4 +36,4 @@ Before merging changes, try to confirm that:
 
 ## Large Changes
 
-If a change affects study design, statistical thresholds, or grouping strategy, document it explicitly in the relevant script header and, when appropriate, in [README.md](README.md) and [REPRODUCIBILITY.md](REPRODUCIBILITY.md). This keeps the repository readable for supervisors and collaborators and makes analytical changes easier to audit.
+If a change affects study design, statistical thresholds, or grouping strategy, document it explicitly in the relevant script header and, when appropriate, in [README.md](README.md) and [REPRODUCIBILITY.md](docs/notes/REPRODUCIBILITY.md). This keeps the repository readable for supervisors and collaborators and makes analytical changes easier to audit.

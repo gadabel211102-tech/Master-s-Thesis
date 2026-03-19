@@ -74,10 +74,7 @@ DEFAULT_AU_XLSX = Path(
     "Clinical DATA AU_Endometrial cancer.xlsx"
 )
 DEFAULT_AU_SHEET = "Hoja1"
-DEFAULT_OUT_XLSX = Path(
-    "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/"
-    "MASTER_SNP_plus_clinical__HARMONISED_B_v4.xlsx"
-)
+DEFAULT_OUT_XLSX = Path("/home/gadeaalonsoj/tfm/MASTER_SNP_plus_clinical_HARMONISED.xlsx")
 
 # Expected SNP workbook sheets we process
 SNP_SHEETS = ["AT=AUs", "EN", "MT-T_N", "MN"]  # ignore OVSER

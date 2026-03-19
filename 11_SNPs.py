@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
-from pipeline_utils import build_variant_id_series, combine_gnomad_nfe, get_paths, get_thresholds, standardize_cohort_labels, standardize_tissue_labels
+from pipeline_utils import build_variant_id_series, combine_gnomad_nfe, ensure_directory, get_paths, get_thresholds, standardize_cohort_labels, standardize_tissue_labels
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_nonempty, validate_percentage_columns, validate_required_columns
 
 # Shared configuration ensures that SNP reporting uses the same canonical input
@@ -34,7 +34,7 @@ from pipeline_validation import print_validation_summary, validate_file_exists, 
 PATHS = get_paths()
 THRESHOLDS = get_thresholds()
 input_file = str(PATHS["annotated_report"])
-output_dir = str(PATHS["results_dir"])
+output_dir = str(ensure_directory(PATHS["common_snps_dir"]))
 
 
 def identify_snps_pipeline():
@@ -102,7 +102,7 @@ def identify_snps_pipeline():
     freq_cols = [c for c in cols if c not in preferred_order]
     master_pivot = master_pivot[preferred_order + freq_cols]
 
-    output_excel = os.path.join(output_dir, "11_Master_Unique_SNP_Summary.xlsx")
+    output_excel = os.path.join(output_dir, "GSDMB_Common_SNP_Frequency_Summary.xlsx")
     master_pivot.to_excel(output_excel, index=False)
 
     sns.set_style("whitegrid")
@@ -117,12 +117,12 @@ def identify_snps_pipeline():
     )
     plt.figure(figsize=(10, 6))
     sns.barplot(data=gene_counts, x="SYMBOL", y="Variant_ID", hue="SYMBOL", palette="viridis", legend=False)
-    plt.title("Number of Unique SNPs Identified per Gene", fontsize=14, fontweight="bold")
+    plt.title("Unique SNPs per Gene", fontsize=14, fontweight="bold")
     plt.ylabel("Unique SNP Count")
     plt.xlabel("SYMBOL")
     plt.xticks(rotation=45)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "11_BarPlot_SNPs_Per_Gene.png"), dpi=300)
+    plt.savefig(os.path.join(output_dir, "Common_SNPs_Per_Gene.png"), dpi=300)
     plt.close()
 
     # Benchmark plots place study frequencies against the population reference
@@ -141,14 +141,14 @@ def identify_snps_pipeline():
             alpha=0.75
         )
         plt.plot([0, 1], [0, 100], "--", color="grey", alpha=0.4, label="Reference line")
-        plt.title(f"Comparison of Study Carrier Frequency With gnomAD NFE in the {cohort} Cohort", fontsize=15, fontweight="bold")
+        plt.title(f"Study vs gnomAD NFE: {cohort}", fontsize=15, fontweight="bold")
         plt.xlabel("gnomAD NFE AF")
         plt.ylabel("Carrier Frequency in Study (%)")
         plt.xlim(0, 1)
         plt.ylim(0, 100)
         plt.legend(frameon=False)
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f"11_SNP_Benchmark_{cohort}.png"), dpi=300)
+        plt.savefig(os.path.join(output_dir, f"Common_SNP_Frequency_vs_gnomAD_{cohort}.png"), dpi=300)
         plt.close()
 
     # This final panel documents how often the retained SNP definition was driven
@@ -156,11 +156,11 @@ def identify_snps_pipeline():
     source_counts = master_pivot.groupby("gnomAD_NFE_Source")["Variant_ID"].count().reset_index()
     plt.figure(figsize=(8, 5))
     sns.barplot(data=source_counts, x="gnomAD_NFE_Source", y="Variant_ID", hue="gnomAD_NFE_Source", palette="mako", legend=False)
-    plt.title("Sources of gnomAD NFE SNP Annotation", fontsize=13, fontweight="bold")
+    plt.title("gnomAD NFE Source Counts", fontsize=13, fontweight="bold")
     plt.ylabel("Number of SNPs")
     plt.xlabel("Source")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "11_SNP_Source_Counts.png"), dpi=300)
+    plt.savefig(os.path.join(output_dir, "Common_SNP_Annotation_Source_Counts.png"), dpi=300)
     plt.close()
 
     print(f"    Results saved to: {output_excel}")

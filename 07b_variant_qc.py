@@ -16,7 +16,7 @@ just the rows where a variant was called. Amplicons with no variants are
 invisible here and would be silently omitted, giving a false picture of panel
 performance. Use scripts 02/03/04 for amplicon-level coverage assessment.
 
-Input:  GSDMB_Annotated_Report_Fixed.xlsx  (sheet: Biological_Annotations)
+Input:  GSDMB_Annotated_Report.xlsx  (sheet: Biological_Annotations)
 Output: <output_dir>/
           Variant_QC_Report.xlsx       — full table with AB flags appended
           TiTv_Summary.csv             — transition / transversion counts and ratio
@@ -24,7 +24,7 @@ Output: <output_dir>/
           Variant_QC_Plots.png         — three-panel summary figure
 
 Usage:
-  python 07b_variant_qc.py --input /path/to/GSDMB_Annotated_Report_Fixed.xlsx
+  python 07b_variant_qc.py --input /path/to/GSDMB_Annotated_Report.xlsx
   python 07b_variant_qc.py --input annotations.xlsx --output ./qc --ab-lower 0.2 --ab-upper 0.8
 """
 
@@ -36,6 +36,12 @@ import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+from pipeline_utils import get_paths
+
+PATHS = get_paths()
+DEFAULT_INPUT = str(PATHS["annotated_report"])
+DEFAULT_OUTPUT_DIR = str(PATHS.get("variant_qc_dir", PATHS["results_dir"] / "07b_variant_qc"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # THRESHOLDS
@@ -344,7 +350,7 @@ def plot_qc_summary(titv: dict, df: pd.DataFrame,
                     logger: logging.Logger):
     """Three-panel QC figure: Ti/Tv bar, allelic balance histogram, batch CV."""
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    fig.suptitle("Overview of Variant-Level Quality Control Metrics", fontsize=14, fontweight="bold", y=1.01)
+    fig.suptitle("Variant QC Overview", fontsize=14, fontweight="bold", y=0.98)
 
     # ── Panel 1: Ti/Tv ──────────────────────────────────────────────────────
     ax = axes[0]
@@ -354,7 +360,7 @@ def plot_qc_summary(titv: dict, df: pd.DataFrame,
                color=["#3498db", "#e74c3c"], edgecolor="black", linewidth=1.2)
         t = THRESHOLDS["titv"]
         ax.set_title(
-            f"Transition-Transversion Ratio: {titv['ratio']:.3f}\nQC classification: {titv['status']}",
+            f"Ti/Tv Ratio: {titv['ratio']:.3f}\n{titv['status']}",
             fontweight="bold", color=titv["colour"], fontsize=11)
         ax.text(0.5, 0.02,
                 f"Optimal {t['optimal_min']}–{t['optimal_max']}  |  "
@@ -387,14 +393,14 @@ def plot_qc_summary(titv: dict, df: pd.DataFrame,
 
         n_flagged = (df["AB_Flag"].str.startswith("IMBALANCED") == True).sum()
         ax.set_title(
-            f"Allelic Balance Among Heterozygous Calls\n"
-            f"n={len(het_af)}  flagged={n_flagged} ({n_flagged/len(het_af)*100:.1f}%)",
+            f"Allelic Balance: Heterozygous Calls\n"
+            f"n={len(het_af)} | flagged={n_flagged} ({n_flagged/len(het_af)*100:.1f}%)",
             fontweight="bold", fontsize=11)
         ax.legend(loc="upper right", fontsize=7)
     else:
         ax.text(0.5, 0.5, "No allelic fraction data\n(AF column missing or all homozygous)",
                 transform=ax.transAxes, ha="center", va="center", fontsize=11)
-        ax.set_title("Allelic Balance Among Heterozygous Calls", fontweight="bold")
+        ax.set_title("Allelic Balance", fontweight="bold")
     ax.set_xlabel("Allele Fraction (AF)")
     ax.set_ylabel("Count")
     ax.set_xlim(0, 1)
@@ -417,13 +423,13 @@ def plot_qc_summary(titv: dict, df: pd.DataFrame,
         ax.axvline(t_cv["poor"],       color="#e74c3c", linestyle="--",
                    linewidth=1.5, label=f"Poor (<{t_cv['poor']}%)")
         ax.set_xlabel("CV% of variant counts across samples")
-        ax.set_title("Batch-Level Variability of Variant Counts\n(variation in variant burden across groups)",
+        ax.set_title("Variant Count Variability by Group",
                      fontweight="bold", fontsize=11)
         ax.legend(loc="lower right", fontsize=7)
     else:
         ax.text(0.5, 0.5, "No batch data", transform=ax.transAxes,
                 ha="center", va="center", fontsize=12)
-        ax.set_title("Batch-Level Variability of Variant Counts", fontweight="bold")
+        ax.set_title("Variant Count Variability", fontweight="bold")
     ax.grid(axis="x", alpha=0.3)
 
     plt.tight_layout()
@@ -442,11 +448,11 @@ def main():
         description="Variant-level QC: Ti/Tv, allelic balance, batch effects",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--input",  "-i", required=True,
+    parser.add_argument("--input",  "-i", default=DEFAULT_INPUT,
                         help="Annotated Excel file from script 07 "
-                             "(GSDMB_Annotated_Report_Fixed.xlsx)")
-    parser.add_argument("--output", "-o", default=".",
-                        help="Output directory (default: current directory)")
+                             "(default: configured annotated report)")
+    parser.add_argument("--output", "-o", default=DEFAULT_OUTPUT_DIR,
+                        help="Output directory (default: configured 07b results folder)")
     parser.add_argument("--ab-lower", type=float,
                         default=THRESHOLDS["allelic_balance"]["lower"],
                         help="Lower AF threshold for allelic balance "

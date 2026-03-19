@@ -15,11 +15,11 @@ DATA SOURCES
    Rows = SNPs, Cols = CHROM, POS, REF, ALT, <sample1>, <sample2>, ...
    GT format: "0|1", "1|0", "0|0", "1|1"
 
-2. MASTER_SNP_plus_clinical__HARMONISED_B_v4.xlsx  — harmonised clinical master
+2. MASTER_SNP_plus_clinical_HARMONISED.xlsx  — harmonised clinical master
    (same file used by script 17; provides all clinical variables and the
    snp_code → sample mapping)
 
-3. GSDMB_Annotated_Report_Fixed.xlsx  — used only to identify the 14 established
+3. GSDMB_Annotated_Report.xlsx  — used only to identify the 14 established
    SNP positions (gnomAD NFE AF > 1%) that define the haplotype backbone
 
 HAPLOTYPE CONSTRUCTION
@@ -70,7 +70,7 @@ RUN
 python3 18_haplo_clinical_association.py \\
   --phased   /path/to/19_haplotype_phased/phased_genotypes.tsv \\
   --master   /path/to/MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx \\
-  --annot    /path/to/GSDMB_Annotated_Report_Fixed.xlsx \\
+  --annot    /path/to/GSDMB_Annotated_Report.xlsx \\
   --out_dir  /path/to/output/
 
 NOTES
@@ -116,11 +116,12 @@ except ImportError:
 warnings.filterwarnings("ignore")
 
 # ── DEFAULT PATHS ─────────────────────────────────────────────────────────────
-DEFAULT_PHASED  = Path("/home/gadeaalonsoj/tfm/gsdmb_final_results/19_haplotype_phased/phased_genotypes.tsv")
-DEFAULT_MASTER  = Path("/home/gadeaalonsoj/tfm/MASTER_SNP_plus_clinical__HARMONISED_B_v4.xlsx")
-DEFAULT_ANNOT   = Path("/home/gadeaalonsoj/tfm/gsdmb_final_results/GSDMB_Annotated_Report_Fixed.xlsx")
-DEFAULT_OUT          = Path("/home/gadeaalonsoj/tfm/gsdmb_final_results/")
-DEFAULT_HAPLO_RESULTS = Path("/home/gadeaalonsoj/tfm/gsdmb_final_results/19_haplo_stats_results/19_Haplotype_Results_v7_blocks_and_genes.xlsx")
+DEFAULTS = script18_defaults()
+DEFAULT_PHASED  = DEFAULTS["phased"]
+DEFAULT_MASTER  = DEFAULTS["master"]
+DEFAULT_ANNOT   = DEFAULTS["annot"]
+DEFAULT_OUT     = DEFAULTS["out_dir"]
+DEFAULT_HAPLO_RESULTS = DEFAULTS["haplotype_results"]
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
 MIN_HAP_FREQ        = 0.02   # global frequency threshold ? rare haplotypes skipped
@@ -1220,9 +1221,10 @@ def cancer_risk_analysis(merged: pd.DataFrame) -> pd.DataFrame:
     df = merged[~merged["is_replicate"]].copy()
 
     rows = []
+    pooled_controls = df[df["Tissue"] == "Healthy"].copy()
     for cohort_label, cfg in RISK_COHORTS.items():
         case_df    = df[df["sheet"] == cfg["case_sheet"]].copy()
-        control_df = df[df["sheet"] == cfg["control_sheet"]].copy()
+        control_df = pooled_controls.copy()
         if "Callable" in case_df.columns:
             case_df = case_df[case_df["Callable"] == 1].copy()
         if "Callable" in control_df.columns:
@@ -1239,7 +1241,7 @@ def cancer_risk_analysis(merged: pd.DataFrame) -> pd.DataFrame:
             n_cases = len(hap_case)
             n_controls = len(hap_control)
             if hap_i == 0:
-                print(f"  {cohort_label}: {n_cases} callable cases, {n_controls} callable controls")
+                print(f"  {cohort_label}: {n_cases} callable cases, {n_controls} callable pooled controls")
             if n_cases < MIN_CARRIERS or n_controls < MIN_CARRIERS:
                 continue
 
@@ -1340,15 +1342,24 @@ def make_volcano(tvh: pd.DataFrame, out_dir: Path):
         ax.scatter(sub["OR"].apply(lambda x: np.log2(x)),
                    -np.log10(sub["P_Value"]),
                    c=col, label=f"{cohort} (tumour n={int(sub['N_Tumour'].iloc[0])}, control n={int(sub['N_Control'].iloc[0])})", alpha=0.7, s=60, zorder=3)
+        placed = []
+        offsets = [(4, 4), (4, -8), (-10, 6), (-10, -8)]
         for _, row in sub[sub["Nominal_Sig"]].iterrows():
+            x_val = float(np.log2(row["OR"]))
+            y_val = float(-np.log10(row["P_Value"]))
+            if any(abs(x_val - px) < 0.18 and abs(y_val - py) < 0.18 for px, py in placed):
+                continue
+            offset = offsets[len(placed) % len(offsets)]
             ax.annotate(row["Haplotype_ID"],
-                        (np.log2(row["OR"]), -np.log10(row["P_Value"])),
+                        (x_val, y_val),
+                        xytext=offset, textcoords="offset points",
                         fontsize=7, ha="left", va="bottom")
+            placed.append((x_val, y_val))
     ax.axhline(-np.log10(0.05), ls="--", c="#aaaaaa", lw=1, label="p=0.05")
     ax.axvline(0, ls=":", c="#cccccc", lw=0.8)
     ax.set_xlabel("log₂(OR)  —  tumour vs control")
     ax.set_ylabel("-log₁₀(p)")
-    ax.set_title(f"Association Between Haplotype Carrier Status and Tumour-Control Status [{COMPARATIVE_TAG}]", fontweight="bold")
+    ax.set_title(f"Haplotype Volcano [{COMPARATIVE_TAG}]", fontweight="bold")
     ax.legend(fontsize=9)
     _style_ax(ax)
     plt.tight_layout()
@@ -1466,7 +1477,7 @@ def make_heatmap(clin_res: pd.DataFrame, cohort_label: str,
                 vmin=0, vmax=vmax_p,
                 cbar_kws={"label": "-log10(p)", "shrink": 0.55},
                 xticklabels=True, yticklabels=True)
-    ax_p.set_title(f"Statistical significance [{title_suffix}]", fontsize=9, fontweight="bold", pad=6)
+    ax_p.set_title(f"Significance [{title_suffix}]", fontsize=9, fontweight="bold", pad=6)
     ax_p.set_xlabel("")
     ax_p.set_ylabel("Haplotype", fontsize=9)
     # Rotate x labels; auto-size font to avoid overlap
@@ -1506,7 +1517,7 @@ def make_heatmap(clin_res: pd.DataFrame, cohort_label: str,
                 center=0, vmin=-abs_max, vmax=abs_max,
                 cbar_kws={"label": cbar_label, "shrink": 0.55},
                 xticklabels=True, yticklabels=False)
-    ax_es.set_title("Effect size estimate", fontsize=9, fontweight="bold", pad=6)
+    ax_es.set_title("Effect Size", fontsize=9, fontweight="bold", pad=6)
     ax_es.set_xlabel("")
     ax_es.set_ylabel("")
     ax_es.tick_params(axis="x", rotation=45, labelsize=x_fs)
@@ -1523,7 +1534,7 @@ def make_heatmap(clin_res: pd.DataFrame, cohort_label: str,
     ax_bar.set_ylim(0, n_haps)
     ax_bar.set_yticks([])
     ax_bar.set_xlabel("Global\nfreq (%)", fontsize=7.5)
-    ax_bar.set_title("Global frequency", fontsize=9, fontweight="bold")
+    ax_bar.set_title("Global Freq.", fontsize=9, fontweight="bold")
     ax_bar.tick_params(axis="x", labelsize=7)
     ax_bar.spines["top"].set_visible(False)
     ax_bar.spines["right"].set_visible(False)
@@ -1533,9 +1544,8 @@ def make_heatmap(clin_res: pd.DataFrame, cohort_label: str,
                         va="center", fontsize=6.5, color="#333333")
 
     fig.suptitle(
-        f"Associations Between GSDMB Haplotypes and Clinical Variables in {cohort_label} ({title_suffix})\n"
-        f"All haplotypes >= {MIN_HAP_FREQ*100:.0f}% global frequency  |  "
-        f"* p<0.05   ** p<0.01",
+        f"Haplotype-Clinical Heatmap: {cohort_label} ({title_suffix})\n"
+        f"Haplotypes >= {MIN_HAP_FREQ*100:.0f}% global frequency | * p<0.05 | ** p<0.01",
         fontsize=10,
         fontweight="bold",
         y=0.97,
@@ -1565,7 +1575,7 @@ def make_forest(clin_res: pd.DataFrame, cohort_label: str, out_path: Path):
                         for _, r in sub.iterrows()], fontsize=8)
     ax.set_xlabel("Odds Ratio (unadjusted)")
     ax.set_title(
-        f"Associations Between GSDMB Haplotypes and Binary Clinical Outcomes in {cohort_label}",
+        f"Binary Clinical Outcomes: {cohort_label}",
         fontweight="bold",
     )
     _style_ax(ax, grid=False)
@@ -2206,7 +2216,7 @@ def main():
     validate_file_exists(args.annot, "Script 18 annotation input")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_xlsx = out_dir / "18_Haplo_Clinical_Association_Results.xlsx"
+    out_xlsx = out_dir / "GSDMB_Haplotype_Clinical_Association_Results.xlsx"
 
     print("=" * 60)
     print("SCRIPT 18: HAPLOTYPE-CLINICAL ASSOCIATION ANALYSIS")
@@ -2223,7 +2233,7 @@ def main():
         print(f"  Expected location: {DEFAULT_HAPLO_RESULTS}")
         print("\n  If the file is elsewhere, re-run with:")
         print("    python3 18_haplotype_association.py \\")
-        print("      --haplo_results /actual/path/to/19_Haplotype_Results_v7_blocks_and_genes.xlsx")
+        print("      --haplo_results /actual/path/to/19_Haplotype_Results.xlsx")
         raise SystemExit(1)
 
     print("[1/5] Loading reference haplotypes from script 15 …")
@@ -2363,7 +2373,7 @@ def main():
     make_risk_forest(risk_res, out_dir / "18_Haplo_Forest_CancerRisk.png")
 
     # Kaplan-Meier PDF
-    make_km_pdf(all_km_pages, out_dir / "18_KM_Curves_All_Cohorts.pdf")
+    make_km_pdf(all_km_pages, out_dir / "GSDMB_Haplotype_KM_Curves_All_Cohorts.pdf")
 
     print()
     print("=" * 60)

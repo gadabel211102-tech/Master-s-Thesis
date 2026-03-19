@@ -50,9 +50,9 @@ QC_LIMITS = {
 }
 
 PATHS = {
-    "out_dir": "./gsdmb_final_results",
-    "samples_dir": "./gsdmb_final_results/individual_sample_coverage",
-    "plots_dir": "./gsdmb_final_results/plots",
+    "out_dir": "./analysis_results/03_qc_visualisation",
+    "samples_dir": "./analysis_results/03_qc_visualisation/sample_level_coverage_tables",
+    "plots_dir": "./analysis_results/03_qc_visualisation/figures",
     "raw_root": "./",
     # ========================================================================
     # SET YOUR BED FILE PATH HERE for rsID annotations!
@@ -467,7 +467,7 @@ def plot_qc_distributions(full_qc_df: pd.DataFrame, plots_dir: str):
         )
         axes[0].axhline(threshold, color='red', linestyle='--', 
                        label=f'Threshold: {threshold}', linewidth=2)
-        axes[0].set_title(f'Distribution of {label} Across Cohorts', fontweight='bold')
+        axes[0].set_title(f'{label} by Cohort', fontweight='bold')
         axes[0].set_xlabel('Cohort', fontweight='bold')
         axes[0].set_ylabel(label, fontweight='bold')
         axes[0].legend()
@@ -486,7 +486,7 @@ def plot_qc_distributions(full_qc_df: pd.DataFrame, plots_dir: str):
             )
             axes[1].axhline(threshold, color='red', linestyle='--', 
                           label=f'Threshold: {threshold}', linewidth=2)
-            axes[1].set_title(f'Distribution of {label} According to QC Status', fontweight='bold')
+            axes[1].set_title(f'{label} by QC Status', fontweight='bold')
             axes[1].set_xlabel('QC Status', fontweight='bold')
             axes[1].set_ylabel(label, fontweight='bold')
             axes[1].legend()
@@ -531,7 +531,7 @@ def plot_pca_analysis(full_qc_df: pd.DataFrame, plots_dir: str):
     )
     ax.set_xlabel(f"PC1 ({var1:.1f}% variance)", fontweight='bold')
     ax.set_ylabel(f"PC2 ({var2:.1f}% variance)", fontweight='bold')
-    plt.title("Principal Component Analysis of QC Metrics Across All Samples", fontweight='bold', fontsize=14)
+    plt.title("QC PCA: All Samples", fontweight='bold', fontsize=14)
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     ax.grid(alpha=0.3)
     plt.tight_layout()
@@ -556,7 +556,7 @@ def plot_pca_analysis(full_qc_df: pd.DataFrame, plots_dir: str):
         )
         ax.set_xlabel(f"PC1 ({var1:.1f}% variance)", fontweight='bold')
         ax.set_ylabel(f"PC2 ({var2:.1f}% variance)", fontweight='bold')
-        plt.title("Principal Component Analysis of QC Metrics in Samples Passing QC", fontweight='bold', fontsize=14)
+        plt.title("QC PCA: Passing Samples", fontweight='bold', fontsize=14)
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(alpha=0.3)
         plt.tight_layout()
@@ -629,7 +629,7 @@ def plot_coverage_heatmaps(cohort_dfs: dict, all_cov: pd.DataFrame,
         
         plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
         plt.ylabel("Amplicon (rsID / Annotation)", fontsize=10, fontweight='bold')
-        plt.title(f"Amplicon Coverage Heatmap for {cohort}", fontweight='bold', fontsize=14)
+        plt.title(f"{cohort} Coverage Heatmap", fontweight='bold', fontsize=14)
         plt.tight_layout()
         plt.savefig(f"{plots_dir}/08_heatmap_{cohort.replace(' ', '_')}.png", dpi=300)
         plt.close()
@@ -655,7 +655,7 @@ def plot_coverage_heatmaps(cohort_dfs: dict, all_cov: pd.DataFrame,
         
         plt.xlabel("Sample ID", fontsize=10, fontweight='bold')
         plt.ylabel("Genomic Regions (All Amplicons)", fontsize=10, fontweight='bold')
-        plt.title("Global Amplicon Coverage Heatmap Across All Cohorts", fontweight='bold', fontsize=14)
+        plt.title("Global Coverage Heatmap", fontweight='bold', fontsize=14)
         plt.tight_layout()
         plt.savefig(f"{plots_dir}/09_heatmap_global.png", dpi=300)
         plt.close()
@@ -694,7 +694,7 @@ def plot_panel_landscapes(cohort_dfs: dict, plots_dir: str):
     ax.set_yscale("log")
     ax.set_xlabel("Amplicon Index (Order in File)", fontweight='bold')
     ax.set_ylabel("Median Coverage Depth (×)", fontweight='bold')
-    ax.set_title("Panel Coverage Landscape in Input Order", fontweight='bold', fontsize=14)
+    ax.set_title("Coverage Landscape: Input Order", fontweight='bold', fontsize=14)
     ax.grid(alpha=0.3)
     
     handles = cohort_handles + [h_mean, h_floor]
@@ -753,7 +753,7 @@ def plot_panel_landscapes(cohort_dfs: dict, plots_dir: str):
     ax.set_yscale("log")
     ax.set_xlabel("Genomic Position (rsID / Annotation)", fontweight='bold')
     ax.set_ylabel("Median Coverage Depth (×)", fontweight='bold')
-    ax.set_title("Panel Coverage Landscape in Genomic Order", fontweight='bold', fontsize=14)
+    ax.set_title("Coverage Landscape: Genomic Order", fontweight='bold', fontsize=14)
     ax.grid(alpha=0.3)
     
     handles = cohort_handles + [h_mean, h_floor]
@@ -820,7 +820,7 @@ def plot_panel_landscapes(cohort_dfs: dict, plots_dir: str):
         ax.set_yscale("log")
         ax.set_xlabel("Annotated Region / Gene (Genomic Order)", fontweight='bold')
         ax.set_ylabel("Median Coverage Depth (×)", fontweight='bold')
-        ax.set_title("Panel Coverage Landscape Grouped by Annotation", fontweight='bold', fontsize=14)
+        ax.set_title("Coverage Landscape: By Annotation", fontweight='bold', fontsize=14)
         ax.grid(alpha=0.3)
         
         handles = cohort_handles + [h_mean, h_floor]
@@ -886,7 +886,7 @@ def plot_coverage_gaps(cohort_dfs: dict, failing_samples: list, plots_dir: str):
             line.set_markeredgecolor("black")
             line.set_markersize(7)
     
-    plt.title(f"Number of Coverage Gaps (<{QC_LIMITS['worst_amplicon_floor']}x) per Sample", 
+    plt.title(f"Coverage Gaps per Sample (<{QC_LIMITS['worst_amplicon_floor']}x)", 
              fontweight='bold', fontsize=14)
     plt.xlabel("Cohort", fontweight='bold')
     plt.ylabel(f"Number of Amplicons <{QC_LIMITS['worst_amplicon_floor']}×", fontweight='bold')
@@ -914,7 +914,7 @@ def plot_retention_and_failures(full_qc_df: pd.DataFrame, plots_dir: str):
     full_qc_df.groupby(["cohort", "status"]).size().unstack().fillna(0).plot(
         kind="bar", stacked=True, color=STATUS_PALETTE, ax=plt.gca()
     )
-    plt.title("Sample Retention After QC by Cohort", fontweight='bold', fontsize=14)
+    plt.title("QC Retention by Cohort", fontweight='bold', fontsize=14)
     plt.xlabel("Cohort", fontweight='bold')
     plt.ylabel("Number of Samples", fontweight='bold')
     plt.legend(title="QC Status", bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -952,7 +952,7 @@ def plot_retention_and_failures(full_qc_df: pd.DataFrame, plots_dir: str):
         plt.figure(figsize=(12, 7))
         counts.plot(kind="bar", stacked=True, ax=plt.gca(), cmap="tab20")
         plt.legend(title="Failure Reason", bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.title("Distribution of QC Failure Reasons by Cohort", fontweight='bold', fontsize=14)
+        plt.title("QC Failure Reasons", fontweight='bold', fontsize=14)
         plt.xlabel("Cohort", fontsize=10, fontweight='bold')
         plt.ylabel("Number of Failed Samples", fontsize=10, fontweight='bold')
         plt.xticks(rotation=45, ha='right')
@@ -983,7 +983,7 @@ def plot_qc_audits(full_qc_df: pd.DataFrame, plots_dir: str):
     )
     plt.axhline(QC_LIMITS["mapped_pct"], color="red", ls="--", lw=2,
                label=f"Threshold: {QC_LIMITS['mapped_pct']}%")
-    plt.title("Mapping Efficiency Across Cohorts", fontweight='bold', fontsize=14)
+    plt.title("Mapping Efficiency by Cohort", fontweight='bold', fontsize=14)
     plt.xlabel("Cohort", fontsize=10, fontweight='bold')
     plt.ylabel("Mapped Reads (%)", fontsize=10, fontweight='bold')
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -1000,7 +1000,7 @@ def plot_qc_audits(full_qc_df: pd.DataFrame, plots_dir: str):
     )
     plt.axhline(QC_LIMITS["on_target_pct"], color="firebrick", ls="--", lw=2,
                label=f"Threshold: {QC_LIMITS['on_target_pct']}%")
-    plt.title("On-Target Specificity Across Cohorts", fontweight='bold', fontsize=14)
+    plt.title("On-Target Specificity by Cohort", fontweight='bold', fontsize=14)
     plt.xlabel("Cohort", fontsize=10, fontweight='bold')
     plt.ylabel("On-Target Reads (%)", fontsize=10, fontweight='bold')
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -1106,7 +1106,7 @@ def plot_systemic_amplicon_failures(cohort_dfs: dict, plots_dir: str):
         if agg.empty:
             ax.text(0.5, 0.5, f"No amplicons below {floor}×", ha="center", va="center")
             ax.set_axis_off()
-            ax.set_title(f"{cohort}: Recurrent Amplicon Failures Below {floor}x", fontweight='bold')
+            ax.set_title(f"{cohort}: Recurrent Failures < {floor}x", fontweight='bold')
             continue
         
         colours = sns.color_palette("Reds", n_colors=len(agg))
@@ -1114,7 +1114,7 @@ def plot_systemic_amplicon_failures(cohort_dfs: dict, plots_dir: str):
         ax.barh(plot_df["label"], plot_df["fail_count"],
                color=colours[::-1], edgecolor="none")
         
-        ax.set_title(f"{cohort}: Recurrent Amplicon Failures Below {floor}x", fontweight='bold')
+        ax.set_title(f"{cohort}: Recurrent Failures < {floor}x", fontweight='bold')
         ax.set_ylabel("rsID / Annotation", fontsize=10, fontweight='bold')
         ax.grid(axis="x", linestyle=":", alpha=0.4)
         max_x = max(max_x, int(plot_df["fail_count"].max()))
@@ -1163,7 +1163,7 @@ def plot_systemic_amplicon_failures(cohort_dfs: dict, plots_dir: str):
         if agg.empty:
             ax.text(0.5, 0.5, f"No amplicons below {floor}×", ha="center", va="center")
             ax.set_axis_off()
-            ax.set_title(f"{cohort}: Recurrent Amplicon Failures Below {floor}x", fontweight='bold')
+            ax.set_title(f"{cohort}: Recurrent Failures < {floor}x", fontweight='bold')
             continue
         
         colours = sns.color_palette("Reds", n_colors=len(agg))
@@ -1171,7 +1171,7 @@ def plot_systemic_amplicon_failures(cohort_dfs: dict, plots_dir: str):
         ax.barh(plot_df["amplicon_id"], plot_df["fail_count"],
                color=colours[::-1], edgecolor="none")
         
-        ax.set_title(f"{cohort}: Recurrent Amplicon Failures Below {floor}x", fontweight='bold')
+        ax.set_title(f"{cohort}: Recurrent Failures < {floor}x", fontweight='bold')
         ax.set_ylabel("Amplicon ID", fontsize=10, fontweight='bold')
         ax.grid(axis="x", linestyle=":", alpha=0.4)
         max_x = max(max_x, int(plot_df["fail_count"].max()))
@@ -1219,7 +1219,7 @@ def plot_coverage_summary(all_cov: pd.DataFrame, plots_dir: str):
     
     plt.xlabel('Coverage Depth (×)', fontweight='bold')
     plt.ylabel('Frequency', fontweight='bold')
-    plt.title('Global Distribution of Coverage Depth Across All Samples', fontweight='bold', fontsize=14)
+    plt.title('Coverage Depth Distribution', fontweight='bold', fontsize=14)
     plt.legend()
     plt.xlim(0, min(1000, max(all_depths)))
     plt.tight_layout()

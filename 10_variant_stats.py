@@ -15,7 +15,7 @@ normalised comparative analyses are handled in later scripts.
 
 Input
 -----
-- ``GSDMB_Annotated_Report_Fixed.xlsx`` from the results directory.
+- ``GSDMB_Annotated_Report.xlsx`` from the results directory.
 
 Outputs
 -------
@@ -31,21 +31,21 @@ import pandas as pd
 import seaborn as sns
 
 from figure_style import DESCRIPTIVE_TAG, IMPACT_COLORS
+from pipeline_utils import ensure_directory, get_paths
 
-# This script intentionally keeps its historical output directory so that the
-# descriptive figures continue to land in the same folder used in earlier runs.
-input_dir = "/home/gadeaalonsoj/tfm/gsdmb_final_results/"
-input_file = os.path.join(input_dir, "GSDMB_Annotated_Report_Fixed.xlsx")
+PATHS = get_paths()
+output_dir = str(ensure_directory(PATHS["variant_statistics_dir"]))
+input_file = str(PATHS["annotated_report"])
 
 # The four exported figures provide the same descriptive content under linear
 # and log scaling, and for total versus deduplicated variant counts.
 outputs = {
-    "total_log": "01_ALL_VARIANTS_TOTAL_LOG.png",
-    "total_lin": "02_ALL_VARIANTS_TOTAL_LINEAR.png",
-    "unique_log": "03_ALL_VARIANTS_UNIQUE_LOG.png",
-    "unique_lin": "04_ALL_VARIANTS_UNIQUE_LINEAR.png",
-    "total_pct": "05_ALL_VARIANTS_TOTAL_PERCENT.png",
-    "unique_pct": "06_ALL_VARIANTS_UNIQUE_PERCENT.png",
+    "total_log": "GSDMB_Variant_Burden_Total_Log.png",
+    "total_lin": "GSDMB_Variant_Burden_Total_Linear.png",
+    "unique_log": "GSDMB_Unique_Variant_Burden_Log.png",
+    "unique_lin": "GSDMB_Unique_Variant_Burden_Linear.png",
+    "total_pct": "GSDMB_Variant_Composition_Total_Percent.png",
+    "unique_pct": "GSDMB_Unique_Variant_Composition_Percent.png",
 }
 
 
@@ -71,10 +71,10 @@ def generate_and_save_tables(df, suffix, output_dir):
         if cat not in impact_table.columns:
             impact_table[cat] = 0
     impact_table = impact_table[["HIGH", "MODERATE", "MODIFIER", "LOW"]]
-    impact_table.to_csv(os.path.join(output_dir, f"table_impact_{suffix}.csv"))
+    impact_table.to_csv(os.path.join(output_dir, f"GSDMB_Impact_Counts_{suffix}.csv"))
 
     con_table = df.groupby(['Group', con_c]).size().unstack(fill_value=0)
-    con_table.to_csv(os.path.join(output_dir, f"table_consequence_{suffix}.csv"))
+    con_table.to_csv(os.path.join(output_dir, f"GSDMB_Consequence_Counts_{suffix}.csv"))
 
     print(f"Successfully exported {suffix} tables.")
 
@@ -101,7 +101,7 @@ def create_stat_visuals(df_to_plot, title_suffix, filename, use_log=False, as_pe
         impact_pivot = impact_pivot.div(impact_pivot.sum(axis=1), axis=0).fillna(0) * 100
 
     con_pivot.plot(kind='bar', stacked=True, ax=ax1, colormap='tab20')
-    ax1.set_title(f'Distribution of Functional Consequences: {title_suffix}', fontsize=16, fontweight='bold')
+    ax1.set_title(f'Consequence Profile: {title_suffix}', fontsize=16, fontweight='bold')
     if use_log and not as_percentage:
         ax1.set_yscale('log')
     ax1.set_ylabel('Within-group percentage (%)' if as_percentage else ('Count (Log Scale)' if use_log else 'Count'))
@@ -109,7 +109,7 @@ def create_stat_visuals(df_to_plot, title_suffix, filename, use_log=False, as_pe
 
     impact_colors = [IMPACT_COLORS[c] for c in all_cats]
     impact_pivot.plot(kind='bar', stacked=True, ax=ax2, color=impact_colors)
-    ax2.set_title(f'Distribution of Predicted Biological Impact: {title_suffix}', fontsize=16, fontweight='bold')
+    ax2.set_title(f'Impact Profile: {title_suffix}', fontsize=16, fontweight='bold')
     if use_log and not as_percentage:
         ax2.set_yscale('log')
     ax2.set_ylabel('Within-group percentage (%)' if as_percentage else ('Count (Log Scale)' if use_log else 'Count'))
@@ -129,14 +129,14 @@ def create_stat_visuals(df_to_plot, title_suffix, filename, use_log=False, as_pe
                         fontsize=7, fontweight='bold', color='white' if h > 10 else 'black')
 
     fig.suptitle(
-        f"Summary of Variant Annotation Profiles: {'within-group composition' if as_percentage else 'raw variant burden'}",
+        f"Variant Composition: {'Within-Group %' if as_percentage else 'Counts'}",
         fontsize=15, fontweight='bold', y=0.98
     )
     fig.text(0.5, 0.01,
              'Descriptive summary only; inferential tumour-versus-control comparisons are handled in later scripts.',
              ha='center', fontsize=9, color='#666666', style='italic')
     plt.tight_layout(rect=[0, 0.03, 1, 0.96])
-    plt.savefig(os.path.join(input_dir, filename), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, filename), dpi=300, bbox_inches='tight')
     plt.close()
 
 
@@ -162,7 +162,7 @@ def main():
 
     # Total rows reflect the complete annotated call set, including repeated
     # observations of the same variant in different samples.
-    generate_and_save_tables(df, "all_total", input_dir)
+    generate_and_save_tables(df, "all_total", output_dir)
     create_stat_visuals(df, "All Variants", outputs['total_log'], use_log=True)
     create_stat_visuals(df, "All Variants", outputs['total_lin'], use_log=False)
     create_stat_visuals(df, "All Variants", outputs['total_pct'], as_percentage=True)
@@ -171,13 +171,13 @@ def main():
     # descriptive focus shifts from burden to repertoire breadth.
     df_u = df.drop_duplicates(subset=[sym_c, pos_c, hgv_c, 'Group'])
 
-    generate_and_save_tables(df_u, "all_unique", input_dir)
+    generate_and_save_tables(df_u, "all_unique", output_dir)
     create_stat_visuals(df_u, "Unique Variants", outputs['unique_log'], use_log=True)
     create_stat_visuals(df_u, "Unique Variants", outputs['unique_lin'], use_log=False)
     create_stat_visuals(df_u, "Unique Variants", outputs['unique_pct'], as_percentage=True)
 
     print(f"\n{'='*60}")
-    print(f" SUCCESS: Results for ALL variants generated in:\n {input_dir}")
+    print(f" SUCCESS: Results for ALL variants generated in:\n {output_dir}")
     print(f"{'='*60}")
 
 
