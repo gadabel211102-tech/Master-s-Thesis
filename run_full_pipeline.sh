@@ -49,8 +49,8 @@ FROM_STEP="01"
 TO_STEP="19"
 TO_STEP_EXPLICIT=0
 
-STEP_ORDER=(01 02 02b 02c 03 04 05 06 07 07b 08 09 10 11 12 13 14 15 15R 16 17 18 19)
-PYTHON_STEPS=(02c 03 04 07 07b 08 09 10 11 12 13 14 16 17 18 19)
+STEP_ORDER=(01 02 02b 02c 03 04 05 06 07 07b 08 09 09b 10 11 12 13 14 15 15R 16 17 18 19)
+PYTHON_STEPS=(02c 03 04 07 07b 08 09 09b 10 11 12 13 14 16 17 18 19)
 BAM_STEPS=(01 02 02b 05 15)
 
 usage() {
@@ -357,6 +357,7 @@ if should_run_step 07; then announce_step "07" "Merging annotated VCFs into the 
 if should_run_step 07b; then announce_step "07b" "Running variant-level QC checks"; run_python_script 07b_variant_qc.py; fi
 if should_run_step 08; then announce_step "08" "Generating the global variant landscape"; run_python_script 08_mapping.py; fi
 if should_run_step 09; then announce_step "09" "Generating the GSDMB-only landscape"; run_python_script 09_gsdmb_only.py; fi
+if should_run_step 09b; then announce_step "09b" "Comparing normal-versus-tumour landscape patterns with QC and significance checks"; run_python_script 09b_landscape_comparison.py; fi
 if should_run_step 10; then announce_step "10" "Summarising descriptive variant statistics"; run_python_script 10_variant_stats.py; fi
 if should_run_step 11; then announce_step "11" "Identifying common SNPs and benchmarking frequencies"; run_python_script 11_SNPs.py; fi
 if should_run_step 12; then announce_step "12" "Running SNP enrichment testing"; run_python_script 12_stats_enrichment.py; fi

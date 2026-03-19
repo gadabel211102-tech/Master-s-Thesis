@@ -8,6 +8,7 @@ annotated_variants_dir = "/home/gadeaalonsoj/tfm/analysis_results/07_annotated_v
 variant_qc_dir = "/home/gadeaalonsoj/tfm/analysis_results/07b_variant_qc"
 variant_landscape_dir = "/home/gadeaalonsoj/tfm/analysis_results/08_variant_landscape"
 gsdmb_landscape_dir = "/home/gadeaalonsoj/tfm/analysis_results/09_gsdmb_landscape"
+landscape_comparison_dir = "/home/gadeaalonsoj/tfm/analysis_results/09b_landscape_comparison"
 variant_statistics_dir = "/home/gadeaalonsoj/tfm/analysis_results/10_variant_statistics"
 common_snps_dir = "/home/gadeaalonsoj/tfm/analysis_results/11_common_snps"
 snp_enrichment_dir = "/home/gadeaalonsoj/tfm/analysis_results/12_snp_enrichment"

@@ -34,6 +34,7 @@ The pipeline supports the following stages:
 07b_variant_qc.py                Variant-level QC checks
 08_mapping.py                    Global variant landscape plot
 09_gsdmb_only.py                 GSDMB-only landscape plot
+09b_landscape_comparison.py       Normal-versus-tumour follow-up for scripts 8 and 9
 10_variant_stats.py              Descriptive consequence/impact summaries
 11_SNPs.py                       Common SNP identification and benchmarking
 12_stats_enrichment.py           Tumour-versus-control SNP enrichment testing
@@ -86,17 +87,18 @@ If you prefer to run by hand instead of using the launcher, the expected environ
 10. `07b_variant_qc.py`
 11. `08_mapping.py`
 12. `09_gsdmb_only.py`
-13. `10_variant_stats.py`
-14. `11_SNPs.py`
-15. `12_stats_enrichment.py`
-16. `13_permutation_testing.py`
-17. `14_interactive_dashboard.py`
-18. `15_haplotypes.sh`
-19. `15_haplotype_stats.R`
-20. `16_excel_harmonisation.py`
-21. `17_snp_association.py`
-22. `18_haplotype_association.py`
-23. `19_1000g_haplotype_comparison.py` when a phased 1000 Genomes VCF and panel file are available
+13. `09b_landscape_comparison.py`
+14. `10_variant_stats.py`
+15. `11_SNPs.py`
+16. `12_stats_enrichment.py`
+17. `13_permutation_testing.py`
+18. `14_interactive_dashboard.py`
+19. `15_haplotypes.sh`
+20. `15_haplotype_stats.R`
+21. `16_excel_harmonisation.py`
+22. `17_snp_association.py`
+23. `18_haplotype_association.py`
+24. `19_1000g_haplotype_comparison.py` when a phased 1000 Genomes VCF and panel file are available
 
 ## Computational Environments
 
@@ -142,6 +144,7 @@ Used for the Python-based analytical part of the pipeline:
 - `07b_variant_qc.py`
 - `08_mapping.py`
 - `09_gsdmb_only.py`
+- `09b_landscape_comparison.py`
 - `10_variant_stats.py`
 - `11_SNPs.py`
 - `12_stats_enrichment.py`
