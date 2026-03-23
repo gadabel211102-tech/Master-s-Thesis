@@ -22,6 +22,7 @@ structure concordance from haplotype-frequency concordance.
 from __future__ import annotations
 
 import argparse
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Iterable
@@ -41,6 +42,18 @@ from pipeline_utils import ensure_directory, find_col
 sns.set_theme(style="whitegrid", context="talk")
 
 TARGET_THRESHOLD_LABELS = ("r2_060", "r2_080")
+
+
+def normalise_allele_string(value: object, expected_width: int | None = None) -> str | None:
+    """Normalise haplotype bitstrings while preserving leading zeroes when possible."""
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return None
+    if expected_width and re.fullmatch(r"\d+(?:\.0+)?", text):
+        text = text.split(".", 1)[0].zfill(expected_width)
+    return text
 
 
 def parse_args() -> argparse.Namespace:
@@ -310,7 +323,11 @@ def compute_ld_matrix(a1: np.ndarray, a2: np.ndarray) -> np.ndarray:
             keep = ~(np.isnan(xi) | np.isnan(xj))
             if keep.sum() < 3:
                 continue
-            corr = np.corrcoef(xi[keep], xj[keep])[0, 1]
+            xi_keep = xi[keep]
+            xj_keep = xj[keep]
+            if np.nanstd(xi_keep) == 0 or np.nanstd(xj_keep) == 0:
+                continue
+            corr = np.corrcoef(xi_keep, xj_keep)[0, 1]
             if np.isnan(corr):
                 continue
             ld[i, j] = corr ** 2
@@ -401,6 +418,9 @@ def compare_frequency_tables(
     local.columns = ["Allele_String", "Study_Frequency", "Study_Haplotype_ID", "Study_Variant_Content"]
     ref = ref_freq_df[["Allele_String", "Frequency", "Reference_Haplotype_ID", "Variant_Content"]].copy()
     ref.columns = ["Allele_String", "Reference_Frequency", "Reference_Haplotype_ID", "Reference_Variant_Content"]
+
+    local["Allele_String"] = local["Allele_String"].map(lambda value: normalise_allele_string(value, total_snps))
+    ref["Allele_String"] = ref["Allele_String"].map(lambda value: normalise_allele_string(value, total_snps))
 
     merged = local.merge(ref, on="Allele_String", how="outer")
     merged["Study_Frequency"] = merged["Study_Frequency"].fillna(0.0)

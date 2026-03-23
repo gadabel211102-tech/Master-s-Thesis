@@ -42,6 +42,137 @@ def get_grouping(config_path: str | Path | None = None) -> dict[str, Any]:
     return load_pipeline_config(config_path)["grouping"]
 
 
+def normalise_chromosome_label(value: Any) -> str:
+    """Normalise chromosome labels to a consistent ``chrN`` style."""
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return ""
+    if text.lower().startswith("chr"):
+        suffix = text[3:]
+    else:
+        suffix = text
+    suffix_upper = suffix.upper()
+    if suffix_upper in {"M", "MT"}:
+        return "chrM"
+    if suffix_upper in {"X", "Y"}:
+        return f"chr{suffix_upper}"
+    return f"chr{suffix}"
+
+
+def get_warning_amplicons(config_path: str | Path | None = None) -> pd.DataFrame:
+    """Return the amplicon regions that should trigger cautious SNP interpretation."""
+    cfg = load_pipeline_config(config_path)
+    warning_rows = cfg.get("warning_amplicons", [])
+    if not warning_rows:
+        return pd.DataFrame(columns=["label", "chrom", "start", "end", "region"])
+
+    warning_df = pd.DataFrame(warning_rows).copy()
+    warning_df["chrom"] = warning_df["chrom"].map(normalise_chromosome_label)
+    warning_df["start"] = pd.to_numeric(warning_df["start"], errors="coerce").astype("Int64")
+    warning_df["end"] = pd.to_numeric(warning_df["end"], errors="coerce").astype("Int64")
+    warning_df = warning_df.dropna(subset=["label", "chrom", "start", "end"]).copy()
+    warning_df["start"] = warning_df["start"].astype(int)
+    warning_df["end"] = warning_df["end"].astype(int)
+    warning_df["region"] = (
+        warning_df["chrom"] + ":" + warning_df["start"].astype(str) + "-" + warning_df["end"].astype(str)
+    )
+    return warning_df[["label", "chrom", "start", "end", "region"]]
+
+
+def build_amplicon_warning_lookup(
+    df: pd.DataFrame,
+    variant_col: str = "Variant_ID",
+    chrom_col: str = "CHROM",
+    pos_col: str = "POS",
+    config_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """Build one warning row per variant for overlaps with flagged amplicons."""
+    out_cols = [
+        variant_col,
+        "Coverage_Risk_Flag",
+        "Coverage_Risk_Amplicon",
+        "Coverage_Risk_Region",
+        "Coverage_Risk_Note",
+    ]
+    warning_amplicons = get_warning_amplicons(config_path)
+    if warning_amplicons.empty:
+        return pd.DataFrame(columns=out_cols)
+    if any(col not in df.columns for col in [variant_col, chrom_col, pos_col]):
+        return pd.DataFrame(columns=out_cols)
+
+    variant_df = df[[variant_col, chrom_col, pos_col]].dropna().copy()
+    if variant_df.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    variant_df[variant_col] = variant_df[variant_col].astype(str).str.strip()
+    variant_df = variant_df[variant_df[variant_col] != ""].copy()
+    variant_df[chrom_col] = variant_df[chrom_col].map(normalise_chromosome_label)
+    variant_df[pos_col] = pd.to_numeric(variant_df[pos_col], errors="coerce")
+    variant_df = variant_df.dropna(subset=[pos_col]).copy()
+    if variant_df.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    overlaps = variant_df.merge(warning_amplicons, left_on=chrom_col, right_on="chrom", how="inner")
+    overlaps = overlaps[(overlaps[pos_col] >= overlaps["start"]) & (overlaps[pos_col] <= overlaps["end"])].copy()
+    if overlaps.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    def _unique_join(series: pd.Series) -> str:
+        values = sorted({str(value).strip() for value in series if str(value).strip()})
+        return "; ".join(values)
+
+    lookup = (
+        overlaps.groupby(variant_col, as_index=False)
+        .agg({
+            "label": _unique_join,
+            "region": _unique_join,
+        })
+        .rename(columns={
+            "label": "Coverage_Risk_Amplicon",
+            "region": "Coverage_Risk_Region",
+        })
+    )
+    lookup["Coverage_Risk_Flag"] = True
+    lookup["Coverage_Risk_Note"] = (
+        "WARNING: overlaps one of the 4 worst-performing amplicons from the technical audit; "
+        "interpret cautiously."
+    )
+    return lookup[out_cols]
+
+
+def attach_amplicon_warning_columns(
+    df: pd.DataFrame,
+    warning_lookup: pd.DataFrame,
+    variant_col: str = "Variant_ID",
+) -> pd.DataFrame:
+    """Attach standard amplicon warning columns to a variant-level result table."""
+    if variant_col not in df.columns:
+        return df
+
+    out = df.copy()
+    warning_cols = [
+        "Coverage_Risk_Flag",
+        "Coverage_Risk_Amplicon",
+        "Coverage_Risk_Region",
+        "Coverage_Risk_Note",
+    ]
+    out = out.drop(columns=[col for col in warning_cols if col in out.columns], errors="ignore")
+
+    if warning_lookup.empty:
+        out["Coverage_Risk_Flag"] = False
+        out["Coverage_Risk_Amplicon"] = ""
+        out["Coverage_Risk_Region"] = ""
+        out["Coverage_Risk_Note"] = ""
+        return out
+
+    out = out.merge(warning_lookup, on=variant_col, how="left")
+    out["Coverage_Risk_Flag"] = out["Coverage_Risk_Flag"].eq(True)
+    out["Coverage_Risk_Amplicon"] = out["Coverage_Risk_Amplicon"].fillna("")
+    out["Coverage_Risk_Region"] = out["Coverage_Risk_Region"].fillna("")
+    out["Coverage_Risk_Note"] = out["Coverage_Risk_Note"].fillna("")
+    return out
+
+
 def find_col(df: pd.DataFrame, target: str) -> str | None:
     """Locate a dataframe column by case-insensitive exact name matching."""
     target_norm = str(target).strip().upper()

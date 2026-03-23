@@ -83,10 +83,11 @@ fi
 # ==============================================================================
 # CREATE OUTPUT DIRECTORY STRUCTURE
 # ==============================================================================
-# Create subdirectories for organizing results:
-#   - pass_bams/  : BAMs that passed QC
-#   - fail_bams/  : BAMs that failed QC
-#   - stats/      : Per-sample coverage statistics
+# Rebuild the QC output directories on every run so reruns cannot inherit stale
+# BAMs, indices, or per-sample stats from an older sample naming scheme.
+echo "[*] Preparing QC output directory..."
+rm -rf "${OUT_DIR}/pass_bams" "${OUT_DIR}/fail_bams" "${OUT_DIR}/stats"
+rm -f "${OUT_DIR}/qc_summary.tsv" "${OUT_DIR}/targets.sorted.bed"
 mkdir -p "${OUT_DIR}/pass_bams" "${OUT_DIR}/fail_bams" "${OUT_DIR}/stats"
 
 # ==============================================================================
@@ -148,6 +149,23 @@ if [[ $NUM_BAMS -eq 0 ]]; then
 fi
 
 echo "[*] Found $NUM_BAMS BAM files to process"
+
+# Verify that sample basenames are unique before copying into shared PASS/FAIL
+# directories. Duplicate basenames would overwrite one another and corrupt the
+# rerun state.
+mapfile -t SAMPLE_NAMES < <(
+    for BAM in "${BAMS[@]}"; do
+        basename "$BAM" .bam
+    done
+)
+
+DUPLICATE_SAMPLES=$(printf "%s\n" "${SAMPLE_NAMES[@]}" | sort | uniq -d || true)
+if [[ -n "$DUPLICATE_SAMPLES" ]]; then
+    echo "ERROR: Duplicate BAM basenames detected in input directory:"
+    echo "$DUPLICATE_SAMPLES" | sed 's/^/  - /'
+    echo "       Rename the colliding samples before rerunning QC."
+    exit 1
+fi
 
 # ==============================================================================
 # STEP 3: INITIALIZE SUMMARY TABLE
@@ -431,9 +449,9 @@ echo "FAIL samples:   ${OUT_DIR}/fail_bams/"
 echo "Detailed stats: ${OUT_DIR}/stats/"
 echo ""
 
-# Count PASS and FAIL samples
-PASS_COUNT=$(grep -c "PASS" "$SUMMARY" || echo 0)
-FAIL_COUNT=$(grep -c "FAIL" "$SUMMARY" || echo 0)
+# Count PASS and FAIL samples from the status column only
+PASS_COUNT=$(awk -F'	' 'NR > 1 && $8 == "PASS" {count++} END {print count + 0}' "$SUMMARY")
+FAIL_COUNT=$(awk -F'	' 'NR > 1 && $8 == "FAIL" {count++} END {print count + 0}' "$SUMMARY")
 
 echo "Results: $PASS_COUNT PASS, $FAIL_COUNT FAIL (out of $NUM_BAMS total)"
 echo ""

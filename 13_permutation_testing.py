@@ -28,7 +28,19 @@ from tqdm import tqdm
 import warnings
 from statsmodels.stats.multitest import multipletests
 
-from pipeline_utils import build_variant_id_series, combine_gnomad_nfe, ensure_directory, find_col, get_paths, get_thresholds, pooled_control_frame, standardize_cohort_labels, standardize_tissue_labels
+from pipeline_utils import (
+    attach_amplicon_warning_columns,
+    build_amplicon_warning_lookup,
+    build_variant_id_series,
+    combine_gnomad_nfe,
+    ensure_directory,
+    find_col,
+    get_paths,
+    get_thresholds,
+    pooled_control_frame,
+    standardize_cohort_labels,
+    standardize_tissue_labels,
+)
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_nonempty, validate_percentage_columns, validate_required_columns, validate_tissue_values
 
 warnings.filterwarnings("ignore")
@@ -156,6 +168,7 @@ def run_permutation_analysis():
 
     # Create variant IDs
     df["Variant_ID"] = build_variant_id_series(df[var_c], df[sym_c], df[hgv_c])
+    warning_lookup = build_amplicon_warning_lookup(df, variant_col="Variant_ID", chrom_col="CHROM", pos_col="POS")
     print_validation_summary(df, sam_c, "Script 13 filtered SNPs", [coh_c, tis_c])
 
     # Analysis groups
@@ -265,6 +278,7 @@ def run_permutation_analysis():
     final_results["Fisher_Significant_RAW"] = final_results["Fisher_P_Value"] < 0.05
     final_results["Permutation_Significant_FDR"] = final_results["Permutation_FDR"] < 0.05
     final_results["Fisher_Significant_FDR"] = final_results["Fisher_FDR"] < 0.05
+    final_results = attach_amplicon_warning_columns(final_results, warning_lookup)
 
     final_results["Agreement_RAW"] = (
         final_results["Permutation_Significant_RAW"] ==

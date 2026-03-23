@@ -28,7 +28,19 @@ import seaborn as sns
 from statsmodels.stats.multitest import multipletests
 
 from figure_style import COMPARATIVE_TAG, IMPACT_COLORS, arm_color
-from pipeline_utils import build_variant_id_series, combine_gnomad_nfe, ensure_directory, find_col, get_paths, get_thresholds, pooled_control_frame, standardize_cohort_labels, standardize_tissue_labels
+from pipeline_utils import (
+    attach_amplicon_warning_columns,
+    build_amplicon_warning_lookup,
+    build_variant_id_series,
+    combine_gnomad_nfe,
+    ensure_directory,
+    find_col,
+    get_paths,
+    get_thresholds,
+    pooled_control_frame,
+    standardize_cohort_labels,
+    standardize_tissue_labels,
+)
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_nonempty, validate_percentage_columns, validate_required_columns, validate_tissue_values
 
 # --- 1. PATH CONFIGURATION ---
@@ -81,6 +93,7 @@ def run_snp_association_analysis():
 
     # --- 5. ROBUST SNP ID CREATION ---
     df["Variant_ID"] = build_variant_id_series(df[var_c], df[sym_c], df[hgv_c])
+    warning_lookup = build_amplicon_warning_lookup(df, variant_col="Variant_ID", chrom_col="CHROM", pos_col="POS")
     print_validation_summary(df, sam_c, "Script 12 filtered SNPs", [coh_c, tis_c])
 
     cohort_list = ["Global", "Breast", "Endometrium"]
@@ -183,6 +196,11 @@ def run_snp_association_analysis():
     final_res["Raw_Significant"] = final_res["P_Value"] < 0.05
     final_res["FDR_Significant"] = final_res["FDR_P_Value"] < 0.05
     validate_percentage_columns(final_res, ["Tumour_Freq_%", "Control_Freq_%"], "Script 12 results")
+    final_res = attach_amplicon_warning_columns(
+        final_res,
+        warning_lookup.rename(columns={"Variant_ID": "SNP_ID"}),
+        variant_col="SNP_ID",
+    )
 
     # Separate labels for each plot
     final_res["Label_RAW"] = ""
@@ -203,7 +221,8 @@ def run_snp_association_analysis():
 
     # Order columns more cleanly for Excel
     preferred_cols = [
-        "Analysis_Group", "SNP_ID", "Symbol", "Consequence", "Impact",
+        "Analysis_Group", "SNP_ID", "Coverage_Risk_Flag", "Coverage_Risk_Amplicon",
+        "Coverage_Risk_Region", "Coverage_Risk_Note", "Symbol", "Consequence", "Impact",
         "gnomAD_NFE_AF", "gnomAD_NFE_Source",
         "Tumour_Carriers", "Control_Carriers",
         "Tumour_Total", "Control_Total",

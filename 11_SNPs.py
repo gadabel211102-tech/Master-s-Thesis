@@ -26,7 +26,17 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
-from pipeline_utils import build_variant_id_series, combine_gnomad_nfe, ensure_directory, get_paths, get_thresholds, standardize_cohort_labels, standardize_tissue_labels
+from pipeline_utils import (
+    attach_amplicon_warning_columns,
+    build_amplicon_warning_lookup,
+    build_variant_id_series,
+    combine_gnomad_nfe,
+    ensure_directory,
+    get_paths,
+    get_thresholds,
+    standardize_cohort_labels,
+    standardize_tissue_labels,
+)
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_nonempty, validate_percentage_columns, validate_required_columns
 
 # Shared configuration ensures that SNP reporting uses the same canonical input
@@ -61,6 +71,7 @@ def identify_snps_pipeline():
     df_snps["Variant_ID"] = build_variant_id_series(
         df_snps["Existing_variation"], df_snps["SYMBOL"], df_snps["HGVSp"]
     )
+    warning_lookup = build_amplicon_warning_lookup(df_snps, variant_col="Variant_ID", chrom_col="CHROM", pos_col="POS")
     df_snps["Cohort"] = standardize_cohort_labels(df_snps["Cohort"])
     df_snps["Tissue"] = standardize_tissue_labels(df_snps["Tissue"])
     print_validation_summary(df_snps, "Sample", "Script 11 SNP subset", ["Cohort", "Tissue"])
@@ -93,10 +104,12 @@ def identify_snps_pipeline():
     master_pivot.columns = [f"{col[0]}_{col[1]}_Frequency_%" for col in master_pivot.columns.values]
     master_pivot = master_pivot.fillna(0).reset_index()
     master_pivot.rename(columns={"gnomAD_NFE_AF_combined": "gnomAD_NFE_AF"}, inplace=True)
+    master_pivot = attach_amplicon_warning_columns(master_pivot, warning_lookup)
 
     cols = master_pivot.columns.tolist()
     preferred_order = [
-        "Variant_ID", "SYMBOL", "Consequence", "IMPACT",
+        "Variant_ID", "Coverage_Risk_Flag", "Coverage_Risk_Amplicon",
+        "Coverage_Risk_Region", "Coverage_Risk_Note", "SYMBOL", "Consequence", "IMPACT",
         "gnomAD_NFE_AF", "gnomAD_NFE_Source"
     ]
     freq_cols = [c for c in cols if c not in preferred_order]

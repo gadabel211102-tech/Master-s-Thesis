@@ -4,6 +4,9 @@ A reproducible analysis pipeline for targeted DNA sequencing of the **GSDMB locu
 
 Developed as part of a Master's thesis (TFM), this repository implements an end-to-end workflow spanning sequencing quality control, variant annotation, haplotype analysis, clinical harmonisation, and SNP-phenotype association modelling.
 
+Pipeline-facing documentation and outputs use British English. Raw source field
+names and source values are preserved where needed for parsing and joins.
+
 ## What This Repository Does
 
 The pipeline supports the following stages:
@@ -46,10 +49,11 @@ The pipeline supports the following stages:
 17_snp_association.py            SNP-clinical association analysis
 18_haplotype_association.py      Haplotype-clinical association analysis
 19_1000g_haplotype_comparison.py Haplotype comparison against phased 1000 Genomes reference populations
+20_isoform_expression_association.py Objective-2 RNA isoform/expression analysis linked to SNPs and haplotypes
 pipeline_config.toml             Shared paths, thresholds, and grouping choices
 pipeline_utils.py                Shared helper functions
 pipeline_validation.py           Shared validation helpers
-association_runtime.py           Shared runtime defaults for scripts 17, 18, and 19
+association_runtime.py           Shared runtime defaults for scripts 17, 18, 19, and 20
 environment.yml                  Shared conda/micromamba environment specification
 requirements.txt                 Shared pip specification for the legacy tfm_env workflow
 docs/notes/PIPELINE.md           Short pipeline notes and doc pointers
@@ -99,6 +103,7 @@ If you prefer to run by hand instead of using the launcher, the expected environ
 22. `17_snp_association.py`
 23. `18_haplotype_association.py`
 24. `19_1000g_haplotype_comparison.py` when a phased 1000 Genomes VCF and panel file are available
+25. `20_isoform_expression_association.py` for objective-2 workbook-first RNA isoform analysis
 
 ## Computational Environments
 
@@ -312,6 +317,7 @@ python 16_excel_harmonisation.py
 python 17_snp_association.py
 python 18_haplotype_association.py
 python 19_1000g_haplotype_comparison.py --vcf /path/to/1000G_phased.vcf.gz --panel /path/to/1000G.panel
+python 20_isoform_expression_association.py --include-controls-context
 ```
 
 ## Configuration
@@ -362,7 +368,7 @@ The repository now includes a shared reproducibility layer:
 - [pipeline_config.toml](pipeline_config.toml) centralises paths and thresholds
 - [pipeline_utils.py](pipeline_utils.py) centralises shared transformations
 - [pipeline_validation.py](pipeline_validation.py) centralises common integrity checks
-- [association_runtime.py](association_runtime.py) keeps scripts 17 and 18 aligned
+- [association_runtime.py](association_runtime.py) keeps scripts 17, 18, 19, and 20 aligned
 - [environment.yml](environment.yml) provides a shared conda/micromamba environment definition
 - [requirements.txt](requirements.txt) supports the legacy `tfm_env` virtual-environment workflow
 
@@ -381,3 +387,5 @@ If the repository is made public, it is usually best to:
 ## Use and Reuse
 
 This repository is intended to document the analytical workflow clearly enough for academic review, reproducibility, and supervised reuse. When reused on another machine or dataset, update local paths in `pipeline_config.toml` and verify the required external bioinformatics tools are available.
+
+

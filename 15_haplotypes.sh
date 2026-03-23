@@ -152,9 +152,11 @@ echo "STEP 1: Renaming samples and collecting VCFs"
 echo "----------------------------------------------------------------------"
 
 SAMPLE_LIST="${HAPLO_DIR}/sample_list.txt"
+SAMPLE_INFO="${HAPLO_DIR}/sample_info.tsv"
 RENAMED_DIR="${HAPLO_DIR}/renamed_vcfs"
 mkdir -p "${RENAMED_DIR}"
 > "${SAMPLE_LIST}"   # Truncate or create the sample list file
+echo -e "Sample\tCohort\tTissue\tGroup" > "${SAMPLE_INFO}"
 
 for cohort in breast endometrium; do
     for tissue in normal tumour; do
@@ -168,6 +170,11 @@ for cohort in breast endometrium; do
 
         for sample_dir in "${CALLS_DIR}"/*/; do
             sample=$(basename "${sample_dir}")
+            case "${sample}" in
+                cohort|logs)
+                    continue
+                    ;;
+            esac
             vcf="${sample_dir}/variants.filtered.vcf.gz"
 
             # Skip samples that have no filtered VCF (e.g. variant calling failed)
@@ -189,6 +196,9 @@ for cohort in breast endometrium; do
             bcftools index -t "${out_vcf}"
 
             echo "${out_vcf}" >> "${SAMPLE_LIST}"
+            tissue_label=$([ "${tissue}" = "normal" ] && echo "Healthy" || echo "Tumour")
+            cohort_label="${cohort^}"
+            echo -e "${sample}\t${cohort_label}\t${tissue_label}\t${cohort_label}_${tissue_label}" >> "${SAMPLE_INFO}"
             echo "  ✓ ${cohort}/${tissue}/${sample}"
         done
     done
@@ -211,11 +221,10 @@ fi
 # bcftools merge combines multiple single-sample VCFs into one multi-sample
 # VCF with one column per sample.
 #
-# --missing-to-ref fills positions where a sample has no call with the
-# reference genotype (0/0) rather than missing (./.). This is appropriate
-# for targeted amplicon data where good coverage at a position with no
-# variant call reliably indicates the reference allele. It is not appropriate
-# for whole-genome data with variable coverage.
+# Missing genotypes are intentionally kept as missing rather than coerced to
+# reference. That is more conservative for this project because several
+# amplicons are known to have weaker coverage, so an absent call is not always
+# strong evidence for the reference genotype.
 # =============================================================================
 echo ""
 echo "STEP 2: Merging into cohort VCF"
@@ -225,7 +234,6 @@ MERGED_VCF="${HAPLO_DIR}/cohort_merged.vcf.gz"
 
 bcftools merge \
     --file-list "${SAMPLE_LIST}" \
-    --missing-to-ref \
     --output-type z \
     --output "${MERGED_VCF}" \
     --threads "${THREADS}"
@@ -396,23 +404,16 @@ echo "STEP 6: Creating sample metadata file"
 echo "----------------------------------------------------------------------"
 
 META_TSV="${HAPLO_DIR}/sample_metadata.tsv"
-echo -e "Sample\tCohort\tTissue\tGroup" > "${META_TSV}"
+echo -e "Sample	Cohort	Tissue	Group" > "${META_TSV}"
 
-for cohort in breast endometrium; do
-    for tissue in normal tumour; do
-        # Map directory names to display labels used throughout the pipeline
-        tissue_label=$([ "${tissue}" = "normal" ] && echo "Healthy" || echo "Tumour")
-        cohort_label="${cohort^}"  # Parameter expansion: capitalise first letter
-
-        CALLS_DIR="${BASE}/${cohort}/${tissue}/dna_calls"
-        if [ ! -d "${CALLS_DIR}" ]; then continue; fi
-
-        for sample_dir in "${CALLS_DIR}"/*/; do
-            sample=$(basename "${sample_dir}")
-            echo -e "${sample}\t${cohort_label}\t${tissue_label}\t${cohort_label}_${tissue_label}"
-        done
-    done
-done >> "${META_TSV}"
+while IFS= read -r sample; do
+    meta_line="$(awk -F '	' -v sample="${sample}" 'NR > 1 && $1 == sample { print $2 "	" $3 "	" $4; exit }' "${SAMPLE_INFO}")"
+    if [ -z "${meta_line}" ]; then
+        echo "  WARNING: No metadata mapping found for phased sample ${sample}."
+        continue
+    fi
+    echo -e "${sample}	${meta_line}"
+done < "${HAPLO_DIR}/sample_order.txt" >> "${META_TSV}"
 
 N_META=$(( $(wc -l < "${META_TSV}") - 1 ))
 echo "✓ Metadata written for ${N_META} samples"

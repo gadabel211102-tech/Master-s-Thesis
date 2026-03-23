@@ -225,26 +225,26 @@ for BAM in "${BAMS[@]}"; do
   # 3) Rename if mismatch
   if [[ -n "${FIRST_VAR}" ]]; then
     if [[ "${HAS_CHR_FA}" -eq 1 && "${HAS_CHR_VCF}" -eq 0 ]]; then
-      log "FASTA usa 'chr*' y VCF no. Renombrando contigs en VCF -> 'chr*'..."
+      log "FASTA uses 'chr*' and the VCF does not. Renaming VCF contigs to 'chr*'..."
       awk -F'\t' '{g=$1; sub(/^chr/,"",g); print g "\t" $1}' "${REF_FA}.fai" > "${SDIR}/chr_map.txt"  # 1 -> chr1
       bcftools annotate --rename-chrs "${SDIR}/chr_map.txt" "${RAW_VCF}" -Oz -o "${SDIR}/variants.renamed.vcf.gz"
       tabix -p vcf "${SDIR}/variants.renamed.vcf.gz"
       RAW_VCF="${SDIR}/variants.renamed.vcf.gz"
     elif [[ "${HAS_CHR_FA}" -eq 0 && "${HAS_CHR_VCF}" -eq 1 ]]; then
-      log "FASTA no usa 'chr*' y VCF sí. Renombrando contigs en VCF -> sin 'chr'..."
+      log "FASTA does not use 'chr*' and the VCF does. Renaming VCF contigs to remove 'chr'..."
       awk -F'\t' '{g=$1; print $1 "\t" gensub(/^chr/,"","",g)}' "${REF_FA}.fai" > "${SDIR}/chr_map.txt"  # chr1 -> 1
       bcftools annotate --rename-chrs "${SDIR}/chr_map.txt" "${RAW_VCF}" -Oz -o "${SDIR}/variants.renamed.vcf.gz"
       tabix -p vcf "${SDIR}/variants.renamed.vcf.gz"
       RAW_VCF="${SDIR}/variants.renamed.vcf.gz"
     else
-      log "Nomenclatura de contigs coherente entre FASTA y VCF."
+      log "Contig naming is already consistent between the FASTA and VCF."
     fi
   else
-    log "VCF sin variantes; saltamos rename-chrs. (Header ya reinyectado si faltaba)"
+    log "VCF has no variants; skipping rename-chrs. (Header was already reinjected if needed)"
   fi
   # 4) Final header validation
   if ! bcftools view -h "${RAW_VCF}" | grep -q '^##contig'; then
-    log "ERROR: header aún sin ##contig tras reheader. Abortando para evitar corrupción."; exit 1
+    log "ERROR: header still lacks ##contig after reheader. Aborting to avoid corruption."; exit 1
   fi
   step_done
 
@@ -262,6 +262,23 @@ for BAM in "${BAMS[@]}"; do
   tabix -p vcf "${SDIR}/variants.filtered.vcf.gz"
   filter_dt=$(step_done); progress_bar 100; printf '\n'
   AVG_FILTER=$(running_avg "${AVG_FILTER}" "${N_FILTER}" "${filter_dt}"); N_FILTER=$((N_FILTER+1))
+
+  # ----------------- Standardise VCF sample name -----------------
+  step_start "Standardise sample name"
+  current_sample_name="$(bcftools query -l "${SDIR}/variants.filtered.vcf.gz" | head -n 1 || true)"
+  sample_name_count="$(bcftools query -l "${SDIR}/variants.filtered.vcf.gz" | wc -l || echo 0)"
+  if [[ "${sample_name_count}" -gt 1 ]]; then
+    log "ERROR: expected a single-sample VCF for ${SAMPLE}, found ${sample_name_count} samples in the header."
+    exit 1
+  fi
+  if [[ -n "${current_sample_name}" && "${current_sample_name}" != "${SAMPLE}" ]]; then
+    printf '%s\n' "${SAMPLE}" > "${SDIR}/sample_name.txt"
+    bcftools reheader -s "${SDIR}/sample_name.txt" "${SDIR}/variants.filtered.vcf.gz" -o "${SDIR}/variants.filtered.renamed.vcf.gz"
+    mv -f "${SDIR}/variants.filtered.renamed.vcf.gz" "${SDIR}/variants.filtered.vcf.gz"
+    tabix -f -p vcf "${SDIR}/variants.filtered.vcf.gz"
+    log "Reheadered VCF sample name: ${current_sample_name} -> ${SAMPLE}"
+  fi
+  step_done >/dev/null
 
   # ----------------- Export manual review candidates --------
   # Helper funcs to detect header tags (take file arg)
@@ -323,18 +340,29 @@ done
 # --------------------------- Cohort merge & exports -------------
 if [[ ${#SAMPLE_VCFS[@]} -gt 1 ]]; then
   COHORT_DIR="${OUT_DIR}/cohort"; mkdir -p "${COHORT_DIR}"
+  rm -f "${COHORT_DIR}/cohort.filtered.vcf.gz" "${COHORT_DIR}/cohort.filtered.vcf.gz.tbi"
   step_start "Merge cohort"
-  # Merge VCFs across samples
-  bcftools merge "${SAMPLE_VCFS[@]}" -Oz -o "${COHORT_DIR}/cohort.filtered.vcf.gz" \
-    > "${COHORT_DIR}/merge.log" 2>&1 || log "WARN: merge failed"
-  if [[ -f "${COHORT_DIR}/cohort.filtered.vcf.gz" ]]; then
-    tabix -p vcf "${COHORT_DIR}/cohort.filtered.vcf.gz"
-    step_done
-    bcftools query -f'%CHROM\t%POS\t%ID[\t%GT]\n' "${COHORT_DIR}/cohort.filtered.vcf.gz" > "${COHORT_DIR}/cohort_genotypes.tsv" || true
-    bcftools query -f'%CHROM\t%POS\t%ID\t%REF\t%ALT\t%QUAL[\t%DP]\n' "${COHORT_DIR}/cohort.filtered.vcf.gz" > "${COHORT_DIR}/site_metrics.tsv" || true
+  if bcftools merge "${SAMPLE_VCFS[@]}" -Oz -o "${COHORT_DIR}/cohort.filtered.vcf.gz" > "${COHORT_DIR}/merge.log" 2>&1; then
+    if [[ -s "${COHORT_DIR}/cohort.filtered.vcf.gz" ]] && bcftools view -h "${COHORT_DIR}/cohort.filtered.vcf.gz" >/dev/null 2>&1; then
+      tabix -f -p vcf "${COHORT_DIR}/cohort.filtered.vcf.gz"
+      step_done
+      bcftools query -f'%CHROM	%POS	%ID[	%GT]
+' "${COHORT_DIR}/cohort.filtered.vcf.gz" > "${COHORT_DIR}/cohort_genotypes.tsv" || true
+      bcftools query -f'%CHROM	%POS	%ID	%REF	%ALT	%QUAL[	%DP]
+' "${COHORT_DIR}/cohort.filtered.vcf.gz" > "${COHORT_DIR}/site_metrics.tsv" || true
+    else
+      log "WARN: merge produced an invalid or empty cohort VCF; see ${COHORT_DIR}/merge.log"
+      rm -f "${COHORT_DIR}/cohort.filtered.vcf.gz" "${COHORT_DIR}/cohort.filtered.vcf.gz.tbi"
+      step_done
+    fi
   else
+    log "WARN: merge failed; see ${COHORT_DIR}/merge.log"
+    rm -f "${COHORT_DIR}/cohort.filtered.vcf.gz" "${COHORT_DIR}/cohort.filtered.vcf.gz.tbi"
     step_done
   fi
 fi
 
 log "Pipeline completed. Outputs in: ${OUT_DIR}"
+
+
+

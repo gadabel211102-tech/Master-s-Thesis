@@ -62,3 +62,23 @@ def script19_defaults() -> dict[str, object]:
         "populations": ["EUR", "ALL", "IBS"],
     }
 
+
+def script20_defaults() -> dict[str, object]:
+    """Return the canonical configuration bundle for objective-2 isoform analysis."""
+    paths = get_paths()
+    thresholds = get_thresholds()
+    return {
+        "expr_xlsx": paths["objective2_expression_workbook"],
+        "master": paths["harmonised_master"],
+        "variant_workbook": paths["annotated_report"],
+        "haplotype_input": paths["haplotype_phased"],
+        "out_dir": paths["isoform_expression_dir"],
+        "rna_bed": paths["objective2_rna_bed"],
+        "min_nfe_af": thresholds["min_nfe_af"],
+        "min_hap_freq": thresholds["min_hap_freq"],
+        "min_carriers": thresholds["min_carriers"],
+        "fdr_threshold": thresholds["fdr_threshold"],
+        "grouping": get_grouping(),
+    }
+
+

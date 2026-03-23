@@ -115,8 +115,18 @@ def arm_color(label: str, default: str = "#666666") -> str:
     if label in TUMOUR_CONTROL_COLORS:
         return TUMOUR_CONTROL_COLORS[label]
     text = str(label).lower()
+    # Keep the American-spelt fallback for compatibility with raw source labels.
     if "tumour" in text or "tumor" in text:
         return TUMOUR_CONTROL_COLORS["Tumour"]
     if "control" in text or "healthy" in text or "normal" in text:
         return TUMOUR_CONTROL_COLORS["Control"]
     return default
+
+def cohort_colour(label: str, default: str = "#666666") -> str:
+    """British-English alias for cohort_color()."""
+    return cohort_color(label, default=default)
+
+
+def arm_colour(label: str, default: str = "#666666") -> str:
+    """British-English alias for arm_color()."""
+    return arm_color(label, default=default)

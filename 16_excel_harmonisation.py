@@ -334,6 +334,10 @@ def build_master(snp_xlsx: Path) -> pd.DataFrame:
     if not frames:
         raise ValueError(f"No expected SNP sheets found. Available: {xls.sheet_names}")
 
+    frames = [frame.dropna(axis=1, how="all") for frame in frames if not frame.empty and not frame.dropna(how="all").empty]
+    if not frames:
+        raise ValueError("All processed SNP sheets were empty after dropping all-NA rows.")
+
     master = pd.concat(frames, ignore_index=True)
 
     # Filter: keep only DNA/RNA rows
@@ -772,8 +776,50 @@ def parse_date(x) -> Optional[pd.Timestamp]:
     """Robust date parser (Excel serials + strings)."""
     if pd.isna(x):
         return None
+
+    if isinstance(x, pd.Timestamp):
+        return x
+
+    if isinstance(x, (int, float)) and not isinstance(x, bool):
+        try:
+            if 1 <= float(x) <= 60000:
+                dt = pd.to_datetime(float(x), unit="D", origin="1899-12-30", errors="coerce")
+                return None if pd.isna(dt) else dt
+        except Exception:
+            return None
+
+    s = _norm_text(x)
+    if not s:
+        return None
+
+    iso_like = re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?", s)
+    if iso_like:
+        dt = pd.to_datetime(s, errors="coerce")
+        return None if pd.isna(dt) else dt
+
+    slash_like = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})(?: (\d{1,2}:\d{2}(?::\d{2})?))?", s)
+    if slash_like:
+        first = int(slash_like.group(1))
+        second = int(slash_like.group(2))
+        time_part = slash_like.group(4) or ""
+        if first > 12 and second <= 12:
+            fmt = "%d/%m/%Y" + (" %H:%M:%S" if time_part.count(":") == 2 else " %H:%M" if time_part else "")
+        elif second > 12 and first <= 12:
+            fmt = "%m/%d/%Y" + (" %H:%M:%S" if time_part.count(":") == 2 else " %H:%M" if time_part else "")
+        else:
+            fmt = "%d/%m/%Y" + (" %H:%M:%S" if time_part.count(":") == 2 else " %H:%M" if time_part else "")
+        dt = pd.to_datetime(s, format=fmt, errors="coerce")
+        return None if pd.isna(dt) else dt
+
+    dash_like = re.fullmatch(r"(\d{1,2})-(\d{1,2})-(\d{4})(?: (\d{1,2}:\d{2}(?::\d{2})?))?", s)
+    if dash_like:
+        time_part = dash_like.group(4) or ""
+        fmt = "%d-%m-%Y" + (" %H:%M:%S" if time_part.count(":") == 2 else " %H:%M" if time_part else "")
+        dt = pd.to_datetime(s, format=fmt, errors="coerce")
+        return None if pd.isna(dt) else dt
+
     try:
-        dt = pd.to_datetime(x, errors="coerce", dayfirst=True)
+        dt = pd.to_datetime(s, errors="coerce")
         return None if pd.isna(dt) else dt
     except Exception:
         return None

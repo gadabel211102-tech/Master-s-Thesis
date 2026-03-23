@@ -21,23 +21,40 @@ Input
 
 Output
 ------
-- ``clean_landscape_all_impacts.png`` in the configured results directory.
+- ``GSDMB_Global_Variant_Landscape.png`` in the configured results directory.
+- ``GSDMB_Global_Variant_Landscape.xlsx`` containing the plotted variants plus
+  gnomAD NFE SNP context.
 """
 
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from pipeline_utils import compute_carrier_percentage, ensure_directory, extract_rsid, find_col, get_paths
-from figure_style import COMPARATIVE_TAG, QUALITATIVE_COLORBLIND_SEQUENCE
+from pipeline_utils import (
+    attach_amplicon_warning_columns,
+    build_amplicon_warning_lookup,
+    build_variant_id_series,
+    combine_gnomad_nfe,
+    compute_carrier_percentage,
+    ensure_directory,
+    extract_rsid,
+    find_col,
+    get_paths,
+    get_thresholds,
+    standardize_cohort_labels,
+    standardize_tissue_labels,
+)
+from figure_style import QUALITATIVE_COLORBLIND_SEQUENCE
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_required_columns
 
 # Centralised path configuration keeps this plotting script aligned with the
 # rest of the pipeline and reduces the risk of stale hard-coded locations.
 PATHS = get_paths()
+THRESHOLDS = get_thresholds()
 input_file = str(PATHS["annotated_report"])
 output_dir = ensure_directory(PATHS.get("variant_landscape_dir", PATHS["results_dir"] / "08_variant_landscape"))
 output_image = str(output_dir / "GSDMB_Global_Variant_Landscape.png")
+output_excel = str(output_dir / "GSDMB_Global_Variant_Landscape.xlsx")
 LABEL_MODE = "high_only"  # valid options: "high_only", "both"
 
 
@@ -83,6 +100,111 @@ def annotate_panel_variants(ax, panel_df, pos_c, impact_c):
         placed.append((x_val, y_val))
 
 
+def build_landscape_summary(df, cols):
+    """Build the point-level summary used both for plotting and workbook export."""
+    cohort_col = cols["cohort"]
+    tissue_col = cols["tissue"]
+    sample_col = cols["sample"]
+    impact_col = cols["impact"]
+    symbol_col = cols["symbol"]
+    position_col = cols["pos"]
+
+    df = combine_gnomad_nfe(df)
+    df[cohort_col] = standardize_cohort_labels(df[cohort_col])
+    df[tissue_col] = standardize_tissue_labels(df[tissue_col])
+    df["Variant_ID"] = build_variant_id_series(df["Existing_variation"], df[symbol_col], df["HGVSp"])
+    df["Variant_Label"] = df["Existing_variation"].apply(extract_rsid)
+    df["Is_Common_SNP_By_NFE"] = df["gnomAD_NFE_AF_combined"].fillna(-1).gt(THRESHOLDS["min_nfe_af"])
+    df["NFE_SNP_Threshold"] = THRESHOLDS["min_nfe_af"]
+
+    group_cols = [
+        "Variant_ID", "CHROM", position_col, "REF", "ALT", symbol_col,
+        "Consequence", impact_col, cohort_col, tissue_col,
+        "gnomAD_NFE_AF_combined", "gnomAD_NFE_Source",
+        "Is_Common_SNP_By_NFE", "NFE_SNP_Threshold",
+    ]
+    variant_counts = compute_carrier_percentage(
+        df=df,
+        sample_col=sample_col,
+        group_cols=group_cols,
+        denom_cols=[cohort_col, tissue_col],
+        pct_name='Carrier_Percentage',
+    )
+
+    variant_labels = (
+        df.groupby(group_cols, dropna=False)["Variant_Label"]
+        .agg(lambda values: '; '.join(sorted({str(v).strip() for v in values if str(v).strip()})) or None)
+        .reset_index()
+    )
+    variant_counts = variant_counts.merge(variant_labels, on=group_cols, how='left')
+    variant_counts["Labelled_On_Figure"] = (
+        variant_counts[impact_col].isin(label_impacts()) & variant_counts["Variant_Label"].notna()
+    )
+    variant_counts["SNP_Context"] = variant_counts["Is_Common_SNP_By_NFE"].map({
+        True: "Common SNP by gnomAD NFE threshold",
+        False: "Rare or unconfirmed SNP by gnomAD NFE threshold",
+    })
+
+    warning_lookup = build_amplicon_warning_lookup(df, variant_col="Variant_ID", chrom_col="CHROM", pos_col=position_col)
+    variant_counts = attach_amplicon_warning_columns(variant_counts, warning_lookup)
+
+    sample_sizes = df.groupby([cohort_col, tissue_col])[sample_col].nunique().to_dict()
+    return df, variant_counts, sample_sizes
+
+
+def export_landscape_workbook(variant_counts, cols):
+    """Write the plotted point table plus labelled/common-SNP subsets to Excel."""
+    impact_col = cols["impact"]
+    export_df = variant_counts.copy()
+    export_df = export_df.rename(columns={
+        cols["cohort"]: "Cohort",
+        cols["tissue"]: "Tissue",
+        cols["pos"]: "POS",
+        cols["symbol"]: "SYMBOL",
+        impact_col: "IMPACT",
+    })
+    export_df = export_df.rename(columns={"gnomAD_NFE_AF_combined": "gnomAD_NFE_AF"})
+
+    preferred_cols = [
+        "Variant_ID", "Variant_Label", "Labelled_On_Figure",
+        "Is_Common_SNP_By_NFE", "SNP_Context", "NFE_SNP_Threshold",
+        "Coverage_Risk_Flag", "Coverage_Risk_Amplicon", "Coverage_Risk_Region", "Coverage_Risk_Note",
+        "CHROM", "POS", "REF", "ALT", "SYMBOL", "Consequence", "IMPACT",
+        "Cohort", "Tissue", "Carrier_Count", "Total_Samples", "Carrier_Percentage",
+        "gnomAD_NFE_AF", "gnomAD_NFE_Source",
+    ]
+    remaining_cols = [col for col in export_df.columns if col not in preferred_cols]
+    export_df = export_df[preferred_cols + remaining_cols]
+    export_df = export_df.sort_values(["Cohort", "Tissue", "POS", "Variant_ID"], kind="stable")
+
+    labelled_df = export_df[export_df["Labelled_On_Figure"]].copy()
+    common_snp_df = export_df[export_df["Is_Common_SNP_By_NFE"]].copy()
+
+    summary_df = pd.DataFrame([
+        {
+            "Output": "Plotted point rows",
+            "Count": int(len(export_df)),
+            "Notes": "One row per plotted variant point within a cohort/tissue stratum.",
+        },
+        {
+            "Output": "Labelled figure rows",
+            "Count": int(len(labelled_df)),
+            "Notes": "Subset of points labelled directly on the landscape figure.",
+        },
+        {
+            "Output": "Common SNP rows by NFE",
+            "Count": int(len(common_snp_df)),
+            "Notes": f"Uses the shared gnomAD NFE threshold of {THRESHOLDS['min_nfe_af']:.2f}.",
+        },
+    ])
+
+    with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
+        summary_df.to_excel(writer, sheet_name="summary", index=False)
+        export_df.to_excel(writer, sheet_name="landscape_points", index=False)
+        labelled_df.to_excel(writer, sheet_name="labelled_variants", index=False)
+        common_snp_df.to_excel(writer, sheet_name="common_snps_by_nfe", index=False)
+
+
 def generate_clean_all_impact_map():
     """Generate the all-genes landscape plot used for descriptive comparison."""
     print("--- Generating clean landscape map across all impact categories ---")
@@ -98,36 +220,39 @@ def generate_clean_all_impact_map():
     coh_c = find_col(df, 'Cohort')
     tis_c = find_col(df, 'Tissue')
     sam_c = find_col(df, 'Sample')
-    existing_c = find_col(df, 'Existing_variation')
 
-    required_cols = [pos_c, sym_c, imp_c, coh_c, tis_c, sam_c]
+    required_cols = [
+        pos_c, sym_c, imp_c, coh_c, tis_c, sam_c,
+        'Existing_variation', 'HGVSp', 'CHROM', 'REF', 'ALT',
+        'Consequence', 'gnomADe_NFE_AF', 'gnomADg_NFE_AF',
+    ]
     validate_required_columns(df, required_cols, "Script 08 Biological_Annotations")
     print_validation_summary(df, sam_c, "Script 08 raw annotations", [coh_c, tis_c])
 
-    # Harmonise impact labels and extract concise rsID-based labels so that the
-    # annotated figure remains interpretable in manuscript-style presentation.
+    # Harmonise the point table once so the figure and workbook always describe
+    # exactly the same variant set and the same SNP definition.
     df[imp_c] = df[imp_c].astype(str).str.strip().str.upper()
-    df['Variant_Label'] = df[existing_c].apply(extract_rsid) if existing_c else None
-
-    # Collapse repeated transcript-level rows to sample-level carrier summaries.
-    # The denominator is cohort+tissue specific, which prevents larger groups
-    # from appearing artificially more variant-rich simply because they contain
-    # more sequenced samples.
-    group_cols = [pos_c, sym_c, imp_c, coh_c, tis_c]
-    variant_counts = compute_carrier_percentage(
-        df=df,
-        sample_col=sam_c,
-        group_cols=group_cols,
-        denom_cols=[coh_c, tis_c],
-        pct_name='Carrier_Percentage',
+    _, variant_counts, sample_sizes = build_landscape_summary(
+        df,
+        {
+            "cohort": coh_c,
+            "tissue": tis_c,
+            "sample": sam_c,
+            "impact": imp_c,
+            "symbol": sym_c,
+            "pos": pos_c,
+        },
     )
-    variant_labels = (
-        df.groupby(group_cols)['Variant_Label']
-        .agg(lambda values: '; '.join(pd.unique([v for v in values if v])) or None)
-        .reset_index()
+    export_landscape_workbook(
+        variant_counts,
+        {
+            "cohort": coh_c,
+            "tissue": tis_c,
+            "impact": imp_c,
+            "symbol": sym_c,
+            "pos": pos_c,
+        },
     )
-    variant_counts = variant_counts.merge(variant_labels, on=group_cols, how='left')
-    sample_sizes = df.groupby([coh_c, tis_c])[sam_c].nunique().to_dict()
 
     # Plot all variants in the same genomic coordinate system, while using marker
     # shape to distinguish impact classes and colour to distinguish genes.
@@ -145,6 +270,12 @@ def generate_clean_all_impact_map():
         ordered=True
     )
 
+    gene_count = variant_counts[sym_c].nunique()
+    if gene_count <= len(QUALITATIVE_COLORBLIND_SEQUENCE):
+        point_palette = QUALITATIVE_COLORBLIND_SEQUENCE
+    else:
+        point_palette = sns.color_palette("husl", n_colors=gene_count)
+
     g = sns.relplot(
         data=variant_counts,
         x=pos_c,
@@ -158,7 +289,7 @@ def generate_clean_all_impact_map():
         s=120,
         alpha=0.7,
         edgecolor="black",
-        palette=QUALITATIVE_COLORBLIND_SEQUENCE,
+        palette=point_palette,
         height=5,
         aspect=1.6,
         facet_kws={'sharex': True, 'sharey': True}
@@ -166,9 +297,7 @@ def generate_clean_all_impact_map():
 
     # Only the higher-priority consequence classes receive labels, and those
     # labels are restricted to rsIDs to avoid long overlapping annotations.
-    labelled = variant_counts[
-        variant_counts[imp_c].isin(label_impacts()) & variant_counts['Variant_Label'].notna()
-    ].copy()
+    labelled = variant_counts[variant_counts['Labelled_On_Figure']].copy()
     for (cohort_label, tissue_label), panel_df in labelled.groupby([coh_c, tis_c], sort=False):
         ax = g.axes_dict.get((cohort_label, tissue_label))
         if ax is None:
@@ -197,6 +326,7 @@ def generate_clean_all_impact_map():
 
     plt.savefig(output_image, dpi=300, bbox_inches='tight')
     print(f"SUCCESS: Clean map with all impacts saved to: {output_image}")
+    print(f"SUCCESS: Landscape workbook with SNP context saved to: {output_excel}")
 
 
 if __name__ == "__main__":

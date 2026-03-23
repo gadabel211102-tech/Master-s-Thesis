@@ -43,7 +43,7 @@ QC_DIR = PATHS["qc_visualisation_dir"]
 OUTPUT_DIR = ensure_directory(
     PATHS.get("landscape_comparison_dir", PATHS["results_dir"] / "09b_landscape_comparison")
 )
-WORKBOOK_PATH = OUTPUT_DIR / "Landscape_Normal_vs_Tumour_with_QC_and_Significance_UPDATED.xlsx"
+WORKBOOK_PATH = OUTPUT_DIR / "Landscape_Normal_vs_Tumour_with_QC_Significance_Genes_UPDATED.xlsx"
 SUMMARY_CSV = OUTPUT_DIR / "Landscape_Normal_vs_Tumour_Summary.csv"
 GSDMB_TESTS_CSV = OUTPUT_DIR / "GSDMB_Frequency_Tests.csv"
 GLOBAL_TESTS_CSV = OUTPUT_DIR / "Global_Frequency_Tests.csv"
@@ -66,6 +66,34 @@ def extract_rsid(value: object) -> str | None:
     text = str(value).strip()
     match = re.search(r"(rs\d+)", text, flags=re.IGNORECASE)
     return match.group(1).lower() if match else None
+
+
+def classify_location(consequence: object) -> str:
+    """Collapse VEP consequence strings into an easier-to-read location class."""
+    text = str(consequence).strip().lower()
+    if not text or text == 'nan':
+        return 'Unknown'
+    if 'intergenic_variant' in text:
+        return 'Intergenic'
+    if 'upstream_gene_variant' in text:
+        return 'Upstream'
+    if 'downstream_gene_variant' in text:
+        return 'Downstream'
+    if 'intron_variant' in text:
+        return 'Intronic'
+    if 'splice' in text:
+        return 'Splicing'
+    if '5_prime_utr_variant' in text or '3_prime_utr_variant' in text:
+        return 'UTR'
+    if any(term in text for term in [
+        'missense_variant', 'synonymous_variant', 'stop_gained', 'stop_lost',
+        'frameshift_variant', 'start_lost', 'protein_altering_variant',
+        'coding_sequence_variant', 'inframe_insertion', 'inframe_deletion'
+    ]):
+        return 'Exonic/Coding'
+    if 'non_coding_transcript_exon_variant' in text:
+        return 'Exonic/Non-coding'
+    return 'Other'
 
 
 def fisher_two_sided(normal_carriers: int, normal_noncarriers: int, tumour_carriers: int, tumour_noncarriers: int) -> float:
@@ -123,18 +151,33 @@ def load_annotations() -> pd.DataFrame:
     impact_col = find_col(df, "Impact")
     pos_col = find_col(df, "Pos")
     existing_col = find_col(df, "Existing_variation")
+    gene_col = find_col(df, "Gene")
+    consequence_col = find_col(df, "Consequence")
+    feature_type_col = find_col(df, "Feature_type")
+    exon_col = find_col(df, "EXON")
+    intron_col = find_col(df, "INTRON")
 
-    required = [sample_col, cohort_col, tissue_col, symbol_col, impact_col, pos_col, existing_col]
+    required = [
+        sample_col, cohort_col, tissue_col, symbol_col, impact_col, pos_col,
+        existing_col, gene_col, consequence_col, feature_type_col, exon_col, intron_col,
+    ]
     validate_required_columns(df, required, "Script 09b Biological_Annotations")
     print_validation_summary(df, sample_col, "Script 09b raw annotations", [cohort_col, tissue_col])
 
-    out = df[[sample_col, cohort_col, tissue_col, symbol_col, impact_col, pos_col, existing_col]].copy()
-    out.columns = ["Sample", "Cohort", "Tissue", "Symbol", "Impact", "Pos", "Existing_variation"]
+    out = df[[
+        sample_col, cohort_col, tissue_col, symbol_col, impact_col, pos_col,
+        existing_col, gene_col, consequence_col, feature_type_col, exon_col, intron_col,
+    ]].copy()
+    out.columns = [
+        "Sample", "Cohort", "Tissue", "Symbol", "Impact", "Pos",
+        "Existing_variation", "Gene_ID", "Consequence", "Feature_type", "EXON", "INTRON",
+    ]
     out["Cohort"] = out["Cohort"].astype(str).str.strip().str.title()
     out["Tissue"] = out["Tissue"].astype(str).str.strip().str.title()
     out["Impact"] = out["Impact"].astype(str).str.strip().str.upper()
     out["sample_key"] = out["Sample"].map(normalize_sample_name)
     out["rsID"] = out["Existing_variation"].map(extract_rsid)
+    out["Location_Class"] = out["Consequence"].map(classify_location)
     return out[out["Tissue"].isin(["Normal", "Tumour"])].copy()
 
 
@@ -183,6 +226,13 @@ def build_frequency_tests(scope_df: pd.DataFrame, key_cols: list[str]) -> pd.Dat
         .agg(
             Carrier_Count=("Sample", "nunique"),
             rsID=("rsID", lambda values: next((x for x in values if pd.notna(x)), None)),
+            Gene_Symbol=("Symbol", lambda values: next((x for x in values if pd.notna(x)), None)),
+            Gene_ID=("Gene_ID", lambda values: next((x for x in values if pd.notna(x)), None)),
+            Consequence=("Consequence", lambda values: next((x for x in values if pd.notna(x)), None)),
+            Feature_type=("Feature_type", lambda values: next((x for x in values if pd.notna(x)), None)),
+            EXON=("EXON", lambda values: next((x for x in values if pd.notna(x)), None)),
+            INTRON=("INTRON", lambda values: next((x for x in values if pd.notna(x)), None)),
+            Location_Class=("Location_Class", lambda values: next((x for x in values if pd.notna(x)), None)),
         )
         .reset_index()
     )
@@ -197,6 +247,13 @@ def build_frequency_tests(scope_df: pd.DataFrame, key_cols: list[str]) -> pd.Dat
         row["Normal_N"] = int(denominators.get((row["Cohort"], "Normal"), 0))
         row["Tumour_N"] = int(denominators.get((row["Cohort"], "Tumour"), 0))
         row["rsID"] = next((x for x in group["rsID"] if pd.notna(x)), None)
+        row["Gene_Symbol"] = row.get("Symbol") or next((x for x in group["Gene_Symbol"] if pd.notna(x)), None)
+        row["Gene_ID"] = next((x for x in group["Gene_ID"] if pd.notna(x)), None)
+        row["Consequence"] = next((x for x in group["Consequence"] if pd.notna(x)), None)
+        row["Feature_type"] = next((x for x in group["Feature_type"] if pd.notna(x)), None)
+        row["EXON"] = next((x for x in group["EXON"] if pd.notna(x)), None)
+        row["INTRON"] = next((x for x in group["INTRON"] if pd.notna(x)), None)
+        row["Location_Class"] = next((x for x in group["Location_Class"] if pd.notna(x)), None)
         row["Normal_Frequency_pct"] = (row["Normal_Carriers"] / row["Normal_N"] * 100) if row["Normal_N"] else None
         row["Tumour_Frequency_pct"] = (row["Tumour_Carriers"] / row["Tumour_N"] * 100) if row["Tumour_N"] else None
         row["Tumour_minus_Normal_pct"] = row["Tumour_Frequency_pct"] - row["Normal_Frequency_pct"]
@@ -226,7 +283,15 @@ def build_frequency_tests(scope_df: pd.DataFrame, key_cols: list[str]) -> pd.Dat
     tests["FDR_BH"] = tests["FDR_BH"].astype(float)
     tests["Raw_p_lt_0.05"] = tests["p_value"] < 0.05
     tests["FDR_lt_0.05"] = tests["FDR_BH"] < 0.05
-    return tests
+    preferred_order = [
+        "Cohort", "Gene_Symbol", "Gene_ID", "Pos", "Impact", "Consequence",
+        "Location_Class", "Feature_type", "EXON", "INTRON", "Normal_Carriers",
+        "Tumour_Carriers", "Normal_N", "Tumour_N", "rsID", "Normal_Frequency_pct",
+        "Tumour_Frequency_pct", "Tumour_minus_Normal_pct", "Variant_Status",
+        "Direction", "p_value", "FDR_BH", "Raw_p_lt_0.05", "FDR_lt_0.05",
+    ]
+    tail_cols = [col for col in tests.columns if col not in preferred_order]
+    return tests[preferred_order + tail_cols]
 
 
 def build_variant_status_summary(tests_df: pd.DataFrame) -> pd.DataFrame:
@@ -419,6 +484,9 @@ def main() -> None:
     gsdmb_tests = gsdmb_tests.merge(gsdmb_high_qc, on=["Cohort", "Pos", "Impact"], how="left")
     global_tests = global_tests.merge(global_high_qc, on=["Cohort", "Symbol", "Pos", "Impact"], how="left")
 
+    if "Symbol" in global_tests.columns:
+        global_tests = global_tests.drop(columns=["Symbol"])
+
     gsdmb_qc_source = gsdmb_tests[gsdmb_tests["Direction_HighQC"].notna()].copy()
     gsdmb_qc_source["Direction_QC"] = gsdmb_qc_source["Direction_HighQC"]
     global_qc_source = global_tests[global_tests["Direction_HighQC"].notna()].copy()
@@ -443,39 +511,86 @@ def main() -> None:
         ignore_index=True,
     )
 
-    def summarise_significant_variants(sub: pd.DataFrame) -> tuple[str, str]:
-        nominal = sub[sub["Raw_p_lt_0.05"]].sort_values("p_value")
-        fdr_hits = sub[sub["FDR_lt_0.05"]].sort_values("FDR_BH")
+    def label_significant_row(row: pd.Series) -> str:
+        gene_part = f"{row['Gene_Symbol']} " if 'Gene_Symbol' in row.index and pd.notna(row.get('Gene_Symbol')) else ''
+        rs_part = row["rsID"] if pd.notna(row.get("rsID")) else f"chr17:{int(row['Pos'])}"
+        return f"{gene_part}{rs_part} (p={row['p_value']:.4g}, FDR={row['FDR_BH']:.4g})"
 
-        def label_row(row: pd.Series) -> str:
-            gene_part = f"{row['Symbol']} " if "Symbol" in row.index and pd.notna(row.get("Symbol")) else ""
-            rs_part = row["rsID"] if pd.notna(row.get("rsID")) else f"chr17:{int(row['Pos'])}"
-            return f"{gene_part}{rs_part} (p={row['p_value']:.4g}, FDR={row['FDR_BH']:.4g})"
+    significance_counts_rows: list[dict[str, object]] = []
+    significance_detail_rows: list[dict[str, object]] = []
+    detail_columns = [
+        "Map", "Cohort", "Variants_tested", "Raw_p_lt_0.05", "FDR_lt_0.05",
+        "Significance_Level", "Also_FDR_significant", "Gene_Symbol", "Gene_ID", "rsID",
+        "Pos", "Impact", "Consequence", "Location_Class", "Feature_type",
+        "EXON", "INTRON", "Variant_Status", "Direction", "Normal_Carriers",
+        "Tumour_Carriers", "Normal_N", "Tumour_N", "Normal_Frequency_pct",
+        "Tumour_Frequency_pct", "Tumour_minus_Normal_pct", "p_value", "FDR_BH",
+    ]
 
-        nominal_text = "; ".join(label_row(row) for _, row in nominal.iterrows()) or "None"
-        fdr_text = "; ".join(label_row(row) for _, row in fdr_hits.iterrows()) or "None"
-        return nominal_text, fdr_text
-
-    significance_rows = []
     for map_label, frame in [("GSDMB (script 9)", gsdmb_tests), ("Global (script 8)", global_tests)]:
         for cohort, sub in frame.groupby("Cohort"):
-            nominal_text, fdr_text = summarise_significant_variants(sub)
-            significance_rows.append(
-                {
-                    "Map": map_label,
-                    "Cohort": cohort,
-                    "Variants_tested": len(sub),
-                    "Raw_p_lt_0.05": int(sub["Raw_p_lt_0.05"].sum()),
-                    "FDR_lt_0.05": int(sub["FDR_lt_0.05"].sum()),
-                    "Shared_variants": int((sub["Variant_Status"] == "shared").sum()),
-                    "Tumour_only_variants": int((sub["Variant_Status"] == "tumour_only").sum()),
-                    "Normal_only_variants": int((sub["Variant_Status"] == "normal_only").sum()),
-                    "Nominal_significant_variants": nominal_text,
-                    "FDR_significant_variants": fdr_text,
-                }
-            )
+            nominal_hits = sub[sub["Raw_p_lt_0.05"]].sort_values(["p_value", "FDR_BH", "Pos"])
+            fdr_hits = sub[sub["FDR_lt_0.05"]].sort_values(["FDR_BH", "p_value", "Pos"])
+            counts = {
+                "Map": map_label,
+                "Cohort": cohort,
+                "Variants_tested": len(sub),
+                "Raw_p_lt_0.05": int(sub["Raw_p_lt_0.05"].sum()),
+                "FDR_lt_0.05": int(sub["FDR_lt_0.05"].sum()),
+                "Shared_variants": int((sub["Variant_Status"] == "shared").sum()),
+                "Tumour_only_variants": int((sub["Variant_Status"] == "tumour_only").sum()),
+                "Normal_only_variants": int((sub["Variant_Status"] == "normal_only").sum()),
+                "Nominal_significant_variants": "; ".join(label_significant_row(row) for _, row in nominal_hits.iterrows()) or "None",
+                "FDR_significant_variants": "; ".join(label_significant_row(row) for _, row in fdr_hits.iterrows()) or "None",
+            }
+            significance_counts_rows.append(counts)
 
-    significance_summary = pd.DataFrame(significance_rows)
+            if nominal_hits.empty:
+                significance_detail_rows.append(
+                    {
+                        **{key: counts[key] for key in ["Map", "Cohort", "Variants_tested", "Raw_p_lt_0.05", "FDR_lt_0.05"]},
+                        "Significance_Level": "None",
+                        "Also_FDR_significant": False,
+                        "Gene_Symbol": None,
+                        "Gene_ID": None,
+                        "rsID": None,
+                        "Pos": None,
+                        "Impact": None,
+                        "Consequence": None,
+                        "Location_Class": None,
+                        "Feature_type": None,
+                        "EXON": None,
+                        "INTRON": None,
+                        "Variant_Status": None,
+                        "Direction": None,
+                        "Normal_Carriers": None,
+                        "Tumour_Carriers": None,
+                        "Normal_N": None,
+                        "Tumour_N": None,
+                        "Normal_Frequency_pct": None,
+                        "Tumour_Frequency_pct": None,
+                        "Tumour_minus_Normal_pct": None,
+                        "p_value": None,
+                        "FDR_BH": None,
+                    }
+                )
+                continue
+
+            for _, row in nominal_hits.iterrows():
+                detail = {
+                    **{key: counts[key] for key in ["Map", "Cohort", "Variants_tested", "Raw_p_lt_0.05", "FDR_lt_0.05"]},
+                    "Significance_Level": "Nominal (p < 0.05)",
+                    "Also_FDR_significant": bool(row["FDR_lt_0.05"]),
+                }
+                for col in detail_columns:
+                    if col in detail:
+                        continue
+                    detail[col] = row[col] if col in row.index else None
+                significance_detail_rows.append(detail)
+
+    significance_counts = pd.DataFrame(significance_counts_rows)
+    significance_summary = pd.DataFrame(significance_detail_rows)
+    significance_summary = significance_summary[detail_columns]
 
     qc_counts = pd.concat(
         [gsdmb_qc_counts.assign(Map="GSDMB (script 9)"), global_qc_counts.assign(Map="Global (script 8)")],
@@ -484,12 +599,12 @@ def main() -> None:
 
     guide = pd.DataFrame(
         [
-            ["Purpose", "Summary of the visual patterns seen in scripts 8 and 9, with supporting variant counts, frequency tests, and QC sensitivity checks."],
+            ["Purpose", "Summary of the visual patterns seen in scripts 8 and 9, with supporting variant counts, frequency tests, QC sensitivity checks, and a detailed significant-variant overview."],
             ["How to read frequencies", "Frequencies are carrier frequencies (% of samples carrying the variant) within each cohort/tissue panel."],
             ["Variant status", "shared = present in both tissues; tumour_only = seen only in tumour; normal_only = seen only in normal."],
             ["Direction", "Tumour_minus_Normal_pct < 0 means the variant is less frequent in tumour than in normal."],
             ["QC sensitivity", "High-QC comparisons use only aligned samples with zero_amplicons = 0 in the coverage audit generated by script 03."],
-            ["Where to find p/FDR", "Open Significance_Overview for counts, GSDMB_Key_with_p_FDR or Global_Key_with_p_FDR for the main variants, and GSDMB_All_with_p_FDR or Global_All_with_p_FDR for all tested variants."],
+            ["Where to find p/FDR", "Open Significance_Overview for the per-variant significant results with gene/consequence/location details, Significance_Counts for the map-level counts, and the *_with_p_FDR sheets for the full tested tables."],
             ["Frequency significance", "p_value is a two-sided Fisher exact test on carrier vs non-carrier counts within each cohort. FDR_BH is Benjamini-Hochberg correction within each cohort and map."],
         ]
     )
@@ -501,6 +616,7 @@ def main() -> None:
         guide.to_excel(writer, sheet_name="Guide", index=False, header=False)
         summary.to_excel(writer, sheet_name="Summary", index=False)
         significance_summary.to_excel(writer, sheet_name="Significance_Overview", index=False)
+        significance_counts.to_excel(writer, sheet_name="Significance_Counts", index=False)
         qc_counts.to_excel(writer, sheet_name="QC_Sample_Counts", index=False)
         gsdmb_status.to_excel(writer, sheet_name="GSDMB_Variant_Status", index=False)
         gsdmb_direction.to_excel(writer, sheet_name="GSDMB_Shared_Direction", index=False)

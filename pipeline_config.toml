@@ -19,11 +19,14 @@ haplotype_statistics_dir = "/home/gadeaalonsoj/tfm/analysis_results/15_haplotype
 snp_clinical_dir = "/home/gadeaalonsoj/tfm/analysis_results/17_snp_clinical_associations"
 haplotype_clinical_dir = "/home/gadeaalonsoj/tfm/analysis_results/18_haplotype_clinical_associations"
 thousand_genomes_results = "/home/gadeaalonsoj/tfm/analysis_results/19_1000g_haplotype_comparison"
+isoform_expression_dir = "/home/gadeaalonsoj/tfm/analysis_results/20_isoform_expression_associations"
 annotated_report = "/home/gadeaalonsoj/tfm/analysis_results/07_annotated_variants/GSDMB_Annotated_Variants.xlsx"
 harmonised_master = "/home/gadeaalonsoj/tfm/MASTER_SNP_plus_clinical_HARMONISED.xlsx"
 haplotype_phased = "/home/gadeaalonsoj/tfm/analysis_results/15_haplotype_phasing/phased_genotypes.tsv"
 haplotype_results = "/home/gadeaalonsoj/tfm/analysis_results/15_haplotype_statistics/GSDMB_Haplotype_Results.xlsx"
 manifests_dir = "/home/gadeaalonsoj/tfm/manifests"
+objective2_expression_workbook = "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/HAPLOTIPOS Y PORCENTAJES DE ISOFORMAS(3)(4)_EVA.(2).xlsx"
+objective2_rna_bed = "/home/gadeaalonsoj/tfm/rna_bed/IAD258499_4_Designed.bed"
 
 [thresholds]
 min_nfe_af = 0.01
@@ -38,3 +41,32 @@ random_seed = 42
 pool_normals_as_control = true
 internal_control_tissue = "Healthy"
 output_control_label = "Control"
+
+
+[[warning_amplicons]]
+label = "rs921650"
+chrom = "chr17"
+start = 39912700
+end = 39912813
+
+[[warning_amplicons]]
+label = "chr17:39908600-39908800"
+chrom = "chr17"
+start = 39908600
+end = 39908800
+
+[[warning_amplicons]]
+label = "rs117097909"
+chrom = "chr17"
+start = 39908610
+end = 39908804
+
+[[warning_amplicons]]
+label = "chr17:39907450-39907625"
+chrom = "chr17"
+start = 39907450
+end = 39907625
+
+
+
+

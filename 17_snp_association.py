@@ -59,9 +59,9 @@ BREAST (MT-T_N sheet, n=71 tumour samples)
   ✓ HER2 copies       canon__her2_copies           (continuous, n=68)
   ✓ Age               canon__age                   (continuous)
   ✓ KI67              clin_dcs__KI67               (messy — coerced numeric)
-  ✓ Exitus            clin_dcs__Exitus             (NO/SI)
+  ? Death             clin_dcs__Exitus             (No/Yes)
   ✓ HER2+ subtype     clin_her2__DX                (Ca mama HER2+ / TN)
-  ~ Survival (derived) from Fecha_dx + Ultima_fecha + Exitus
+  ~ Survival (derived) from Fecha_dx + Ultima_fecha + death-status source fields
 
 ENDOMETRIAL (AT=AUs sheet, n=114 sequenced DNA samples)
   ✓ FIGO stage        clin_au_endo__FIGO_STAGE     (IA/IB/II/IIIA/IIIC1/IIIC2/IVB)
@@ -74,8 +74,8 @@ ENDOMETRIAL (AT=AUs sheet, n=114 sequenced DNA samples)
   ✓ TP53 IHC (abnml) canon__p53_status            (Aberrant/Normal — produced by 16b)
   ✓ ER status         canon__er_status             (Positive/Negative)
   ✓ PR status         canon__pr_status             (Positive/Negative)
-  ✓ Progression       clin_au_endo__PD_STATUS      (PD/NO PD)
-  ✓ Exitus            clin_au_endo__EXITUS         (YES/NO)
+  ✓ Progression       clin_au_endo__PD_STATUS      (PD / No PD)
+  ? Death             clin_au_endo__EXITUS         (Yes/No)
   ✓ Risk recurrence   clin_au_endo__RISK_OF_RECURRENCE
   ✓ OS (months)       canon__os_months
   ✓ PFS (months)      canon__pfs_months
@@ -130,6 +130,7 @@ from scipy.stats import false_discovery_control, fisher_exact, mannwhitneyu
 
 from association_runtime import script17_defaults
 from figure_style import COMPARATIVE_TAG, COHORT_COLORS, GENOTYPE_COLORS, IMPACT_COLORS, arm_color, cohort_color
+from pipeline_utils import attach_amplicon_warning_columns, build_amplicon_warning_lookup
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_percentage_columns
 
 # lifelines optional — only needed for survival plots
@@ -154,21 +155,21 @@ DEFAULTS = script17_defaults()
 DEFAULT_GSDMB  = DEFAULTS["gsdmb"]
 DEFAULT_MASTER = DEFAULTS["master"]
 DEFAULT_OUT    = DEFAULTS["out_dir"]
-DEFAULT_VARIANT_WHITELIST = DEFAULTS["variant_whitelist"]
+DEFAULT_VARIANT_WHITELIST = DEFAULTS.get("variant_whitelist")
 
-# Pass-BAM manifests — one file per cohort, listing QC-passed BAMs
+# Pass-BAM manifests - one file per cohort, listing QC-passed BAMs.
 # These are the ground truth for which samples have actually been sequenced.
 # Set to None to skip manifest filtering (falls back to extraction_flag logic).
-DEFAULT_MANIFESTS = {
+DEFAULT_MANIFESTS = DEFAULTS.get("manifests", {
     "endometrium-tumour": Path("/home/gadeaalonsoj/tfm/manifests/endometrium-tumour-pass_manifest.txt"),
     "endometrium-normal": Path("/home/gadeaalonsoj/tfm/manifests/endometrium-normal-pass_manifest.txt"),
     "breast-tumour":      Path("/home/gadeaalonsoj/tfm/manifests/breast-tumour-pass_manifest.txt"),
     "breast-normal":      Path("/home/gadeaalonsoj/tfm/manifests/breast-normal-pass_manifest.txt"),
-}
+})
 
-FDR_THRESHOLD  = 0.10
-MIN_CARRIERS   = 5   # EPV-informed minimum; n=3 gives unreliable estimates
-MIN_NFE_AF     = 0.01
+FDR_THRESHOLD  = float(DEFAULTS.get("fdr_threshold", 0.10))
+MIN_CARRIERS   = int(DEFAULTS.get("min_carriers", 5))   # EPV-informed minimum; n=3 gives unreliable estimates
+MIN_NFE_AF     = float(DEFAULTS.get("min_nfe_af", 0.01))
 
 
 # ── MANIFEST PARSING ──────────────────────────────────────────────────────────
@@ -718,11 +719,11 @@ CLINICAL_VARS_BREAST: Dict[str, Dict] = {
     "BREAST_PR_BIN":             {"type": "binary", "label": "PR positive",
                                    "note": "Positive=1 vs Negative=0", "bmi_adjust": False},
     "BREAST_RECURRENCE_DERIVED": {"type": "binary", "label": "Recurrence / progression",
-                                   "note": "Any recurrence=1 vs NO=0", "bmi_adjust": True},
+                                   "note": "Any recurrence = 1 vs no recurrence = 0", "bmi_adjust": True},
     "BREAST_ANY_METASTASIS_BIN": {"type": "binary", "label": "Any metastasis",
                                    "note": "Local or distant metastasis=1 vs none=0", "bmi_adjust": True},
-    "BREAST_EXITUS_DERIVED":     {"type": "binary", "label": "Exitus",
-                                   "note": "SI=1 vs NO=0", "bmi_adjust": True},
+    "BREAST_EXITUS_DERIVED":     {"type": "binary", "label": "Death",
+                                   "note": "Yes = 1 vs no = 0", "bmi_adjust": True},
     # ── Nominal (chi-square) ─────────────────────────────────────────────
     "BREAST_HER2_SUBTYPE":       {"type": "nominal", "label": "HER2 subtype",
                                    "note": "HER2+ / TN / Other — core GSDMB-relevant subtype", "bmi_adjust": False},
@@ -758,7 +759,7 @@ CLINICAL_VARS_ENDO: Dict[str, Dict] = {
                                    "note": "Tumour immune infiltration — relevant to pyroptosis hypothesis", "bmi_adjust": False},
     # ── Binary (Fisher exact + age-adjusted logistic) ─────────────────────
     "ENDO_LVSI_BIN":             {"type": "binary", "label": "LVSI",
-                                   "note": "Lymphovascular space invasion — YES=1 vs NO=0", "bmi_adjust": False},
+                                   "note": "Lymphovascular space invasion: yes = 1 vs no = 0", "bmi_adjust": False},
     "ENDO_MYOINV_BIN":           {"type": "binary", "label": "Myometrial invasion ≥50%",
                                    "note": ">50%=1 vs <50%=0", "bmi_adjust": True},
     "ENDO_MSI_BIN":              {"type": "binary", "label": "MSI-H",
@@ -766,11 +767,11 @@ CLINICAL_VARS_ENDO: Dict[str, Dict] = {
     "ENDO_NEEC_BIN":             {"type": "binary", "label": "Non-endometrioid histology",
                                    "note": "NEEC=1 vs EEC=0", "bmi_adjust": False},
     "ENDO_PD_BIN":               {"type": "binary", "label": "Disease progression",
-                                   "note": "PD=1 vs NO PD=0", "bmi_adjust": True},
-    "ENDO_EXITUS_DISEASE_BIN":   {"type": "binary", "label": "Exitus (disease-specific) [PRIMARY]",
-                                   "note": "YES=1 vs NO=0 — primary survival endpoint", "bmi_adjust": True},
-    "ENDO_EXITUS_BIN":           {"type": "binary", "label": "Exitus (all-cause) [SUPPLEMENTARY]",
-                                   "note": "YES=1 vs NO=0 — correlated with disease-specific; interpret together", "bmi_adjust": True},
+                                   "note": "Progressive disease = 1 vs no progressive disease = 0", "bmi_adjust": True},
+    "ENDO_EXITUS_DISEASE_BIN":   {"type": "binary", "label": "Disease-specific death [PRIMARY]",
+                                   "note": "Yes = 1 vs no = 0; primary survival endpoint", "bmi_adjust": True},
+    "ENDO_EXITUS_BIN":           {"type": "binary", "label": "All-cause death [SUPPLEMENTARY]",
+                                   "note": "Yes = 1 vs no = 0; correlated with disease-specific death, so interpret together", "bmi_adjust": True},
     "ENDO_ER_BIN":               {"type": "binary", "label": "ER positive",
                                    "note": "Positive=1 vs Negative=0", "bmi_adjust": False},
     "ENDO_PR_BIN":               {"type": "binary", "label": "PR positive",
@@ -778,7 +779,7 @@ CLINICAL_VARS_ENDO: Dict[str, Dict] = {
     "ENDO_TP53_ABN_BIN":         {"type": "binary", "label": "TP53 IHC abnormal",
                                    "note": "Aberrant=1 vs WT=0 — defines p53-abn molecular subtype", "bmi_adjust": False},
     "ENDO_GENE_AMP_BIN":         {"type": "binary", "label": "Gene amplification",
-                                   "note": "YES=1 vs NO=0 — relevant to GSDMB locus amplification", "bmi_adjust": False},
+                                   "note": "Yes = 1 vs no = 0; relevant to GSDMB locus amplification", "bmi_adjust": False},
     "ENDO_PTEN_BIN":             {"type": "binary", "label": "PTEN loss/reduced",
                                    "note": "LOST/REDUCED=1 vs CONSERVED=0", "bmi_adjust": False},
     "ENDO_MLH1_BIN":             {"type": "binary", "label": "MLH1 loss/reduced",
@@ -3098,7 +3099,7 @@ def parse_args():
     p.add_argument("--gsdmb",   default=str(DEFAULT_GSDMB))
     p.add_argument("--master",  default=str(DEFAULT_MASTER))
     p.add_argument("--out_dir", default=str(DEFAULT_OUT))
-    p.add_argument("--variant_whitelist", default=str(DEFAULT_VARIANT_WHITELIST),
+    p.add_argument("--variant_whitelist", default=(str(DEFAULT_VARIANT_WHITELIST) if DEFAULT_VARIANT_WHITELIST else None),
                    help="Excel whitelist from script 11 defining the thesis SNP backbone")
     p.add_argument("--manifest_endo_tumour", default=str(DEFAULT_MANIFESTS["endometrium-tumour"]),
                    help="Pass-BAM manifest for AU endometrial tumour")
@@ -3588,7 +3589,7 @@ def main():
     out_dir = Path(args.out_dir)
     validate_file_exists(gsdmb, "Script 17 GSDMB input")
     validate_file_exists(master, "Script 17 master input")
-    variant_whitelist = Path(args.variant_whitelist) if args.variant_whitelist else None
+    variant_whitelist = None if args.variant_whitelist in {None, "", "None"} else Path(args.variant_whitelist)
     if variant_whitelist is not None:
         validate_file_exists(variant_whitelist, "Script 17 variant whitelist")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -3607,14 +3608,18 @@ def main():
 
     merged = load_and_merge(gsdmb, master, manifest_paths=manifest_paths, whitelist_path=variant_whitelist)
     print_validation_summary(merged, "Sample", "Script 17 merged analysis input", ["Cohort", "Tissue"])
+    warning_lookup = build_amplicon_warning_lookup(merged, variant_col="Variant_ID", chrom_col="CHROM", pos_col="POS")
 
     # Analysis 1
     tvh = tumour_vs_control(merged)
     if not tvh.empty:
         validate_percentage_columns(tvh, ["Freq_Tumour_%", "Freq_Control_%"], "Script 17 tumour vs control")
+    tvh = attach_amplicon_warning_columns(tvh, warning_lookup)
 
     # Analysis 2
     breast_clin, endo_clin = clinical_associations(merged)
+    breast_clin = attach_amplicon_warning_columns(breast_clin, warning_lookup)
+    endo_clin = attach_amplicon_warning_columns(endo_clin, warning_lookup)
 
     # Analysis 3 — genotype-dose
     # Run on ALL variants, not just nominal hits, to avoid selection bias.
@@ -3624,6 +3629,8 @@ def main():
     all_endo_vars   = endo_clin["Variant_ID"].unique().tolist()   if not endo_clin.empty   else []
     breast_dose = genotype_dose_analysis(merged, all_breast_vars, CLINICAL_VARS_BREAST, "Breast_Tumour")
     endo_dose   = genotype_dose_analysis(merged, all_endo_vars,   CLINICAL_VARS_ENDO,   "Endometrial_Tumour")
+    breast_dose = attach_amplicon_warning_columns(breast_dose, warning_lookup)
+    endo_dose = attach_amplicon_warning_columns(endo_dose, warning_lookup)
 
     # Analysis 4 — survival
     surv_res = pd.DataFrame()
@@ -3631,9 +3638,11 @@ def main():
     surv_out = survival_analysis(merged)
     if isinstance(surv_out, tuple):
         surv_res, km_pages = surv_out
+    surv_res = attach_amplicon_warning_columns(surv_res, warning_lookup)
 
     # Analysis 5 — cancer risk (case-control)
     risk_res = cancer_risk_analysis(merged)
+    risk_res = attach_amplicon_warning_columns(risk_res, warning_lookup)
 
     # Summary
     sig_parts = []
@@ -3643,6 +3652,8 @@ def main():
         # Alias P_Value → P_Unadj so the shared sort key works across all result types
         s["P_Unadj"] = s["P_Value"]
         sig_parts.append(s[["Analysis_Type", "Analysis_Group", "Variant_ID", "Gene",
+                             "Coverage_Risk_Flag", "Coverage_Risk_Amplicon",
+                             "Coverage_Risk_Region", "Coverage_Risk_Note",
                              "Consequence", "IMPACT", "Freq_Tumour_%", "Freq_Control_%",
                              "Odds_Ratio", "P_Value", "P_Unadj", "FDR_P_Value",
                              "Nominal_Sig", "FDR_Sig"]])
@@ -3651,6 +3662,8 @@ def main():
             sig_mask = res["Nominal_Sig_Unadj"] | res["Nominal_Sig_Adj_Age"] | res["Nominal_Sig_Adj_AgeBMI"]
             s = res[sig_mask].copy(); s["Analysis_Type"] = f"Clinical_{label}"
             keep_cols = ["Analysis_Type", "Cohort", "Variant_ID", "Gene",
+                         "Coverage_Risk_Flag", "Coverage_Risk_Amplicon",
+                         "Coverage_Risk_Region", "Coverage_Risk_Note",
                          "Contrast", "N_WT", "N_Het", "N_Hom",
                          "Clin_Label", "Clin_Type",
                          "Test_Unadj", "OR_Unadj", "P_Unadj", "FDR_Unadj",
@@ -3669,6 +3682,7 @@ def main():
         sig_parts.append(risk_sig)
     summary = (pd.concat(sig_parts, ignore_index=True).sort_values("P_Unadj")
                if sig_parts else pd.DataFrame({"Note": ["No nominally significant results."]}))
+    summary = attach_amplicon_warning_columns(summary, warning_lookup)
 
     # Sample manifest
     keep_clin = ["canon__age", "canon__grade", "clin_au_endo__FIGO_STAGE",
@@ -3739,3 +3753,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

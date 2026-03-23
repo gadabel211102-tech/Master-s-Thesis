@@ -18,17 +18,20 @@
 # =============================================================================
 
 suppressPackageStartupMessages({
-  install_if_missing <- function(pkg, ...) {
-    if (!requireNamespace(pkg, quietly = TRUE)) {
-      install.packages(pkg, repos = "https://cloud.r-project.org", ...)
-    }
-    if (!requireNamespace(pkg, quietly = TRUE)) {
-      stop(sprintf("Required R package could not be installed: %s", pkg))
-    }
-  }
-
-  for (pkg in c("haplo.stats", "ggplot2", "dplyr", "tidyr", "openxlsx", "readxl", "stringr", "scales", "forcats")) {
-    install_if_missing(pkg)
+  required_pkgs <- c(
+    "haplo.stats", "ggplot2", "dplyr", "tidyr", "openxlsx", "readxl",
+    "stringr", "scales", "forcats", "patchwork", "RColorBrewer",
+    "gridExtra"
+  )
+  missing_required <- required_pkgs[!vapply(required_pkgs, requireNamespace, logical(1), quietly = TRUE)]
+  if (length(missing_required) > 0) {
+    stop(
+      paste0(
+        "Missing required R packages: ",
+        paste(missing_required, collapse = ", "),
+        ". Run Rscript /home/gadeaalonsoj/tfm/install_haplotype_r_dependencies.R before rerunning stage 15R."
+      )
+    )
   }
 
   library(haplo.stats)
@@ -40,27 +43,11 @@ suppressPackageStartupMessages({
   library(stringr)
   library(scales)
   library(forcats)
-  for (pkg in c("patchwork", "logistf", "RColorBrewer", "gridExtra")) {
-    if (!requireNamespace(pkg, quietly = TRUE)) {
-      install.packages(pkg, repos = "https://cloud.r-project.org")
-    }
-  }
-  # ggrepel -> ggpubr -> survminer are optional (only needed for KM plots).
-  # Install with dependencies=TRUE so the chain resolves. If ggrepel is not
-  # available from CRAN (e.g. in a conda R environment) install it first
-  # explicitly; if that also fails, survminer is skipped gracefully at runtime.
-  for (pkg in c("ggrepel", "ggpubr", "survival", "survminer")) {
-    if (!requireNamespace(pkg, quietly = TRUE)) {
-      tryCatch(
-        install.packages(pkg, repos = "https://cloud.r-project.org",
-                         dependencies = TRUE),
-        warning = function(w) invisible(NULL),
-        error   = function(e) invisible(NULL)
-      )
-    }
-  }
   library(patchwork)
-  library(logistf)
+
+  HAS_LOGISTF <- requireNamespace("logistf", quietly = TRUE)
+  HAS_SURVIVAL <- requireNamespace("survival", quietly = TRUE)
+  HAS_SURVMINER <- HAS_SURVIVAL && requireNamespace("survminer", quietly = TRUE)
 })
 
 # Explicitly prefer dplyr verbs
@@ -373,10 +360,14 @@ run_assoc_for_region <- function(region_name, a1_mat, a2_mat, region_meta,
       freq_case <- mean(dosage[y == 1], na.rm = TRUE) / 2
       freq_control <- mean(dosage[y == 0], na.rm = TRUE) / 2
 
-      fit <- tryCatch(
-        logistf::logistf(y ~ dosage),
-        error = function(e) NULL
-      )
+      fit <- if (HAS_LOGISTF) {
+        tryCatch(
+          logistf::logistf(y ~ dosage),
+          error = function(e) NULL
+        )
+      } else {
+        NULL
+      }
 
       if (!is.null(fit) && "dosage" %in% names(coef(fit))) {
         beta  <- coef(fit)["dosage"]
@@ -782,11 +773,6 @@ make_freq_comparison_plot <- function(assoc_df, region_name, out_file,
       )
     )
 
-  # Install gridExtra if needed (lightweight, no external deps)
-  if (!requireNamespace("gridExtra", quietly = TRUE)) {
-    install.packages("gridExtra", repos = "https://cloud.r-project.org")
-  }
-
   combined <- patchwork::wrap_plots(bar_plot, tbl_plot,
                                      ncol = 1,
                                      heights = c(3, max(1, nrow(tbl_df) * 0.28)))
@@ -1114,8 +1100,7 @@ make_km_plot <- function(a1_mat, a2_mat, freq_df, metadata_df,
                          hap_rank = 1,
                          time_col = "os_months", event_col = "os_event") {
 
-  if (!requireNamespace("survival",  quietly = TRUE)) return(invisible(NULL))
-  if (!requireNamespace("survminer", quietly = TRUE)) return(invisible(NULL))
+  if (!HAS_SURVIVAL || !HAS_SURVMINER) return(invisible(NULL))
   if (!all(c(time_col, event_col) %in% names(metadata_df))) return(invisible(NULL))
 
   top_hap_str <- freq_df$Allele_String[hap_rank]

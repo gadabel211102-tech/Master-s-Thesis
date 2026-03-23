@@ -111,6 +111,25 @@ if [[ ! -f "$BED_FILE" ]]; then
     exit 1
 fi
 
+extract_samples_by_status() {
+    local wanted_status="$1"
+    awk -F'	' -v wanted_status="$wanted_status" '
+      NR==1 {
+        for(i=1; i<=NF; i++) {
+          header[$i] = i
+        }
+        if(!("sample" in header) || !("status" in header)) {
+          print "ERROR: Missing sample/status columns in qc_summary.tsv" >"/dev/stderr"
+          exit 2
+        }
+        next
+      }
+      $header["status"] == wanted_status {
+        print $header["sample"]
+      }
+    ' "$QC_SUMMARY"
+}
+
 # Create output directories
 mkdir -p "$(dirname "$MANIFEST_OUT")"
 mkdir -p "$ZERO_COV_OUT"
@@ -130,33 +149,7 @@ echo "[INFO] Looking for PASS samples..."
 # --------------------------------------------------
 # Extract sample names that passed QC
 # --------------------------------------------------
-# Strategy:
-# 1. Parse header to find column indices for "sample" and "status"
-# 2. For data rows, extract sample name where status == "PASS"
-
-PASS_SAMPLES=$(awk -F'\t' '
-  # Process header row
-  NR==1 {
-    # Build hash table mapping column names to indices
-    for(i=1; i<=NF; i++) {
-      header[$i] = i
-    }
-    
-    # Verify required columns exist
-    if(!("sample" in header) || !("status" in header)) {
-      print "ERROR: Missing sample/status columns in qc_summary.tsv" >"/dev/stderr"
-      exit 2
-    }
-    next  # Skip to next line (start processing data)
-  }
-  
-  # Process data rows
-  # Extract sample name if status is PASS
-  $header["status"] == "PASS" {
-    print $header["sample"]
-  }
-' "$QC_SUMMARY")
-
+PASS_SAMPLES=$(extract_samples_by_status "PASS")
 # Count how many PASS samples were found
 PASS_COUNT=$(echo "$PASS_SAMPLES" | grep -c . || echo 0)
 
@@ -221,9 +214,27 @@ done
 
 echo "[DEBUG] Loop completed. FOUND=$FOUND, MISSING=$MISSING"
 
+FAIL_SAMPLES=$(extract_samples_by_status "FAIL")
+mapfile -t FAIL_SAMPLES_ARRAY <<< "$FAIL_SAMPLES"
+FAIL_COUNT=$(echo "$FAIL_SAMPLES" | grep -c . || echo 0)
+
+CURRENT_SAMPLES=()
+for sample in "${PASS_SAMPLES_ARRAY[@]}" "${FAIL_SAMPLES_ARRAY[@]}"; do
+    [[ -z "$sample" ]] && continue
+    CURRENT_SAMPLES+=("$sample")
+done
+
+DUPLICATE_CURRENT_SAMPLES=$(printf "%s\n" "${CURRENT_SAMPLES[@]}" | sort | uniq -d || true)
+if [[ -n "$DUPLICATE_CURRENT_SAMPLES" ]]; then
+    echo "[ERROR] Duplicate sample names found in qc_summary.tsv:" >&2
+    echo "$DUPLICATE_CURRENT_SAMPLES" | sed 's/^/  - /' >&2
+    exit 1
+fi
+
 echo ""
 echo "[SUCCESS] Manifest generation completed"
 echo "  Total PASS samples:    $PASS_COUNT"
+echo "  Total FAIL samples:    $FAIL_COUNT"
 echo "  BAMs found:            $FOUND"
 echo "  BAMs missing:          $MISSING"
 echo "  Manifest file:         $MANIFEST_OUT"
@@ -246,7 +257,6 @@ echo "[DEBUG] *** ENTERING PART 2 ***"
 echo "[DEBUG] Current directory: $(pwd)"
 echo "[DEBUG] Script still running with PID: $$"
 echo "[DEBUG] Starting Part 2 - zero coverage analysis"
-
 # 1. Verify PASS directory exists
 if [[ ! -d "$PASS_DIR" ]]; then
     echo "[ERROR] Pass directory missing: $PASS_DIR"
@@ -261,40 +271,81 @@ echo "[DEBUG] PASS_DIR: $PASS_DIR"
 echo "[DEBUG] Contents of PASS_DIR:"
 ls -la "$PASS_DIR" | head -20 || echo "[WARN] Could not list PASS_DIR"
 
-# Build list of directories to search
-SEARCH_DIRS=("$PASS_DIR")
+# Build BAM list from the current qc_summary.tsv instead of scanning the
+# directories directly. This keeps stale files from older reruns out of the
+# zero-coverage analysis.
+echo "[INFO] Building BAM list from current qc_summary.tsv sample names..."
 
-# Add FAIL_DIR if it exists
+declare -A CURRENT_SAMPLE_SET=()
+ALL_BAMS=()
+STALE_BAMS=()
+MISSING_ANALYSIS_BAMS=0
+
+for sample in "${CURRENT_SAMPLES[@]}"; do
+    CURRENT_SAMPLE_SET["$sample"]=1
+done
+
+for sample in "${PASS_SAMPLES_ARRAY[@]}"; do
+    [[ -z "$sample" ]] && continue
+    bam="${PASS_DIR}/${sample}.bam"
+    if [[ -f "$bam" ]]; then
+        ALL_BAMS+=("$bam")
+    else
+        echo "[WARN] PASS sample listed in qc_summary.tsv but BAM is missing: $bam" >&2
+        MISSING_ANALYSIS_BAMS=$((MISSING_ANALYSIS_BAMS + 1))
+    fi
+done
+
 if [[ -d "$FAIL_DIR" ]]; then
-    echo "[INFO] FAIL directory found, including it in analysis"
+    echo "[INFO] FAIL directory found, including current-run FAIL samples in analysis"
     echo "[DEBUG] FAIL_DIR: $FAIL_DIR"
     echo "[DEBUG] Contents of FAIL_DIR:"
     ls -la "$FAIL_DIR" | head -20 || echo "[WARN] Could not list FAIL_DIR"
-    SEARCH_DIRS+=("$FAIL_DIR")
-else
-    echo "[WARN] FAIL directory not found (will analyze PASS samples only): $FAIL_DIR"
+
+    for sample in "${FAIL_SAMPLES_ARRAY[@]}"; do
+        [[ -z "$sample" ]] && continue
+        bam="${FAIL_DIR}/${sample}.bam"
+        if [[ -f "$bam" ]]; then
+            ALL_BAMS+=("$bam")
+        else
+            echo "[WARN] FAIL sample listed in qc_summary.tsv but BAM is missing: $bam" >&2
+            MISSING_ANALYSIS_BAMS=$((MISSING_ANALYSIS_BAMS + 1))
+        fi
+    done
+elif [[ "$FAIL_COUNT" -gt 0 ]]; then
+    echo "[WARN] FAIL directory not found; FAIL samples from qc_summary.tsv will be skipped: $FAIL_DIR"
 fi
 
-# Collect BAMs from all search directories
-BAM_LIST=$(find "${SEARCH_DIRS[@]}" -type f -name "*.bam" 2>/dev/null | sort) || true
+for dir in "$PASS_DIR" "$FAIL_DIR"; do
+    [[ -d "$dir" ]] || continue
+    while IFS= read -r bam; do
+        sample=$(basename "$bam" .bam)
+        if [[ -z "${CURRENT_SAMPLE_SET[$sample]+x}" ]]; then
+            STALE_BAMS+=("$bam")
+        fi
+    done < <(find "$dir" -maxdepth 1 -type f -name "*.bam" | sort)
+done
 
-echo "[DEBUG] Number of BAMs found by find: $(echo "$BAM_LIST" | grep -c . || echo 0)"
+if [[ ${#STALE_BAMS[@]} -gt 0 ]]; then
+    echo "[WARN] Ignoring ${#STALE_BAMS[@]} stale BAM(s) left over from older runs:"
+    printf '  - %s
+' "${STALE_BAMS[@]:0:10}"
+    if [[ ${#STALE_BAMS[@]} -gt 10 ]]; then
+        echo "  ... plus $(( ${#STALE_BAMS[@]} - 10 )) more"
+    fi
+fi
 
-if [[ -z "$BAM_LIST" ]]; then
-    echo "[ERROR] No BAM files found in search directories:"
-    for dir in "${SEARCH_DIRS[@]}"; do
-        echo "  - $dir"
-    done
+if [[ ${#ALL_BAMS[@]} -eq 0 ]]; then
+    echo "[ERROR] No current-run BAMs could be resolved from qc_summary.tsv"
     exit 1
 fi
 
-echo "[DEBUG] BAM_LIST contents (first 5 lines):"
-echo "$BAM_LIST" | head -5
-
-# Filter out empty lines and create array
-mapfile -t ALL_BAMS < <(echo "$BAM_LIST" | grep -v '^$')
+mapfile -t ALL_BAMS < <(printf "%s
+" "${ALL_BAMS[@]}" | sort)
 
 echo "[DEBUG] Array size after mapfile: ${#ALL_BAMS[@]}"
+echo "[DEBUG] First BAM in array: ${ALL_BAMS[0]}"
+echo "[DEBUG] Missing BAMs referenced by current qc_summary.tsv: $MISSING_ANALYSIS_BAMS"
 echo "[DEBUG] First BAM in array: ${ALL_BAMS[0]}"
 
 # 3. Create temporary directory

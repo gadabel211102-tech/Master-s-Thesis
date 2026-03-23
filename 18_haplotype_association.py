@@ -145,10 +145,10 @@ CLINICAL_VARS_BREAST: Dict[str, Dict] = {
     "BREAST_P53_NUMERIC":        {"type": "continuous", "label": "p53 expression (IHC)", "bmi_adjust": False},
     "BREAST_ER_BIN":             {"type": "binary",     "label": "ER positive", "note": "Positive=1 vs Negative=0", "bmi_adjust": False},
     "BREAST_PR_BIN":             {"type": "binary",     "label": "PR positive", "note": "Positive=1 vs Negative=0", "bmi_adjust": False},
-    "BREAST_RECURRENCE_DERIVED": {"type": "binary",     "label": "Recurrence / progression", "note": "Any recurrence=1 vs NO=0", "bmi_adjust": True},
+    "BREAST_RECURRENCE_DERIVED": {"type": "binary",     "label": "Recurrence / progression", "note": "Any recurrence = 1 vs no recurrence = 0", "bmi_adjust": True},
     "BREAST_ANY_METASTASIS_BIN": {"type": "binary",     "label": "Any metastasis",
                                    "note": "Local or distant=1 vs none=0", "bmi_adjust": True},
-    "BREAST_EXITUS_DERIVED":     {"type": "binary",     "label": "Exitus", "note": "SI=1 vs NO=0", "bmi_adjust": True},
+    "BREAST_EXITUS_DERIVED":     {"type": "binary",     "label": "Death", "note": "Yes = 1 vs no = 0", "bmi_adjust": True},
     "BREAST_HER2_SUBTYPE":       {"type": "nominal",    "label": "HER2 subtype", "note": "HER2+ / TN / Other — core GSDMB-relevant subtype", "bmi_adjust": False},
     "BREAST_DX_TYPE":            {"type": "nominal",    "label": "Histological diagnosis type", "note": "CDI / CDIS / other", "bmi_adjust": False},
 }
@@ -166,14 +166,14 @@ CLINICAL_VARS_ENDO: Dict[str, Dict] = {
                                    "note": "GSDMB pyroptosis → immune activation → PD-L1", "bmi_adjust": False},
     "ENDO_CD8_NUMERIC":          {"type": "continuous", "label": "CD8+ TILs (%)",
                                    "note": "Immune infiltration — pyroptosis hypothesis", "bmi_adjust": False},
-    "ENDO_EXITUS_DISEASE_BIN":   {"type": "binary",     "label": "Disease-specific exitus [PRIMARY]", "note": "YES=1 vs NO=0 — primary survival endpoint", "bmi_adjust": True},
-    "ENDO_EXITUS_BIN":           {"type": "binary",     "label": "All-cause exitus [SUPPLEMENTARY]",
+    "ENDO_EXITUS_DISEASE_BIN":   {"type": "binary",     "label": "Disease-specific death [PRIMARY]", "note": "Yes = 1 vs no = 0; primary survival endpoint", "bmi_adjust": True},
+    "ENDO_EXITUS_BIN":           {"type": "binary",     "label": "All-cause death [SUPPLEMENTARY]",
                                    "note": "Correlated with disease-specific; interpret together", "bmi_adjust": True},
-    "ENDO_PD_BIN":               {"type": "binary",     "label": "Disease progression", "note": "PD=1 vs NO PD=0", "bmi_adjust": True},
+    "ENDO_PD_BIN":               {"type": "binary",     "label": "Disease progression", "note": "Progressive disease = 1 vs no progressive disease = 0", "bmi_adjust": True},
     "ENDO_PTEN_BIN":             {"type": "binary",     "label": "PTEN loss/reduced", "note": "LOST/REDUCED=1 vs CONSERVED=0", "bmi_adjust": False},
     "ENDO_MLH1_BIN":             {"type": "binary",     "label": "MLH1 loss/reduced", "note": "LOST/REDUCED=1 vs CONSERVED=0 — mismatch repair marker", "bmi_adjust": False},
     "ENDO_N_STAGE_BIN":          {"type": "binary",     "label": "Lymph node involvement", "note": "N1/N2=1 vs N0=0", "bmi_adjust": True},
-    "ENDO_LVSI_BIN":             {"type": "binary",     "label": "LVSI", "note": "Lymphovascular space invasion — YES=1 vs NO=0", "bmi_adjust": False},
+    "ENDO_LVSI_BIN":             {"type": "binary",     "label": "LVSI", "note": "Lymphovascular space invasion: yes = 1 vs no = 0", "bmi_adjust": False},
     "ENDO_MYOINV_BIN":           {"type": "binary", "label": "Myometrial invasion ≥50%",
                                    "note": ">50%=1 vs <50%=0", "bmi_adjust": True},
     "ENDO_MSI_BIN":              {"type": "binary",     "label": "MSI-H", "note": "Unstable=1 vs Stable=0", "bmi_adjust": False},
@@ -181,7 +181,7 @@ CLINICAL_VARS_ENDO: Dict[str, Dict] = {
     "ENDO_ER_BIN":               {"type": "binary",     "label": "ER positive", "note": "Positive=1 vs Negative=0", "bmi_adjust": False},
     "ENDO_PR_BIN":               {"type": "binary",     "label": "PR positive", "note": "Positive=1 vs Negative=0", "bmi_adjust": False},
     "ENDO_TP53_ABN_BIN":         {"type": "binary",     "label": "TP53 IHC abnormal", "note": "Aberrant=1 vs WT=0 — defines p53-abn molecular subtype", "bmi_adjust": False},
-    "ENDO_GENE_AMP_BIN":         {"type": "binary",     "label": "Gene amplification", "note": "YES=1 vs NO=0 — relevant to GSDMB locus amplification", "bmi_adjust": False},
+    "ENDO_GENE_AMP_BIN":         {"type": "binary",     "label": "Gene amplification", "note": "Yes = 1 vs no = 0; relevant to GSDMB locus amplification", "bmi_adjust": False},
     "canon__molecular_class":    {"type": "nominal",    "label": "Molecular classification",
                                    "note": "POLE / MMRd / NSMP / P53", "bmi_adjust": False},
 }
@@ -567,8 +567,12 @@ def _extract_snp_code(sample_name: str) -> Optional[str]:
     if m: return f"SNP_{m.group(1).upper()}_{m.group(2)}"
     m = re.match(r"^DNA_SNP_AT_(\d+)_", s, re.IGNORECASE)
     if m: return f"SNP_AT_{m.group(1)}"
+    m = re.match(r"^DNA_AT_(\d+)_", s, re.IGNORECASE)
+    if m: return f"SNP_AT_{m.group(1)}"
     m = re.match(r"^DNA_MT[-_]T_(\d+)_", s, re.IGNORECASE)
     if m: return f"SNP_MT-T_{m.group(1)}"
+    m = re.match(r"^SNP_DNA_AT_(\d+)_", s, re.IGNORECASE)
+    if m: return f"SNP_AT_{m.group(1)}"
     m = re.match(r"^SNP_DNA_(MN|EN)_(\d+)_", s, re.IGNORECASE)
     if m: return f"SNP_{m.group(1).upper()}_{m.group(2)}"
     # New: DNA_SNP_MT-T_N_... with long library suffix
@@ -2386,3 +2390,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
