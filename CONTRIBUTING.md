@@ -1,7 +1,5 @@
 # Contributing Guide
 
-This repository was developed as an academic analysis pipeline. If you or a collaborator extend it, the following practices will help keep it consistent and reviewable.
-
 ## General Principles
 
 - keep outputs reproducible
