@@ -49,8 +49,8 @@ The pipeline supports the following stages:
 17_snp_association.py            SNP-clinical association analysis
 18_haplotype_association.py      Haplotype-clinical association analysis
 19_1000g_haplotype_comparison.py Haplotype comparison against phased 1000 Genomes reference populations
-19b_objective2_rna_qc.py        Standalone RNA preprocessing and QC stage for objective 2
-20_isoform_expression_association.py Objective-2 RNA isoform/expression analysis linked to SNPs and haplotypes
+19b_rna_qc.py                   Standalone RNA preprocessing and QC stage for objective 2
+20_objective2_isoform_expression_association.py Objective-2 RNA isoform/expression analysis linked to SNPs and haplotypes
 pipeline_config.toml             Shared paths, thresholds, and grouping choices
 pipeline_utils.py                Shared helper functions
 pipeline_validation.py           Shared validation helpers
@@ -104,8 +104,8 @@ If you prefer to run by hand instead of using the launcher, the expected environ
 22. `17_snp_association.py`
 23. `18_haplotype_association.py`
 24. `19_1000g_haplotype_comparison.py` when a phased 1000 Genomes VCF and panel file are available
-25. `19b_objective2_rna_qc.py` for standalone RNA preprocessing/QC before objective 2
-26. `20_isoform_expression_association.py` for objective-2 workbook-first RNA isoform analysis, now gated by the RNA QC manifest
+25. `19b_rna_qc.py` for standalone RNA preprocessing/QC before objective 2
+26. `20_objective2_isoform_expression_association.py` for objective-2 workbook-first RNA isoform analysis, now gated by the RNA QC manifest
 
 ## Computational Environments
 
@@ -161,7 +161,7 @@ Used for the Python-based analytical part of the pipeline:
 - `17_snp_association.py`
 - `18_haplotype_association.py`
 - `19_1000g_haplotype_comparison.py`
-- `19b_objective2_rna_qc.py`
+- `19b_rna_qc.py`
 
 Recommended creation on this machine:
 
@@ -320,7 +320,7 @@ python 16_excel_harmonisation.py
 python 17_snp_association.py
 python 18_haplotype_association.py
 python 19_1000g_haplotype_comparison.py --vcf /path/to/1000G_phased.vcf.gz --panel /path/to/1000G.panel
-python 20_isoform_expression_association.py --include-controls-context
+python 20_objective2_isoform_expression_association.py --include-controls-context
 ```
 
 ## Configuration
@@ -401,4 +401,5 @@ Recent pipeline updates changed the figure layout so the default outputs are eas
 - DNA QC summaries now include explicit pass/fail tables and failure-reason summaries under `/home/gadeaalonsoj/tfm/analysis_results/03_qc_visualisation/tables`
 - `15_haplotype_stats.R` now keeps the default figure story in `/home/gadeaalonsoj/tfm/analysis_results/15_haplotype_statistics/main_figures`
 - `18_haplotype_association.py` now keeps the most thesis-facing clinical haplotype figures in the main result folder and moves broader secondary plots into `supplementary_figures`
-- `19b_objective2_rna_qc.py` writes the RNA QC manifest, summaries, and figures to `/home/gadeaalonsoj/tfm/analysis_results/19b_objective2_rna_qc`
+- `19b_rna_qc.py` writes the RNA QC manifest, summaries, and figures to `/home/gadeaalonsoj/tfm/analysis_results/19b_objective2_rna_qc`
+
