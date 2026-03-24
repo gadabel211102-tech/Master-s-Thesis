@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from statsmodels.stats.multitest import multipletests
 
-from figure_style import COMPARATIVE_TAG, IMPACT_COLORS, arm_color
+from figure_style import COMPARATIVE_TAG, IMPACT_COLORS, arm_color, tagged_title
 from pipeline_utils import (
     attach_amplicon_warning_columns,
     build_amplicon_warning_lookup,
@@ -346,7 +346,7 @@ def run_snp_association_analysis():
             g._legend._loc = 6
 
         g.fig.subplots_adjust(top=0.82, right=0.86, wspace=0.08)
-        g.fig.suptitle(f"SNP Enrichment Volcano: {title} [{COMPARATIVE_TAG}]", fontsize=16, fontweight="bold", y=0.97)
+        g.fig.suptitle(tagged_title(f"SNP Enrichment Volcano: {title}", COMPARATIVE_TAG), fontsize=16, fontweight="bold", y=0.97)
 
         g.savefig(output_path, dpi=300, bbox_inches="tight")
         plt.close(g.fig)

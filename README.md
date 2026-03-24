@@ -49,6 +49,7 @@ The pipeline supports the following stages:
 17_snp_association.py            SNP-clinical association analysis
 18_haplotype_association.py      Haplotype-clinical association analysis
 19_1000g_haplotype_comparison.py Haplotype comparison against phased 1000 Genomes reference populations
+19b_objective2_rna_qc.py        Standalone RNA preprocessing and QC stage for objective 2
 20_isoform_expression_association.py Objective-2 RNA isoform/expression analysis linked to SNPs and haplotypes
 pipeline_config.toml             Shared paths, thresholds, and grouping choices
 pipeline_utils.py                Shared helper functions
@@ -103,7 +104,8 @@ If you prefer to run by hand instead of using the launcher, the expected environ
 22. `17_snp_association.py`
 23. `18_haplotype_association.py`
 24. `19_1000g_haplotype_comparison.py` when a phased 1000 Genomes VCF and panel file are available
-25. `20_isoform_expression_association.py` for objective-2 workbook-first RNA isoform analysis
+25. `19b_objective2_rna_qc.py` for standalone RNA preprocessing/QC before objective 2
+26. `20_isoform_expression_association.py` for objective-2 workbook-first RNA isoform analysis, now gated by the RNA QC manifest
 
 ## Computational Environments
 
@@ -159,6 +161,7 @@ Used for the Python-based analytical part of the pipeline:
 - `17_snp_association.py`
 - `18_haplotype_association.py`
 - `19_1000g_haplotype_comparison.py`
+- `19b_objective2_rna_qc.py`
 
 Recommended creation on this machine:
 
@@ -389,3 +392,13 @@ If the repository is made public, it is usually best to:
 This repository is intended to document the analytical workflow clearly enough for academic review, reproducibility, and supervised reuse. When reused on another machine or dataset, update local paths in `pipeline_config.toml` and verify the required external bioinformatics tools are available.
 
 
+
+## Figure Curation Notes
+
+Recent pipeline updates changed the figure layout so the default outputs are easier to present in a thesis context:
+
+- `03_qc_visualisation.py` now writes a curated main set to `/home/gadeaalonsoj/tfm/analysis_results/03_qc_visualisation/figures/main` and a denser audit bundle to `/home/gadeaalonsoj/tfm/analysis_results/03_qc_visualisation/figures/audit`
+- DNA QC summaries now include explicit pass/fail tables and failure-reason summaries under `/home/gadeaalonsoj/tfm/analysis_results/03_qc_visualisation/tables`
+- `15_haplotype_stats.R` now keeps the default figure story in `/home/gadeaalonsoj/tfm/analysis_results/15_haplotype_statistics/main_figures`
+- `18_haplotype_association.py` now keeps the most thesis-facing clinical haplotype figures in the main result folder and moves broader secondary plots into `supplementary_figures`
+- `19b_objective2_rna_qc.py` writes the RNA QC manifest, summaries, and figures to `/home/gadeaalonsoj/tfm/analysis_results/19b_objective2_rna_qc`

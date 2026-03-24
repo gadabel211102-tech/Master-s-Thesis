@@ -125,8 +125,12 @@ WHITELIST <- file.path(BASE_DIR, "11_common_snps", "GSDMB_Common_SNP_Frequency_S
 ANNOTATED <- file.path(BASE_DIR, "07_annotated_variants", "GSDMB_Annotated_Variants.xlsx")
 
 OUT_XLSX  <- file.path(OUT_DIR, "GSDMB_Haplotype_Results.xlsx")
+MAIN_FIG_DIR <- file.path(OUT_DIR, "main_figures")
+SUPP_FIG_DIR <- file.path(OUT_DIR, "supplementary_figures")
 
 if (!dir.exists(OUT_DIR)) dir.create(OUT_DIR, recursive = TRUE)
+if (!dir.exists(MAIN_FIG_DIR)) dir.create(MAIN_FIG_DIR, recursive = TRUE)
+if (!dir.exists(SUPP_FIG_DIR)) dir.create(SUPP_FIG_DIR, recursive = TRUE)
 
 # Main filters
 MAIN_MIN_FREQ        <- 0.01   # full-region global haplotypes shown from 1%
@@ -145,6 +149,10 @@ MAX_BLOCK_SNPS       <- 12
 RUN_GENE_SPECIFIC    <- TRUE
 GENE_LIST_SUPP       <- c("GSDMB")
 GENE_SPECIFIC_USE_LD_BLOCKS <- TRUE
+GENERATE_SUPPLEMENTARY_FIGURES <- FALSE
+MAIN_TOP_FULL_HAPS <- 10
+MAIN_TOP_COMPARISON_HAPS <- 8
+MAX_KEY_BLOCKS_MAIN <- 3
 
 # =============================================================================
 # 2. HELPERS
@@ -325,8 +333,8 @@ run_assoc_for_region <- function(region_name, a1_mat, a2_mat, region_meta,
   results <- list()
 
   comp_defs <- list(
-    list(label = "Breast",      keep = metadata_df$Cohort == "Breast"),
-    list(label = "Endometrium", keep = metadata_df$Cohort == "Endometrium"),
+    list(label = "Breast",      keep = (metadata_df$Cohort == "Breast" & metadata_df$Tissue == "Tumour") | metadata_df$Tissue == "Healthy"),
+    list(label = "Endometrium", keep = (metadata_df$Cohort == "Endometrium" & metadata_df$Tissue == "Tumour") | metadata_df$Tissue == "Healthy"),
     list(label = "All",         keep = rep(TRUE, nrow(metadata_df)))
   )
   comp_defs <- comp_defs[sapply(comp_defs, function(x) x$label %in% comparison_set)]
@@ -703,8 +711,8 @@ make_freq_comparison_plot <- function(assoc_df, region_name, out_file,
     pivot_longer(cols = c(Freq_Tumour, Freq_Healthy),
                  names_to = "Group", values_to = "Freq") %>%
     mutate(
-      Group     = recode(Group, "Freq_Tumour" = "Tumour", "Freq_Healthy" = "Control"),
-      Group     = factor(Group, levels = c("Control", "Tumour")),
+      Group     = recode(Group, "Freq_Tumour" = "Tumour", "Freq_Healthy" = "Pooled control"),
+      Group     = factor(Group, levels = c("Pooled control", "Tumour")),
       Hap_Label = factor(Hap_Label, levels = hap_x_levels)
     )
 
@@ -724,7 +732,7 @@ make_freq_comparison_plot <- function(assoc_df, region_name, out_file,
                       label = sig_mark),
                   inherit.aes = FALSE, size = 5, colour = "#D55E00")
       else list() } +
-    scale_fill_manual(values = c("Control" = "#0072B2", "Tumour" = "#D55E00"),
+    scale_fill_manual(values = c("Pooled control" = "#0072B2", "Tumour" = "#D55E00"),
                       name = NULL) +
     scale_y_continuous(
       expand = c(0, 0),
@@ -734,7 +742,7 @@ make_freq_comparison_plot <- function(assoc_df, region_name, out_file,
     ) +
     labs(title    = sprintf("Haplotype Carrier Frequency: %s (%s)",
                             region_name, comparison),
-         subtitle = "* p\u202f<\u202f0.05 (Fisher)   ** FDR\u202f<\u202f0.05   bars show carrier frequency",
+         subtitle = "* p\u202f<\u202f0.05 (Fisher)   ** FDR\u202f<\u202f0.05   bars show tumour versus pooled-control carrier frequency",
          x = NULL, y = "Haplotype frequency (%)") +
     theme(axis.text.x   = element_text(size = 9, face = "bold"),
           legend.position = "top",
@@ -803,8 +811,8 @@ make_haplotype_dosage_plot <- function(a1_mat, a2_mat, assoc_df, metadata_df,
 
   keep_idx <- switch(
     comparison,
-    "Breast"      = metadata_df$Cohort == "Breast" & metadata_df$Tissue %in% c("Healthy", "Tumour"),
-    "Endometrium" = metadata_df$Cohort == "Endometrium" & metadata_df$Tissue %in% c("Healthy", "Tumour"),
+    "Breast"      = (metadata_df$Cohort == "Breast" & metadata_df$Tissue == "Tumour") | metadata_df$Tissue == "Healthy",
+    "Endometrium" = (metadata_df$Cohort == "Endometrium" & metadata_df$Tissue == "Tumour") | metadata_df$Tissue == "Healthy",
     metadata_df$Tissue %in% c("Healthy", "Tumour")
   )
 
@@ -816,7 +824,7 @@ make_haplotype_dosage_plot <- function(a1_mat, a2_mat, assoc_df, metadata_df,
   hap2_sub <- make_binary_hap_strings(a2_mat[idx, , drop = FALSE])
 
   group_counts <- meta_sub %>%
-    mutate(Group_Label = ifelse(Tissue == "Healthy", "Control", "Tumour")) %>%
+    mutate(Group_Label = ifelse(Tissue == "Healthy", "Pooled control", "Tumour")) %>%
     count(Group_Label, name = "N_Group")
 
   dosage_rows <- lapply(seq_len(nrow(sub)), function(i) {
@@ -824,7 +832,7 @@ make_haplotype_dosage_plot <- function(a1_mat, a2_mat, assoc_df, metadata_df,
     dosage <- as.integer(hap1_sub == hap_string) + as.integer(hap2_sub == hap_string)
     data.frame(
       Sample        = meta_sub$Sample,
-      Group_Label   = ifelse(meta_sub$Tissue == "Healthy", "Control", "Tumour"),
+      Group_Label   = ifelse(meta_sub$Tissue == "Healthy", "Pooled control", "Tumour"),
       Haplotype_ID  = sub$Haplotype_ID[i],
       Global_Freq   = sub$Global_Freq[i],
       Dosage_Class  = factor(
@@ -871,7 +879,7 @@ make_haplotype_dosage_plot <- function(a1_mat, a2_mat, assoc_df, metadata_df,
     ) +
     labs(
       title = sprintf("Haplotype Dosage Composition: %s (%s)", region_name, comparison),
-      subtitle = "Bars are proportional within each arm and show non-carriers, heterozygous carriers, and homozygous carriers",
+      subtitle = "Bars are proportional within each arm and compare cohort tumours against the pooled healthy control arm",
       x = NULL,
       y = "Samples within comparison arm (%)"
     ) +
@@ -947,6 +955,138 @@ make_association_overview_plot <- function(summary_df, out_file) {
   SAVE(out_file, p,
        width  = max(10, nrow(plot_df) * 0.65 + 2),
        height = 6)
+}
+
+
+make_haplotype_atlas_plot <- function(freq_df, snp_meta_sub, out_file,
+                                      top_n = MAIN_TOP_FULL_HAPS,
+                                      max_snps = 12) {
+  if (nrow(freq_df) == 0) return(invisible(NULL))
+
+  visible <- freq_df %>% arrange(desc(Frequency)) %>% slice_head(n = top_n)
+  if (nrow(visible) == 0) return(invisible(NULL))
+
+  snp_cols <- intersect(snp_meta_sub$rsID_clean, names(visible))
+  if (length(snp_cols) == 0) return(invisible(NULL))
+  variability <- sapply(snp_cols, function(col) dplyr::n_distinct(visible[[col]]))
+  selected <- names(sort(variability, decreasing = TRUE))
+  selected <- selected[seq_len(min(length(selected), max_snps))]
+  if (length(selected) == 0) selected <- snp_cols[seq_len(min(length(snp_cols), max_snps))]
+
+  bar_df <- visible %>%
+    transmute(Haplotype_ID = factor(Haplotype_ID, levels = rev(Haplotype_ID)),
+              FrequencyPct = Frequency * 100,
+              Count = Count)
+
+  other_freq <- sum(freq_df$Frequency, na.rm = TRUE) - sum(visible$Frequency, na.rm = TRUE)
+  other_count <- sum(freq_df$Count, na.rm = TRUE) - sum(visible$Count, na.rm = TRUE)
+  if (other_freq > 0) {
+    bar_df <- bind_rows(
+      bar_df,
+      data.frame(Haplotype_ID = factor("Other", levels = c(levels(bar_df$Haplotype_ID), "Other")),
+                 FrequencyPct = other_freq * 100,
+                 Count = other_count)
+    )
+  }
+
+  bar_plot <- ggplot(bar_df, aes(x = FrequencyPct, y = Haplotype_ID)) +
+    geom_col(fill = "#0B5C8C", alpha = 0.9) +
+    geom_text(aes(label = sprintf("%.1f%%  (n=%s)", FrequencyPct, Count)), hjust = -0.05, size = 3.1) +
+    coord_cartesian(xlim = c(0, max(bar_df$FrequencyPct) * 1.25), clip = "off") +
+    labs(title = "Full-region haplotype atlas",
+         subtitle = "Top full-region haplotypes by global frequency; rare remainder pooled as Other",
+         x = "Global frequency (%)", y = NULL) +
+    theme(plot.margin = margin(8, 20, 8, 8))
+
+  tile_df <- visible %>%
+    select(Haplotype_ID, Frequency, all_of(selected)) %>%
+    arrange(desc(Frequency)) %>%
+    pivot_longer(cols = all_of(selected), names_to = "SNP", values_to = "Allele_Code") %>%
+    mutate(
+      Allele = ifelse(Allele_Code == 2, "Alt", "Ref"),
+      Haplotype_ID = factor(Haplotype_ID, levels = rev(visible$Haplotype_ID)),
+      SNP = factor(SNP, levels = selected)
+    )
+
+  tile_plot <- ggplot(tile_df, aes(x = SNP, y = Haplotype_ID, fill = Allele)) +
+    geom_tile(colour = "white", linewidth = 0.35) +
+    scale_fill_manual(values = c("Alt" = "#D55E00", "Ref" = "#F2F2F2"), name = "Allele") +
+    labs(title = NULL, x = NULL, y = NULL) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7.5),
+          legend.position = "top")
+
+  combined <- patchwork::wrap_plots(bar_plot, tile_plot, ncol = 2, widths = c(1.1, 1.8))
+  SAVE(out_file, combined, width = max(11, length(selected) * 0.55 + 6), height = max(5.5, nrow(visible) * 0.45 + 2.5))
+}
+
+make_full_region_comparison_plot <- function(a1_mat, a2_mat, freq_df, metadata_df, out_file,
+                                             top_n = MAIN_TOP_COMPARISON_HAPS) {
+  if (nrow(freq_df) == 0) return(invisible(NULL))
+  shown <- freq_df %>% arrange(desc(Frequency)) %>% slice_head(n = top_n)
+  if (nrow(shown) == 0) return(invisible(NULL))
+  hap1 <- make_binary_hap_strings(a1_mat)
+  hap2 <- make_binary_hap_strings(a2_mat)
+  group_idx <- list(
+    "Pooled control" = which(metadata_df$Tissue == "Healthy"),
+    "Breast tumour" = which(metadata_df$Cohort == "Breast" & metadata_df$Tissue == "Tumour"),
+    "Endometrium tumour" = which(metadata_df$Cohort == "Endometrium" & metadata_df$Tissue == "Tumour")
+  )
+  rows <- bind_rows(lapply(seq_len(nrow(shown)), function(i) {
+    hap <- shown$Allele_String[i]
+    dosage <- as.integer(hap1 == hap) + as.integer(hap2 == hap)
+    bind_rows(lapply(names(group_idx), function(group_name) {
+      idx <- group_idx[[group_name]]
+      data.frame(Haplotype_ID = shown$Haplotype_ID[i],
+                 Group = group_name,
+                 FrequencyPct = if (length(idx) > 0) mean(dosage[idx], na.rm = TRUE) * 50 else NA_real_)
+    }))
+  }))
+  p <- ggplot(rows, aes(x = Haplotype_ID, y = FrequencyPct, colour = Group, group = Group)) +
+    geom_line(position = position_dodge(width = 0.25), alpha = 0.7) +
+    geom_point(position = position_dodge(width = 0.25), size = 3) +
+    scale_colour_manual(values = c("Pooled control" = "#666666", "Breast tumour" = "#B55D6A", "Endometrium tumour" = "#3D7EA6")) +
+    labs(title = "Full-region cohort comparison",
+         subtitle = "Main full-region haplotypes across pooled controls and tumour cohorts",
+         x = NULL, y = "Estimated haplotype frequency (%)") +
+    theme(legend.position = "top")
+  SAVE(out_file, p, width = max(8.5, nrow(shown) * 0.8 + 2), height = 5.5)
+}
+
+make_key_block_overview_plot <- function(summary_df, block_assoc_tables, gene_assoc_tables, out_file,
+                                         max_regions = MAX_KEY_BLOCKS_MAIN) {
+  rank_df <- summary_df %>%
+    filter(Region_Type != "Full", !is.na(Best_P_Fisher), Haps_Shown > 0) %>%
+    mutate(GenePriority = ifelse(Region_Type == "Gene", 1, 0)) %>%
+    arrange(Best_FDR, Best_P_Fisher, desc(Haps_Shown), desc(GenePriority)) %>%
+    slice_head(n = max_regions)
+  if (nrow(rank_df) == 0) return(invisible(NULL))
+
+  rows <- bind_rows(lapply(rank_df$Region, function(region_nm) {
+    assoc_df <- if (region_nm %in% names(gene_assoc_tables)) gene_assoc_tables[[region_nm]] else block_assoc_tables[[region_nm]]
+    if (is.null(assoc_df) || nrow(assoc_df) == 0) return(NULL)
+    assoc_df %>%
+      filter(Comparison %in% c("Breast", "Endometrium")) %>%
+      group_by(Comparison) %>%
+      arrange(desc(Global_Freq), P_Fisher) %>%
+      slice_head(n = 5) %>%
+      ungroup() %>%
+      transmute(Region = region_nm,
+                Haplotype_ID = Haplotype_ID,
+                Group = ifelse(Comparison == "Breast", "Breast tumour", "Endometrium tumour"),
+                FrequencyPct = Freq_Tumour * 100)
+  }))
+  if (is.null(rows) || nrow(rows) == 0) return(invisible(NULL))
+  p <- ggplot(rows, aes(x = Haplotype_ID, y = FrequencyPct, colour = Group, group = Group)) +
+    geom_line(alpha = 0.7) +
+    geom_point(size = 2.8) +
+    facet_wrap(~Region, scales = "free_x") +
+    scale_colour_manual(values = c("Breast tumour" = "#B55D6A", "Endometrium tumour" = "#3D7EA6")) +
+    labs(title = "Key-block supplementary highlights",
+         subtitle = "Top-ranked haplotypes from the strongest non-full-region blocks",
+         x = NULL, y = "Tumour frequency (%)") +
+    theme(legend.position = "top",
+          axis.text.x = element_text(angle = 35, hjust = 1))
+  SAVE(out_file, p, width = 12, height = max(5.5, nrow(rank_df) * 2.1))
 }
 
 # -----------------------------------------------------------------------------
@@ -1514,374 +1654,97 @@ cat(sprintf("✓ Workbook saved: %s\n", OUT_XLSX))
 # =============================================================================
 cat("\nSTEP 7: Generating figures\n")
 cat("----------------------------------------------------------------------\n")
-
-# ── 1. Full-region haplotype frequency bar chart ─────────────────────────────
-make_freq_plot(
-  full_freq$shown,
-  title    = "Full-Region Haplotype Frequencies",
-  subtitle = sprintf("%d SNPs across %d samples | shown haplotypes >= %.1f%%",
-                     n_snps, n_samples, MAIN_MIN_FREQ * 100),
-  out_file = file.path(OUT_DIR, "19_FullRegion_Haplotype_Frequencies.png")
+# ?? Main figure set ??????????????????????????????????????????????????????????
+make_haplotype_atlas_plot(
+  full_freq$all,
+  snp_meta,
+  out_file = file.path(MAIN_FIG_DIR, "Haplotype_Atlas_FullRegion.png")
 )
 
-# ── 2. Full-region LD heatmap ─────────────────────────────────────────────────
-if (length(ld_blocks_by_threshold) > 0) {
-  for (thr_label in names(ld_blocks_by_threshold)) {
-    make_ld_plot(
-      ld_matrix,
-      snp_meta,
-      ld_blocks = ld_blocks_by_threshold[[thr_label]]$blocks,
-      out_file  = file.path(OUT_DIR, sprintf("19_LD_Heatmap_FullRegion_%s.png", thr_label))
-    )
-  }
-} else {
-  make_ld_plot(
-    ld_matrix,
-    snp_meta,
-    out_file  = file.path(OUT_DIR, "19_LD_Heatmap_FullRegion.png")
-  )
-}
+make_full_region_comparison_plot(
+  a1_mat = a1,
+  a2_mat = a2,
+  freq_df = full_freq$shown,
+  metadata_df = meta,
+  out_file = file.path(MAIN_FIG_DIR, "Haplotype_Cohort_Comparison_FullRegion.png")
+)
 
-# ── 3. LD-block complexity bar chart ─────────────────────────────────────────
-if (length(block_summary_rows) > 0) {
-  block_plot_df <- bind_rows(block_summary_rows) %>%
-    mutate(Region = factor(Region, levels = Region[order(N_SNPs, decreasing = TRUE)]))
-
-  p_blocks <- ggplot(block_plot_df, aes(x = Region, y = Haps_Shown)) +
-    geom_col(fill = "#CC79A7", colour = "black", alpha = 0.85) +
-    geom_text(aes(label = paste0(N_SNPs, " SNPs")), vjust = -0.35, size = 3.2) +
-    labs(title    = "Haplotype Complexity Across LD Blocks",
-         subtitle = sprintf("Shown haplotypes at >= %.1f%% frequency threshold",
-                            SUPP_MIN_FREQ * 100),
-         x = NULL, y = "Shown haplotypes") +
-    theme(axis.text.x = element_text(angle = 35, hjust = 1))
-  SAVE(file.path(OUT_DIR, "19_LD_Block_Haplotype_Counts.png"), p_blocks, width = 8, height = 5)
-}
-
-# ── 3b. LD-block haplotype composition tile grids ────────────────────────────
-for (nm in names(block_freq_tables)) {
-  freq_df_b <- block_freq_tables[[nm]]
-  if (is.null(freq_df_b) || nrow(freq_df_b) == 0) next
-
-  # Recover the SNP subset for this block
-  block_snp_meta <- tryCatch({
-    raw_snp_string <- block_summary_rows[[nm]]$SNPs
-    snp_ids <- trimws(strsplit(raw_snp_string, ",")[[1]])
-    snp_meta[snp_meta$rsID_clean %in% snp_ids, , drop = FALSE]
-  }, error = function(e) NULL)
-
-  if (!is.null(block_snp_meta) && nrow(block_snp_meta) > 0) {
-    safe_nm <- gsub("[^A-Za-z0-9_]", "_", nm)
-    make_haplotype_composition_plot(
-      freq_df      = freq_df_b,
-      snp_meta_sub = block_snp_meta,
-      region_name  = nm,
-      out_file     = file.path(OUT_DIR, sprintf("19_Composition_%s.png", safe_nm))
-    )
-  }
-}
-
-# ── 4. Gene-specific complexity bar chart ────────────────────────────────────
-if (length(gene_summary_rows) > 0) {
-  gene_plot_df <- bind_rows(gene_summary_rows) %>%
-    mutate(Region = factor(Region, levels = Region[order(Haps_Shown, decreasing = TRUE)]))
-
-  p_genes <- ggplot(gene_plot_df, aes(x = Region, y = Haps_Shown)) +
-    geom_col(fill = "#009E73", colour = "black", alpha = 0.85) +
-    geom_text(aes(label = paste0(N_SNPs, " SNPs")), vjust = -0.35, size = 3.2) +
-    labs(title    = "Gene-Specific Haplotype Complexity",
-         subtitle = sprintf("Shown haplotypes at >= %.1f%% frequency threshold",
-                            SUPP_MIN_FREQ * 100),
-         x = NULL, y = "Shown haplotypes") +
-    theme(axis.text.x = element_text(angle = 35, hjust = 1))
-  SAVE(file.path(OUT_DIR, "19_Gene_Haplotype_Counts.png"), p_genes, width = 8, height = 5)
-}
-
-# ── 5. Association overview bubble plot (all regions) ────────────────────────
 make_association_overview_plot(
   summary_rows,
-  out_file = file.path(OUT_DIR, "19_Association_Overview_Bubble.png")
+  out_file = file.path(MAIN_FIG_DIR, "Haplotype_Association_Overview.png")
 )
 
-# ── 6. Full-region forest plot ────────────────────────────────────────────────
-if (!is.null(full_assoc) && nrow(full_assoc) > 0) {
-  make_forest_plot(
-    full_assoc,
-    region_name = "Full_Region",
-    out_file    = file.path(OUT_DIR, "19_Forest_FullRegion.png")
-  )
-}
+make_key_block_overview_plot(
+  summary_rows,
+  block_assoc_tables,
+  gene_assoc_tables,
+  out_file = file.path(MAIN_FIG_DIR, "Haplotype_KeyBlocks_Overview.png")
+)
 
-# ── 7. Full-region haplotype composition tile grid ────────────────────────────
 make_haplotype_composition_plot(
   freq_df      = full_freq$shown,
   snp_meta_sub = snp_meta,
   region_name  = "Full_Region",
-  out_file     = file.path(OUT_DIR, "19_Composition_FullRegion.png")
+  out_file     = file.path(MAIN_FIG_DIR, "Haplotype_Composition_FullRegion.png")
 )
-
-# ── 8. Full-region Tumour vs Healthy frequency comparison ────────────────────
 if (!is.null(full_assoc) && nrow(full_assoc) > 0) {
   make_freq_comparison_plot(
     full_assoc,
     region_name = "Full_Region",
-    out_file    = file.path(OUT_DIR, "19_FreqComparison_FullRegion.png"),
+    out_file    = file.path(MAIN_FIG_DIR, "Haplotype_FreqComparison_FullRegion.png"),
     comparison  = "All"
   )
-  for (.comp in unique(full_assoc$Comparison)) {
-    .comp_safe <- gsub("[^A-Za-z0-9]", "_", .comp)
-    make_haplotype_dosage_plot(
-      a1_mat      = a1,
-      a2_mat      = a2,
-      assoc_df    = full_assoc,
-      metadata_df = meta,
-      region_name = "Full_Region",
-      out_file    = file.path(OUT_DIR,
-                              sprintf("19_DosageComposition_FullRegion_%s.png", .comp_safe)),
-      comparison  = .comp
-    )
-  }
 }
 
-# ── 9. Manhattan-style haplotype association plot (full region) ───────────────
-if (!is.null(full_assoc) && nrow(full_assoc) > 0) {
-  make_manhattan_hap_plot(
-    full_assoc,
-    snp_meta,
-    out_file   = file.path(OUT_DIR, "19_Manhattan_Haplotypes_All.png"),
-    comparison = "All"
-  )
-  # Also per cohort
-  for (.comp in c("Breast", "Endometrium")) {
-    if (.comp %in% full_assoc$Comparison) {
-      make_manhattan_hap_plot(
-        full_assoc, snp_meta,
-        out_file   = file.path(OUT_DIR, sprintf("19_Manhattan_Haplotypes_%s.png", .comp)),
-        comparison = .comp
+if (GENERATE_SUPPLEMENTARY_FIGURES) {
+  if (length(ld_blocks_by_threshold) > 0) {
+    for (thr_label in names(ld_blocks_by_threshold)) {
+      make_ld_plot(
+        ld_matrix,
+        snp_meta,
+        ld_blocks = ld_blocks_by_threshold[[thr_label]]$blocks,
+        out_file  = file.path(SUPP_FIG_DIR, sprintf("19_LD_Heatmap_FullRegion_%s.png", thr_label))
       )
     }
+  } else {
+    make_ld_plot(ld_matrix, snp_meta, out_file = file.path(SUPP_FIG_DIR, "19_LD_Heatmap_FullRegion.png"))
   }
-}
 
-# ── 10. Full-region cohort stacked bar ───────────────────────────────────────
-make_cohort_freq_plot(
-  a1_mat      = a1,
-  a2_mat      = a2,
-  freq_df     = full_freq$shown,
-  metadata_df = meta,
-  region_name = "Full_Region",
-  out_file    = file.path(OUT_DIR, "19_CohortFreq_FullRegion.png"),
-  min_freq    = MAIN_MIN_FREQ,
-  hap_palette = .hap_palette
-)
-
-# ── 11. Kaplan-Meier survival plots (if clinical survival data in metadata) ──
-if (nrow(full_freq$shown) > 0) {
-  # Test the top haplotype plus any haplotypes with nominal or FDR significance
-  km_hap_ranks <- unique(c(
-    1L,
-    if (!is.null(full_assoc) && nrow(full_assoc) > 0)
-      which(full_freq$shown$Allele_String %in%
-              full_assoc$Haplotype_String[full_assoc$Significant_Fisher])
-    else integer(0)
-  ))
-  for (.tc in c("os_months", "pfs_months")) {
-    .ec <- sub("months", "event", .tc)
-    for (.rank in km_hap_ranks) {
-      make_km_plot(a1, a2, full_freq$shown, meta,
-                   region_name = "Full_Region",
-                   out_dir     = OUT_DIR,
-                   hap_rank    = .rank,
-                   time_col    = .tc, event_col = .ec)
-    }
+  if (length(block_summary_rows) > 0) {
+    block_plot_df <- bind_rows(block_summary_rows) %>% mutate(Region = factor(Region, levels = Region[order(N_SNPs, decreasing = TRUE)]))
+    p_blocks <- ggplot(block_plot_df, aes(x = Region, y = Haps_Shown)) +
+      geom_col(fill = "#CC79A7", colour = "black", alpha = 0.85) +
+      geom_text(aes(label = paste0(N_SNPs, " SNPs")), vjust = -0.35, size = 3.2) +
+      labs(title = "Haplotype complexity across LD blocks", x = NULL, y = "Shown haplotypes") +
+      theme(axis.text.x = element_text(angle = 35, hjust = 1))
+    SAVE(file.path(SUPP_FIG_DIR, "19_LD_Block_Haplotype_Counts.png"), p_blocks, width = 8, height = 5)
   }
-}
 
-if (length(gene_freq_tables) > 0) {
-  for (.gnm in names(gene_freq_tables)) {
-    .gfreq <- gene_freq_tables[[.gnm]]
-    if (is.null(.gfreq) || nrow(.gfreq) == 0) next
-    .gsnp_ids <- trimws(strsplit(gene_summary_rows[[.gnm]]$SNPs, ",")[[1]])
-    .gidx     <- which(snp_meta$rsID_clean %in% .gsnp_ids)
-    if (length(.gidx) < 2) next
-    .g_assoc  <- gene_assoc_tables[[.gnm]]
-    km_hap_ranks_g <- unique(c(
-      1L,
-      if (!is.null(.g_assoc) && nrow(.g_assoc) > 0)
-        which(.gfreq$Allele_String %in%
-                .g_assoc$Haplotype_String[.g_assoc$Significant_Fisher])
-      else integer(0)
-    ))
-    for (.tc in c("os_months", "pfs_months")) {
-      .ec <- sub("months", "event", .tc)
-      for (.rank in km_hap_ranks_g) {
-        make_km_plot(a1[, .gidx, drop = FALSE],
-                     a2[, .gidx, drop = FALSE],
-                     .gfreq, meta,
-                     region_name = .gnm,
-                     out_dir     = OUT_DIR,
-                     hap_rank    = .rank,
-                     time_col    = .tc, event_col = .ec)
-      }
-    }
+  if (length(gene_summary_rows) > 0) {
+    gene_plot_df <- bind_rows(gene_summary_rows) %>% mutate(Region = factor(Region, levels = Region[order(Haps_Shown, decreasing = TRUE)]))
+    p_genes <- ggplot(gene_plot_df, aes(x = Region, y = Haps_Shown)) +
+      geom_col(fill = "#009E73", colour = "black", alpha = 0.85) +
+      geom_text(aes(label = paste0(N_SNPs, " SNPs")), vjust = -0.35, size = 3.2) +
+      labs(title = "Gene-specific haplotype complexity", x = NULL, y = "Shown haplotypes") +
+      theme(axis.text.x = element_text(angle = 35, hjust = 1))
+    SAVE(file.path(SUPP_FIG_DIR, "19_Gene_Haplotype_Counts.png"), p_genes, width = 8, height = 5)
   }
-}
 
-# ── 12-N. Per-LD-block figures (forest + freq comparison) ────────────────────
-if (length(block_assoc_tables) > 0) {
-  for (region_nm in names(block_assoc_tables)) {
-    assoc_df_b <- block_assoc_tables[[region_nm]]
-    freq_df_b  <- block_freq_tables[[region_nm]]
-    block_snp_ids <- trimws(strsplit(block_summary_rows[[region_nm]]$SNPs, ",")[[1]])
-    block_idx <- which(snp_meta$rsID_clean %in% block_snp_ids)
-
-    safe_nm <- gsub("[^A-Za-z0-9_]", "_", region_nm)
-
-    # Forest plot (all comparisons combined)
-    if (!is.null(assoc_df_b) && nrow(assoc_df_b) > 0) {
-      make_forest_plot(
-        assoc_df_b,
-        region_name = region_nm,
-        out_file    = file.path(OUT_DIR, sprintf("19_Forest_%s.png", safe_nm))
+  if (!is.null(full_assoc) && nrow(full_assoc) > 0) {
+    make_forest_plot(full_assoc, region_name = "Full_Region", out_file = file.path(SUPP_FIG_DIR, "19_Forest_FullRegion.png"))
+    for (.comp in unique(full_assoc$Comparison)) {
+      .comp_safe <- gsub("[^A-Za-z0-9]", "_", .comp)
+      make_haplotype_dosage_plot(
+        a1_mat      = a1,
+        a2_mat      = a2,
+        assoc_df    = full_assoc,
+        metadata_df = meta,
+        region_name = "Full_Region",
+        out_file    = file.path(SUPP_FIG_DIR, sprintf("19_DosageComposition_FullRegion_%s.png", .comp_safe)),
+        comparison  = .comp
       )
     }
-
-    # Tumour vs Healthy frequency comparison + per-comparison forest
-    if (!is.null(assoc_df_b) && nrow(assoc_df_b) > 0) {
-      for (.comp in unique(assoc_df_b$Comparison)) {
-        .comp_safe <- gsub("[^A-Za-z0-9]", "_", .comp)
-        make_freq_comparison_plot(
-          assoc_df_b,
-          region_name = region_nm,
-          out_file    = file.path(OUT_DIR,
-                                  sprintf("19_FreqComparison_%s_%s.png", safe_nm, .comp_safe)),
-          comparison  = .comp
-        )
-        if (length(block_idx) >= 2) {
-          make_haplotype_dosage_plot(
-            a1_mat      = a1[, block_idx, drop = FALSE],
-            a2_mat      = a2[, block_idx, drop = FALSE],
-            assoc_df    = assoc_df_b,
-            metadata_df = meta,
-            region_name = region_nm,
-            out_file    = file.path(OUT_DIR,
-                                    sprintf("19_DosageComposition_%s_%s.png", safe_nm, .comp_safe)),
-            comparison  = .comp
-          )
-        }
-        make_forest_plot(
-          assoc_df_b %>% filter(Comparison == .comp),
-          region_name = sprintf("%s (%s)", region_nm, .comp),
-          out_file    = file.path(OUT_DIR,
-                                  sprintf("19_Forest_%s_%s.png", safe_nm, .comp_safe))
-        )
-      }
-    }
-  }
-}
-
-# ── 12-N. Per-GSDMB-gene-block figures ───────────────────────────────────────
-if (length(gene_assoc_tables) > 0) {
-  for (region_nm in names(gene_assoc_tables)) {
-    assoc_df_g  <- gene_assoc_tables[[region_nm]]
-    freq_df_g   <- gene_freq_tables[[region_nm]]
-    gene_snp_ids <- trimws(strsplit(gene_summary_rows[[region_nm]]$SNPs, ",")[[1]])
-    gene_idx <- which(snp_meta$rsID_clean %in% gene_snp_ids)
-
-    safe_nm <- gsub("[^A-Za-z0-9_]", "_", region_nm)
-
-    # Forest plot
-    if (!is.null(assoc_df_g) && nrow(assoc_df_g) > 0) {
-      make_forest_plot(
-        assoc_df_g,
-        region_name = region_nm,
-        out_file    = file.path(OUT_DIR, sprintf("19_Forest_%s.png", safe_nm))
-      )
-    }
-
-    # Haplotype composition tile grid
-    if (!is.null(freq_df_g) && nrow(freq_df_g) > 0) {
-      # Recover the SNP subset for this gene block
-      gene_block_meta <- tryCatch({
-        raw_snp_string <- gene_summary_rows[[region_nm]]$SNPs
-        snp_ids <- trimws(strsplit(raw_snp_string, ",")[[1]])  # element-wise trim after split
-        snp_meta[snp_meta$rsID_clean %in% snp_ids, , drop = FALSE]
-      }, error = function(e) NULL)
-
-      if (!is.null(gene_block_meta) && nrow(gene_block_meta) > 0) {
-        make_haplotype_composition_plot(
-          freq_df      = freq_df_g,
-          snp_meta_sub = gene_block_meta,
-          region_name  = region_nm,
-          out_file     = file.path(OUT_DIR, sprintf("19_Composition_%s.png", safe_nm))
-        )
-      }
-    }
-
-    # Tumour vs Healthy frequency comparison + forest — for ALL comparisons
-    if (!is.null(assoc_df_g) && nrow(assoc_df_g) > 0) {
-      for (.comp in unique(assoc_df_g$Comparison)) {
-        .comp_safe <- gsub("[^A-Za-z0-9]", "_", .comp)
-        make_freq_comparison_plot(
-          assoc_df_g,
-          region_name = region_nm,
-          out_file    = file.path(OUT_DIR,
-                                  sprintf("19_FreqComparison_%s_%s.png", safe_nm, .comp_safe)),
-          comparison  = .comp
-        )
-        if (length(gene_idx) >= 2) {
-          make_haplotype_dosage_plot(
-            a1_mat      = a1[, gene_idx, drop = FALSE],
-            a2_mat      = a2[, gene_idx, drop = FALSE],
-            assoc_df    = assoc_df_g,
-            metadata_df = meta,
-            region_name = region_nm,
-            out_file    = file.path(OUT_DIR,
-                                    sprintf("19_DosageComposition_%s_%s.png", safe_nm, .comp_safe)),
-            comparison  = .comp
-          )
-        }
-        make_forest_plot(
-          assoc_df_g %>% filter(Comparison == .comp),
-          region_name = sprintf("%s (%s)", region_nm, .comp),
-          out_file    = file.path(OUT_DIR,
-                                  sprintf("19_Forest_%s_%s.png", safe_nm, .comp_safe))
-        )
-      }
-    }
-  }
-}
-
-# ── Per-GSDMB-block LD heatmaps ──────────────────────────────────────────────
-if (RUN_GENE_SPECIFIC && exists("ld_matrix")) {
-  gsdmb_idx <- which(snp_meta$Gene == "GSDMB")
-  if (length(gsdmb_idx) >= 2) {
-    gsdmb_ld <- ld_matrix[snp_meta$rsID_clean[gsdmb_idx],
-                           snp_meta$rsID_clean[gsdmb_idx], drop = FALSE]
-    gsdmb_meta <- snp_meta[gsdmb_idx, , drop = FALSE]
-    for (thr in LD_BLOCK_THRESHOLDS) {
-      thr_label <- format_threshold_label(thr)
-      gsdmb_blocks_local <- define_ld_blocks(
-        gsdmb_ld, gsdmb_meta,
-        threshold = thr,
-        min_snps  = MIN_BLOCK_SNPS,
-        max_snps  = MAX_BLOCK_SNPS
-      )
-      if (length(gsdmb_blocks_local) == 0) {
-        gsdmb_blocks_local <- list(All = seq_along(gsdmb_idx))
-      }
-      for (blk_nm in names(gsdmb_blocks_local)) {
-        blk_idx  <- gsdmb_idx[gsdmb_blocks_local[[blk_nm]]]
-        make_block_ld_plot(
-          ld_matrix_full = ld_matrix,
-          block_idx      = blk_idx,
-          snp_meta_full  = snp_meta,
-          block_name     = sprintf("%s_%s", thr_label, blk_nm),
-          out_file       = file.path(OUT_DIR,
-                                     sprintf("19_LD_GSDMB_%s_%s.png", thr_label, blk_nm))
-        )
-      }
-    }
+    make_manhattan_hap_plot(full_assoc, snp_meta, out_file = file.path(SUPP_FIG_DIR, "19_Manhattan_Haplotypes_All.png"), comparison = "All")
   }
 }
 

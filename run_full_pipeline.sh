@@ -49,8 +49,8 @@ FROM_STEP="01"
 TO_STEP="20"
 TO_STEP_EXPLICIT=0
 
-STEP_ORDER=(01 02 02b 02c 03 04 05 06 07 07b 08 09 09b 10 11 12 13 14 15 15R 16 17 18 19 20)
-PYTHON_STEPS=(02c 03 04 07 07b 08 09 09b 10 11 12 13 14 16 17 18 19 20)
+STEP_ORDER=(01 02 02b 02c 03 04 05 06 07 07b 08 09 09b 10 11 12 13 14 15 15R 16 17 18 19 19b 20)
+PYTHON_STEPS=(02c 03 04 07 07b 08 09 09b 10 11 12 13 14 16 17 18 19 19b 20)
 BAM_STEPS=(01 02 02b 05 15)
 
 usage() {
@@ -372,6 +372,7 @@ if should_run_step 19; then
   announce_step "19" "Comparing study haplotypes against 1000 Genomes"
   run_python_script 19_1000g_haplotype_comparison.py --vcf "${VCF_1000G}" --panel "${PANEL_1000G}"
 fi
+if should_run_step 19b; then announce_step "19b" "Running standalone objective-2 RNA QC"; run_python_script 19b_objective2_rna_qc.py; fi
 if should_run_step 20; then announce_step "20" "Running objective-2 isoform-expression association analysis"; run_python_script 20_isoform_expression_association.py; fi
 
 log "Pipeline run completed."

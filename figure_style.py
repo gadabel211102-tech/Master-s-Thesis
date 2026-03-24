@@ -65,9 +65,9 @@ GENOTYPE_COLORS: Dict[str, str] = {
 }
 
 HAPLOTYPE_STATUS_COLORS: Dict[str, str] = {
-    "Non-carrier": OKABE_ITO["light_grey"],
-    "Heterozygous carrier": OKABE_ITO["sky_blue"],
-    "Homozygous carrier": OKABE_ITO["vermillion"],
+    "Wild-type": OKABE_ITO["light_grey"],
+    "Heterozygous": "#7FB8D6",
+    "Homozygous": "#0B5C8C",
 }
 
 QUALITATIVE_COLORBLIND_SEQUENCE: List[str] = [
@@ -96,7 +96,13 @@ DASHBOARD_THEME: Dict[str, str] = {
 }
 
 DESCRIPTIVE_TAG = "Descriptive only"
-COMPARATIVE_TAG = "Comparative; percentage-scaled"
+COMPARATIVE_TAG = ""
+
+
+def tagged_title(title: str, tag: str) -> str:
+    """Append a bracketed tag only when the tag is non-empty."""
+    clean_tag = str(tag).strip()
+    return title if not clean_tag else f"{title} [{clean_tag}]"
 
 
 def cohort_color(label: str, default: str = "#666666") -> str:

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 16_excel_harmonisation.py  (Option B: lossless merge + semantic harmonisation)  v4
@@ -29,9 +29,9 @@ OUTPUT EXCEL (4 sheets)
 RUN (WSL example)
 -----------------
 python3 16_excel_harmonisation.py \
-  --snp_xlsx "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/Muestras SNPs nomenclaturas, equivalencias y cuantificaciones.xlsx" \
-  --clinical_xlsx "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/MUESTRAS + VARIABLES CLINICAS PROY SNPs GM(4).xlsx" \
-  --au_xlsx "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/Clinical DATA AU_Endometrial cancer.xlsx" \
+  --snp_xlsx "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/clinical variables-snps/Muestras SNPs nomenclaturas, equivalencias y cuantificaciones.xlsx" \
+  --clinical_xlsx "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/clinical variables-snps/MUESTRAS + VARIABLES CLINICAS PROY SNPs GM(4).xlsx" \
+  --au_xlsx "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/clinical variables-snps/Clinical DATA AU_Endometrial cancer.xlsx" \
   --out_xlsx "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx" \
   --manifests_dir "/home/gadeaalonsoj/tfm/manifests"
 
@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -61,18 +62,29 @@ from pipeline_validation import print_validation_summary, validate_file_exists, 
 # These defaults are convenient if you always run from WSL and keep files in OneDrive.
 # You can override any path at runtime using the command-line arguments.
 
-DEFAULT_SNP_XLSX = Path(
-    "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/"
+ONEDRIVE_DOCS_DIR = Path(
+    "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs"
+)
+CLINICAL_DOCS_DIR = ONEDRIVE_DOCS_DIR / "clinical variables-snps"
+
+
+def _default_input_path(filename: str) -> Path:
+    """
+    Prefer the current clinical-workbook subfolder, but keep the old Docs/
+    location as a fallback for older machines and archived runs.
+    """
+    preferred = CLINICAL_DOCS_DIR / filename
+    legacy = ONEDRIVE_DOCS_DIR / filename
+    return preferred if preferred.exists() else legacy
+
+
+DEFAULT_SNP_XLSX = _default_input_path(
     "Muestras SNPs nomenclaturas, equivalencias y cuantificaciones.xlsx"
 )
-DEFAULT_CLINICAL_XLSX = Path(
-    "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/"
+DEFAULT_CLINICAL_XLSX = _default_input_path(
     "MUESTRAS + VARIABLES CLINICAS PROY SNPs GM(4).xlsx"
 )
-DEFAULT_AU_XLSX = Path(
-    "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/"
-    "Clinical DATA AU_Endometrial cancer.xlsx"
-)
+DEFAULT_AU_XLSX = _default_input_path("Clinical DATA AU_Endometrial cancer.xlsx")
 DEFAULT_AU_SHEET = "Hoja1"
 DEFAULT_OUT_XLSX = Path("/home/gadeaalonsoj/tfm/MASTER_SNP_plus_clinical_HARMONISED.xlsx")
 
@@ -89,10 +101,26 @@ def _to_str(x) -> str:
     return "" if pd.isna(x) else str(x).strip()
 
 
+def _fix_mojibake_text(s: str) -> str:
+    """Repair common UTF-8-as-Latin-1 mojibake without touching clean text."""
+    if not isinstance(s, str):
+        return s
+    try:
+        return s.encode("latin1").decode("utf-8")
+    except UnicodeError:
+        return s
+
+def _strip_accents(s: str) -> str:
+    """Remove accents after repairing any mojibake."""
+    repaired = _fix_mojibake_text(s)
+    return "".join(ch for ch in unicodedata.normalize("NFKD", repaired) if not unicodedata.combining(ch))
+
+
+
 def standard_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Strip whitespace from column names to reduce accidental mismatches."""
+    """Strip whitespace and repair header encoding drift."""
     df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
+    df.columns = [_fix_mojibake_text(str(c)).strip() for c in df.columns]
     return df
 
 
@@ -110,18 +138,37 @@ def parse_volume_to_ul(vol) -> Optional[float]:
     return float(m.group(1)) if m else None
 
 
+def _normalise_header_key(text: str) -> str:
+    """Build an accent-insensitive lookup key for workbook headers."""
+    return _strip_accents(str(text).strip()).upper()
+
+
+
 def _pick_existing(df: pd.DataFrame, candidates: List[str]) -> str:
     """
     Choose the first existing column among candidates.
     Useful because some sheets have slightly different headers (accents/casing).
     """
+    normalised = {_normalise_header_key(col): col for col in df.columns}
     for c in candidates:
         if c in df.columns:
             return c
+        resolved = normalised.get(_normalise_header_key(c))
+        if resolved is not None:
+            return resolved
     raise KeyError(
         f"None of these columns were found: {candidates}. "
         f"Available: {df.columns.tolist()}"
     )
+
+
+
+def _get_optional_series(df: pd.DataFrame, candidates: List[str]) -> pd.Series:
+    """Return the first matching column, or an all-missing series if absent."""
+    try:
+        return df[_pick_existing(df, candidates)]
+    except KeyError:
+        return pd.Series([None] * len(df), index=df.index)
 
 
 # =============================================================================
@@ -211,18 +258,17 @@ def process_AT(sheet_df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame({
         "snp_code": df["CODIGO SNPs"].map(normalize_snp_code),
         "sample_id": df["CODE"].map(_to_str),
-        "nucleic_acid": df["Ác. Nucleico"].map(lambda x: _to_str(x).upper()),
+        "nucleic_acid": df[_pick_existing(df, ["Ac. Nucleico"])].map(lambda x: _to_str(x).upper()),
         "concentration_ng_ul": pd.to_numeric(df["Qubit (ng/uL)"], errors="coerce"),
         "volume_ul": None,
-        "extraction_flag": df.get("extracción", pd.Series([None] * len(df))).map(_to_str),
-        "pd_status": df.get("PD status", pd.Series([None] * len(df))).map(_to_str),
-        "histology": df.get("Histology", pd.Series([None] * len(df))).map(_to_str),
+        "extraction_flag": _get_optional_series(df, ["extraccion"]).map(_to_str),
+        "pd_status": df.get("PD status", pd.Series([None] * len(df), index=df.index)).map(_to_str),
+        "histology": df.get("Histology", pd.Series([None] * len(df), index=df.index)).map(_to_str),
         "tissue": "Endometrial",
         "tumour_normal": "Tumour",
         "sheet": "AT=AUs",
     })
     return out
-
 
 def process_EN(sheet_df: pd.DataFrame) -> pd.DataFrame:
     """EN sheet (healthy endometrium)."""
@@ -233,8 +279,8 @@ def process_EN(sheet_df: pd.DataFrame) -> pd.DataFrame:
 
     out = pd.DataFrame({
         "snp_code": df[snp_col].map(normalize_snp_code),
-        "sample_id": df["Código Noray"].map(_to_str),
-        "nucleic_acid": df["Ác. Nucleico"].map(lambda x: _to_str(x).upper()),
+        "sample_id": df[_pick_existing(df, ["Codigo Noray"])].map(_to_str),
+        "nucleic_acid": df[_pick_existing(df, ["Ac. Nucleico"])].map(lambda x: _to_str(x).upper()),
         "concentration_ng_ul": pd.to_numeric(df[qubit_col], errors="coerce"),
         "volume_ul": df[vol_col].map(parse_volume_to_ul),
         "extraction_flag": None,
@@ -246,7 +292,6 @@ def process_EN(sheet_df: pd.DataFrame) -> pd.DataFrame:
     })
     return out
 
-
 def process_MT_TN(sheet_df: pd.DataFrame) -> pd.DataFrame:
     """
     MT-T_N sheet: breast tumour + paired normal appear as two column blocks side-by-side.
@@ -255,17 +300,17 @@ def process_MT_TN(sheet_df: pd.DataFrame) -> pd.DataFrame:
     df = standard_columns(sheet_df)
 
     left = pd.DataFrame({
-        "sample_id": df[_pick_existing(df, ["CÓDIGO BB BLOQUE TUMORAL", "CODIGO BB BLOQUE TUMORAL"])].map(_to_str),
+        "sample_id": df[_pick_existing(df, ["CODIGO BB BLOQUE TUMORAL"])].map(_to_str),
         "snp_code": df[_pick_existing(df, ["CODIGO SNPs"])].map(normalize_snp_code),
-        "nucleic_acid": df[_pick_existing(df, ["Ác. Nucleico"])].map(lambda x: _to_str(x).upper()),
+        "nucleic_acid": df[_pick_existing(df, ["Ac. Nucleico"])].map(lambda x: _to_str(x).upper()),
         "volume_ul": df[_pick_existing(df, ["uL"])].map(parse_volume_to_ul),
         "concentration_ng_ul": pd.to_numeric(df[_pick_existing(df, ["EXTRACCION (ng/ul)"])], errors="coerce"),
     })
 
     right = pd.DataFrame({
-        "sample_id": df[_pick_existing(df, ["CÓDIGO BB BLOQUE TUMORAL.1", "CODIGO BB BLOQUE TUMORAL.1"])].map(_to_str),
+        "sample_id": df[_pick_existing(df, ["CODIGO BB BLOQUE TUMORAL.1"])].map(_to_str),
         "snp_code": df[_pick_existing(df, ["CODIGO SNPs.1"])].map(normalize_snp_code),
-        "nucleic_acid": df[_pick_existing(df, ["Ác. Nucleico.1"])].map(lambda x: _to_str(x).upper()),
+        "nucleic_acid": df[_pick_existing(df, ["Ac. Nucleico.1"])].map(lambda x: _to_str(x).upper()),
         "volume_ul": df[_pick_existing(df, ["uL.1"])].map(parse_volume_to_ul),
         "concentration_ng_ul": pd.to_numeric(df[_pick_existing(df, ["EXTRACCION (ng/ul).1"])], errors="coerce"),
     })
@@ -280,7 +325,6 @@ def process_MT_TN(sheet_df: pd.DataFrame) -> pd.DataFrame:
     out["sheet"] = "MT-T_N"
     return out
 
-
 def process_MN(sheet_df: pd.DataFrame) -> pd.DataFrame:
     """
     MN sheet (healthy breast): also appears as two column blocks side-by-side.
@@ -289,17 +333,17 @@ def process_MN(sheet_df: pd.DataFrame) -> pd.DataFrame:
     df = standard_columns(sheet_df)
 
     left = pd.DataFrame({
-        "sample_id": df[_pick_existing(df, ["Código Noray-BB", "Codigo Noray-BB", "Código Noray"])].map(_to_str),
+        "sample_id": df[_pick_existing(df, ["Codigo Noray-BB", "Codigo Noray"])].map(_to_str),
         "snp_code": df[_pick_existing(df, ["CODIGO SNP_MN (mama normal)"])].map(normalize_snp_code),
-        "nucleic_acid": df[_pick_existing(df, ["Ác. Nucleico"])].map(lambda x: _to_str(x).upper()),
+        "nucleic_acid": df[_pick_existing(df, ["Ac. Nucleico"])].map(lambda x: _to_str(x).upper()),
         "volume_ul": df[_pick_existing(df, ["VOL.", "VOL (uL)"])].map(parse_volume_to_ul),
         "concentration_ng_ul": pd.to_numeric(df[_pick_existing(df, ["Qubit (ng/uL)"])], errors="coerce"),
     })
 
     right = pd.DataFrame({
-        "sample_id": df[_pick_existing(df, ["Código Noray-BB.1", "Codigo Noray-BB.1", "Código Noray.1"])].map(_to_str),
+        "sample_id": df[_pick_existing(df, ["Codigo Noray-BB.1", "Codigo Noray.1"])].map(_to_str),
         "snp_code": df[_pick_existing(df, ["CODIGO SNP_MN (mama normal).1"])].map(normalize_snp_code),
-        "nucleic_acid": df[_pick_existing(df, ["Ác. Nucleico.1"])].map(lambda x: _to_str(x).upper()),
+        "nucleic_acid": df[_pick_existing(df, ["Ac. Nucleico.1"])].map(lambda x: _to_str(x).upper()),
         "volume_ul": df[_pick_existing(df, ["VOL..1", "VOL (uL).1"])].map(parse_volume_to_ul),
         "concentration_ng_ul": pd.to_numeric(df[_pick_existing(df, ["Qubit (ng/uL).1"])], errors="coerce"),
     })
@@ -313,7 +357,6 @@ def process_MN(sheet_df: pd.DataFrame) -> pd.DataFrame:
     out["tumour_normal"] = "Normal"
     out["sheet"] = "MN"
     return out
-
 
 def build_master(snp_xlsx: Path) -> pd.DataFrame:
     """
@@ -382,14 +425,16 @@ def load_clinical_tables(clinical_xlsx: Path) -> Dict[str, pd.DataFrame]:
     # Healthy breast (MN): join by sample_id
     if "TANDA MAMA SANA" in xls.sheet_names:
         df = standard_columns(pd.read_excel(xls, sheet_name="TANDA MAMA SANA"))
-        df = df.rename(columns={"Código Noray-BB": "sample_id"})
+        sample_col = _pick_existing(df, ["Codigo Noray-BB"])
+        df = df.rename(columns={sample_col: "sample_id"})
         df["sample_id"] = df["sample_id"].map(_to_str)
         tables["clinical_breast_healthy"] = df.rename(columns={c: f"clin_mn__{c}" for c in df.columns if c != "sample_id"})
 
     # Healthy endometrium (EN): join by sample_id
     if "TANDA ENDOMETRIO SANO" in xls.sheet_names:
         df = standard_columns(pd.read_excel(xls, sheet_name="TANDA ENDOMETRIO SANO"))
-        df = df.rename(columns={"Código Noray": "sample_id"})
+        sample_col = _pick_existing(df, ["Codigo Noray"])
+        df = df.rename(columns={sample_col: "sample_id"})
         df["sample_id"] = df["sample_id"].map(_to_str)
         tables["clinical_endo_healthy"] = df.rename(columns={c: f"clin_en__{c}" for c in df.columns if c != "sample_id"})
 
@@ -398,10 +443,9 @@ def load_clinical_tables(clinical_xlsx: Path) -> Dict[str, pd.DataFrame]:
     if "TANDA HER2 MAMA T + NT" in xls.sheet_names:
         her2 = standard_columns(pd.read_excel(xls, sheet_name="TANDA HER2 MAMA T + NT"))
         her2 = her2.rename(columns={
-            "CÓDIGO BB CASO": "case_id",
-            "NHC": "NHC",
-            "CÓDIGO BB BLOQUE TUMORAL": "tumour_block_id",
-            "CÓDIGO BB BLOQUE NORMAL": "paired_normal_block_id",
+            _pick_existing(her2, ["CODIGO BB CASO"]): "case_id",
+            _pick_existing(her2, ["CODIGO BB BLOQUE TUMORAL"]): "tumour_block_id",
+            _pick_existing(her2, ["CODIGO BB BLOQUE NORMAL"]): "paired_normal_block_id",
         })
         her2["case_id"] = her2["case_id"].map(_to_str).str.upper()
         her2["NHC"] = her2["NHC"].map(_to_str)
@@ -418,7 +462,6 @@ def load_clinical_tables(clinical_xlsx: Path) -> Dict[str, pd.DataFrame]:
         tables["clinical_her2_case"] = her2
 
     return tables
-
 
 def load_au_endo_clinical(au_xlsx: Path, sheet_name: str) -> Optional[pd.DataFrame]:
     """
@@ -488,7 +531,7 @@ def merge_master_with_clinical(
 
 def _norm_text(x) -> str:
     """Normalise text (remove NBSP, trim)."""
-    s = _to_str(x)
+    s = _fix_mojibake_text(_to_str(x))
     return s.replace("\u00a0", " ").strip()
 
 
@@ -504,11 +547,11 @@ def has_meaningful_value(x) -> bool:
 def parse_yes_no(x) -> Optional[str]:
     """
     Standardise common yes/no encodings -> 'Yes'/'No'/None.
-    Accepts: SI/Sí/No, Yes/No, Y/N, 1/0, True/False, Pos/Neg.
+    Accepts: SI/S?/No, Yes/No, Y/N, 1/0, True/False, Pos/Neg.
     """
     if pd.isna(x):
         return None
-    s = _norm_text(x).lower()
+    s = _strip_accents(_norm_text(x).lower())
     if s == "":
         return None
 
@@ -530,7 +573,7 @@ def parse_yes_no(x) -> Optional[str]:
         return "No"
 
     # Spanish
-    if s in {"si", "sí", "s"}:
+    if s in {"si", "s"}:
         return "Yes"
     if s in {"no", "n"}:
         return "No"
@@ -552,7 +595,7 @@ def extract_first_number(x) -> Optional[float]:
     """
     Extract first numeric token from a messy cell.
     Examples:
-      "12 años" -> 12
+      "12 aÃ±os" -> 12
       "13a" -> 13
       "~11" -> 11
       "11-12" -> 11
@@ -829,7 +872,16 @@ def coalesce_with_source(df: pd.DataFrame, cols: List[str]) -> Tuple[pd.Series, 
     """
     Coalesce: first non-null across candidate columns, returning both value and which source column was used.
     """
-    existing = [c for c in cols if c in df.columns]
+    existing: List[str] = []
+    seen = set()
+    for candidate in cols:
+        try:
+            resolved = _pick_existing(df, [candidate])
+        except KeyError:
+            continue
+        if resolved not in seen:
+            existing.append(resolved)
+            seen.add(resolved)
 
     out = pd.Series([pd.NA] * len(df), index=df.index)
     src = pd.Series([pd.NA] * len(df), index=df.index)
@@ -858,23 +910,23 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
     ------------
     - canon__bmi          : added clin_dcs__BMI (breast tumour; was missing)
     - canon__grade        : added clin_dcs__GRADO (breast tumour; was missing)
-    - canon__ki67         : new — coalesces FFPE_KI67 (endo) + clin_dcs__KI67 (breast)
-    - canon__p53_ihc      : new — coalesces TP53 IHC (endo) + p53 IHC (breast)
-    - canon__date_diagnosis: new — diagnosis date (breast)
-    - canon__date_last_fu  : new — last follow-up date (breast), used to derive OS
-    - canon__date_recurrence: new — recurrence date (breast)
-    - canon__recurrence    : new — recurrence binary flag (breast + endo)
-    - canon__distant_mets  : new — distant metastasis flag (breast)
-    - canon__lymph_nodes   : new — lymph node ratio string (breast) / N field (endo)
-    - canon__myometrial_invasion: new — myometrial infiltration (endo)
-    - canon__lvsi          : new — lymphovascular space invasion (endo)
-    - canon__risk_group    : new — risk-of-recurrence group (endo)
-    - canon__treatment     : new — treatment description (breast)
-    - canon__vital_status  : new — verbose vital status (breast)
+    - canon__ki67         : new â€” coalesces FFPE_KI67 (endo) + clin_dcs__KI67 (breast)
+    - canon__p53_ihc      : new â€” coalesces TP53 IHC (endo) + p53 IHC (breast)
+    - canon__date_diagnosis: new â€” diagnosis date (breast)
+    - canon__date_last_fu  : new â€” last follow-up date (breast), used to derive OS
+    - canon__date_recurrence: new â€” recurrence date (breast)
+    - canon__recurrence    : new â€” recurrence binary flag (breast + endo)
+    - canon__distant_mets  : new â€” distant metastasis flag (breast)
+    - canon__lymph_nodes   : new â€” lymph node ratio string (breast) / N field (endo)
+    - canon__myometrial_invasion: new â€” myometrial infiltration (endo)
+    - canon__lvsi          : new â€” lymphovascular space invasion (endo)
+    - canon__risk_group    : new â€” risk-of-recurrence group (endo)
+    - canon__treatment     : new â€” treatment description (breast)
+    - canon__vital_status  : new â€” verbose vital status (breast)
     - canon__ptnm          : already present but now also picks up clin_dcs__pTNM
     """
     return {
-        # ── Demographics ─────────────────────────────────────────────────────
+        # â”€â”€ Demographics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         "canon__age": [
             "clin_au_endo__AGE",
             "clin_dcs__Edad dx",
@@ -884,7 +936,7 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
         "canon__bmi": [
             "clin_au_endo__BMI_CALCULATED",
             "clin_au_endo__BMI",
-            "clin_dcs__BMI",        # ← v4: breast tumour BMI (was omitted before)
+            "clin_dcs__BMI",        # â† v4: breast tumour BMI (was omitted before)
             "clin_her2__BMI",
             "clin_mn__BMI",
             "clin_en__BMI",
@@ -905,14 +957,14 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
             "clin_her2__Menopausia",
         ],
         "canon__pregnancy_history": [
-            "clin_mn__AGO (GESTACIONES, PARTOS, CESÁREAS, ABORTOS)",
-            "clin_en__AGO (GESTACIONES, PARTOS, CESÁREAS, ABORTOS)",
-            "clin_her2__AGO (GESTACIONES, PARTOS, CESÁREAS, ABORTOS)",
+            "clin_mn__AGO (GESTACIONES, PARTOS, CESÃREAS, ABORTOS)",
+            "clin_en__AGO (GESTACIONES, PARTOS, CESÃREAS, ABORTOS)",
+            "clin_her2__AGO (GESTACIONES, PARTOS, CESÃREAS, ABORTOS)",
         ],
 
-        # ── Diagnosis / histology / tumour ───────────────────────────────────
+        # â”€â”€ Diagnosis / histology / tumour â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         "canon__diagnosis": [
-            "clin_dcs__Dx",             # ← v4: prefer DCS Dx (cleaner, more complete)
+            "clin_dcs__Dx",             # â† v4: prefer DCS Dx (cleaner, more complete)
             "clin_her2__DX",
             "clin_au_endo__DIAGNOSIS",
         ],
@@ -923,44 +975,44 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
         ],
         "canon__grade": [
             "clin_au_endo__GRADE",
-            "clin_dcs__GRADO",          # ← v4: breast tumour grade (was omitted before)
+            "clin_dcs__GRADO",          # â† v4: breast tumour grade (was omitted before)
         ],
         "canon__figo_stage": [
             "clin_au_endo__FIGO_STAGE",
             "clin_au_endo__FIGO_STAGE_GROUP",
         ],
         "canon__ptnm": [
-            "clin_dcs__pTNM",           # ← v4: breast pTNM
+            "clin_dcs__pTNM",           # â† v4: breast pTNM
             "clin_au_endo__T",          #   (endo T/N/M kept in separate cols below)
         ],
 
-        # ── Pathological staging extras (endometrial) ────────────────────────
-        "canon__myometrial_invasion": [  # ← v4: new
+        # â”€â”€ Pathological staging extras (endometrial) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        "canon__myometrial_invasion": [  # â† v4: new
             "clin_au_endo__MYOMETRIAL_INFILTRATION",
         ],
-        "canon__lvsi": [                 # ← v4: new
+        "canon__lvsi": [                 # â† v4: new
             "clin_au_endo__LVSI",
         ],
-        "canon__risk_group": [           # ← v4: new
+        "canon__risk_group": [           # â† v4: new
             "clin_au_endo__RISK_OF_RECURRENCE",
         ],
-        "canon__lymph_nodes": [          # ← v4: new — node ratio string (breast) or N (endo)
+        "canon__lymph_nodes": [          # â† v4: new â€” node ratio string (breast) or N (endo)
             "clin_dcs__Numero_ganglio",
             "clin_au_endo__N",
         ],
 
-        # ── Biomarkers ───────────────────────────────────────────────────────
-        "canon__ki67": [                 # ← v4: new unified KI67
+        # â”€â”€ Biomarkers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        "canon__ki67": [                 # â† v4: new unified KI67
             "clin_au_endo__FFPE_KI67",
             "clin_dcs__KI67",
         ],
-        "canon__p53_ihc": [              # ← v4: new unified p53/TP53 IHC
+        "canon__p53_ihc": [              # â† v4: new unified p53/TP53 IHC
             "clin_au_endo__FFPE_TP53_IHC",
             "clin_au_endo__FFPE_TP53_IHC POLAND RESULT",
             "clin_dcs__p53",
         ],
 
-        # ── ER / PR status ───────────────────────────────────────────────────
+        # â”€â”€ ER / PR status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         "canon__er_raw": [
             "clin_au_endo__FFPE_ER1_RECEPTORS_RAW_VALUE",
             "clin_au_endo__FFPE_ER1_RECEPTORS_RAW_VALUE POLAND RESULTS",
@@ -976,7 +1028,7 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
             "clin_dcs__RP",
         ],
 
-        # ── HER2 ─────────────────────────────────────────────────────────────
+        # â”€â”€ HER2 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         "canon__her2_copies": [
             "clin_her2__COPIAS HER2",
             "clin_dcs__COPIAS HER2",
@@ -986,7 +1038,7 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
             "clin_dcs__COPIAS HER2",
         ],
 
-        # ── Survival / outcomes ──────────────────────────────────────────────
+        # â”€â”€ Survival / outcomes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         "canon__os_months": [
             "clin_au_endo__OS",
             # breast OS is DERIVED from dates in apply_semantic_transforms; not coalesced here
@@ -1000,36 +1052,36 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
         ],
         "canon__exitus": [
             "clin_au_endo__EXITUS",
-            "clin_dcs__Exitus",         # ← v4: breast exitus
+            "clin_dcs__Exitus",         # â† v4: breast exitus
         ],
-        "canon__vital_status": [         # ← v4: new — verbose status string
+        "canon__vital_status": [         # â† v4: new â€” verbose status string
             "clin_dcs__STATUS",
         ],
-        "canon__recurrence": [           # ← v4: new — any recurrence/progression
-            "clin_dcs__Recaida/Progresión",
+        "canon__recurrence": [           # â† v4: new â€” any recurrence/progression
+            "clin_dcs__Recaida/ProgresiÃ³n",
         ],
-        "canon__distant_mets": [         # ← v4: new — distant metastasis
+        "canon__distant_mets": [         # â† v4: new â€” distant metastasis
             "clin_dcs__MTxDISTANCIA",
         ],
-        "canon__treatment": [            # ← v4: new — treatment description
+        "canon__treatment": [            # â† v4: new â€” treatment description
             "clin_dcs__Tto",
         ],
 
-        # ── Dates ────────────────────────────────────────────────────────────
+        # â”€â”€ Dates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         "canon__date_diagnosis": [
             "clin_dcs__Fecha dx",
             "clin_au_endo__DATE_OF_SURGERY",
         ],
-        "canon__date_last_fu": [         # ← v4: new — last follow-up (used to derive OS)
-            "clin_dcs__Última fecha disponible",
+        "canon__date_last_fu": [         # â† v4: new â€” last follow-up (used to derive OS)
+            "clin_dcs__Ãšltima fecha disponible",
             "clin_au_endo__LAST_UPDATED",
         ],
-        "canon__date_recurrence": [      # ← v4: new
-            "clin_dcs__Fecha Recidiva/Progresión",
+        "canon__date_recurrence": [      # â† v4: new
+            "clin_dcs__Fecha Recidiva/ProgresiÃ³n",
             "clin_au_endo__PD_DATE",
         ],
 
-        # ── Molecular (endometrial) ───────────────────────────────────────────
+        # â”€â”€ Molecular (endometrial) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         "canon__msi_status": [
             "clin_au_endo__MSI_STATUS_IHC",
             "clin_au_endo__UA_MSI_STATUS_NGS",
@@ -1040,13 +1092,13 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
             "clin_au_endo__POLAND MOLECULAR CLASSIFICATION",
         ],
 
-        # ── Operational ──────────────────────────────────────────────────────
+        # â”€â”€ Operational â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         "canon__performed_or_cuts": [
             "clin_mn__REALIZADO",
             "clin_en__CORTES",
             "clin_her2__REALIZADO",
             "clin_her2__REALIZADO.1",
-            "clin_her2__REPETICION DE CORTES",
+            "clin_her2__REPETICI?N DE CORTES",
         ],
     }
 
@@ -1063,24 +1115,24 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
     ------------
     - canon__bmi         : strip 'X', 'Sobrepeso', weight-only entries before numeric coercion
     - canon__grade       : now also parses numeric values from DCS (already integers, safe)
-    - canon__ki67        : new — unify endo (fraction 0-1) and breast (% or range string)
+    - canon__ki67        : new â€” unify endo (fraction 0-1) and breast (% or range string)
                            into a single canon__ki67_pct (percentage scale 0-100)
-    - canon__p53_ihc     : new — unify endo (fraction) and breast (fraction) -> Positive/Negative
-    - canon__exitus      : merged from two cohorts — normalise SI/NO -> Yes/No
+    - canon__p53_ihc     : new â€” unify endo (fraction) and breast (fraction) -> Positive/Negative
+    - canon__exitus      : merged from two cohorts â€” normalise SI/NO -> Yes/No
     - canon__os_months   : v4 also DERIVES breast OS from canon__date_diagnosis +
                            canon__date_last_fu when canon__os_months is null
     - canon__recurrence_flag : new binary derived from canon__recurrence text
     - canon__distant_mets_flag: new binary derived from canon__distant_mets
-    - canon__myometrial_invasion: new — normalise <50% / >50%
-    - canon__lvsi        : new — normalise YES/NO
-    - canon__risk_group  : new — normalise LOW/INTERMEDIATE/INTERMEDIATE-HIGH/HIGH
-    - canon__vital_status: new — normalise verbose string -> Alive / Dead / Lost / Other
-    - canon__performed_or_cuts__yesno : fix — was always null due to logic error; now fixed
+    - canon__myometrial_invasion: new â€” normalise <50% / >50%
+    - canon__lvsi        : new â€” normalise YES/NO
+    - canon__risk_group  : new â€” normalise LOW/INTERMEDIATE/INTERMEDIATE-HIGH/HIGH
+    - canon__vital_status: new â€” normalise verbose string -> Alive / Dead / Lost / Other
+    - canon__performed_or_cuts__yesno : fix â€” was always null due to logic error; now fixed
     - MSI: 'UNSTABLE' (uppercase raw) now correctly normalised to 'Unstable'
     """
     out = df.copy()
 
-    # ── Strip whitespace from key categoricals ────────────────────────────────
+    # â”€â”€ Strip whitespace from key categoricals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     for _col in [
         "clin_au_endo__FIGO_STAGE",
         "clin_her2__DX",
@@ -1099,12 +1151,12 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
         "clin_dcs__MTxDISTANCIA",
         "clin_dcs__Exitus",
         "clin_dcs__STATUS",
-        "clin_dcs__Recaida/Progresión",
+        "clin_dcs__Recaida/ProgresiÃ³n",
     ]:
         if _col in out.columns:
             out[_col] = out[_col].apply(lambda x: x.strip() if isinstance(x, str) else x)
 
-    # ── MSI status -> 'Stable' / 'Unstable' ──────────────────────────────────
+    # â”€â”€ MSI status -> 'Stable' / 'Unstable' â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if "canon__msi_status" in out.columns:
         def _norm_msi(x):
             if pd.isna(x): return x
@@ -1114,7 +1166,7 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
             return x
         out["canon__msi_status"] = out["canon__msi_status"].map(_norm_msi)
 
-    # ── Molecular class -> POLE / MMRd / NSMP / P53 ──────────────────────────
+    # â”€â”€ Molecular class -> POLE / MMRd / NSMP / P53 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if "canon__molecular_class" in out.columns:
         def _norm_molclass(x):
             if pd.isna(x): return x
@@ -1126,11 +1178,11 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
             return x
         out["canon__molecular_class"] = out["canon__molecular_class"].map(_norm_molclass)
 
-    # ── Age ───────────────────────────────────────────────────────────────────
+    # â”€â”€ Age â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if "canon__age" in out.columns:
         out["canon__age"] = pd.to_numeric(out["canon__age"], errors="coerce")
 
-    # ── BMI: strip non-numeric junk before coercion ───────────────────────────
+    # â”€â”€ BMI: strip non-numeric junk before coercion â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # DCS has 'X' (unknown), 'Sobrepeso' (overweight text), '73 kg', '60 kg; 168 cm'
     if "canon__bmi" in out.columns:
         bmi_candidates = [
@@ -1156,13 +1208,13 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
         if "canon__bmi__source" in out.columns:
             out["canon__bmi__source"] = bmi_parsed[1].where(bmi_parsed[1].notna(), out["canon__bmi__source"])
 
-    # ── Dates ─────────────────────────────────────────────────────────────────
+    # â”€â”€ Dates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     for _dcol in ("canon__date_birth", "canon__date_diagnosis",
                   "canon__date_last_fu", "canon__date_recurrence"):
         if _dcol in out.columns:
             out[_dcol] = out[_dcol].apply(parse_date)
 
-    # ── Derive breast OS from diagnosis + last follow-up dates ────────────────
+    # â”€â”€ Derive breast OS from diagnosis + last follow-up dates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Only fills rows where canon__os_months is null (i.e. non-AU-endo rows)
     if "canon__date_diagnosis" in out.columns and "canon__date_last_fu" in out.columns:
         diag = out["canon__date_diagnosis"]
@@ -1179,26 +1231,26 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
             out["canon__os_months__source"] = pd.NA
         out.loc[fill_mask, "canon__os_months__source"] = "derived_from_dates"
 
-    # ── Numeric coercion for survival endpoints ───────────────────────────────
+    # â”€â”€ Numeric coercion for survival endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     for _surv_col in ("canon__os_months", "canon__pfs_months"):
         if _surv_col in out.columns:
             out[_surv_col] = pd.to_numeric(out[_surv_col], errors="coerce")
 
-    # ── PD flag (endometrial) ─────────────────────────────────────────────────
+    # â”€â”€ PD flag (endometrial) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if "canon__pd_status" in out.columns:
         out["canon__pd_flag"] = out["canon__pd_status"].map(
             lambda x: 1 if str(x).strip().upper() == "PD" else (0 if str(x).strip().upper() == "NO PD" else pd.NA)
             if pd.notna(x) else pd.NA
         )
 
-    # ── Exitus: normalise SI/NO + YES/NO -> Yes/No ────────────────────────────
+    # â”€â”€ Exitus: normalise SI/NO + YES/NO -> Yes/No â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if "canon__exitus" in out.columns:
         def _norm_exitus(x):
             if pd.isna(x): return x
             s = str(x).strip().upper()
             if s in ("SI", "YES", "EXITUS", "1"): return "Yes"
             if s in ("NO", "0"): return "No"
-            # Breast: 'SI: fallo hepático...' -> Yes
+            # Breast: 'SI: fallo hepÃ¡tico...' -> Yes
             if s.startswith("SI:"): return "Yes"
             return x
         out["canon__exitus"] = out["canon__exitus"].map(_norm_exitus)
@@ -1207,7 +1259,7 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
             lambda x: pd.NA if pd.isna(x) else (1 if x == "Yes" else (0 if x == "No" else pd.NA))
         )
 
-    # ── Vital status: normalise verbose string -> clean categories ────────────
+    # â”€â”€ Vital status: normalise verbose string -> clean categories â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if "canon__vital_status" in out.columns:
         def _norm_status(x):
             if pd.isna(x): return x
@@ -1219,7 +1271,7 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
             return "Other"
         out["canon__vital_status"] = out["canon__vital_status"].map(_norm_status)
 
-    # ── Recurrence flag ───────────────────────────────────────────────────────
+    # â”€â”€ Recurrence flag â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if "canon__recurrence" in out.columns:
         def _norm_recurrence(x):
             if pd.isna(x): return x
@@ -1233,7 +1285,7 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
             lambda x: pd.NA if pd.isna(x) else (1 if x == "Yes" else (0 if x == "No" else pd.NA))
         )
 
-    # ── Distant metastasis flag ───────────────────────────────────────────────
+    # â”€â”€ Distant metastasis flag â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if "canon__distant_mets" in out.columns:
         def _norm_mets(x):
             if pd.isna(x): return x
@@ -1246,7 +1298,7 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
             lambda x: pd.NA if pd.isna(x) else (1 if x == "Yes" else (0 if x == "No" else pd.NA))
         )
 
-    # ── Myometrial invasion -> <50% / >50% / None ────────────────────────────
+    # â”€â”€ Myometrial invasion -> <50% / >50% / None â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if "canon__myometrial_invasion" in out.columns:
         def _norm_myo(x):
             if pd.isna(x): return x
@@ -1256,14 +1308,14 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
             return x
         out["canon__myometrial_invasion"] = out["canon__myometrial_invasion"].map(_norm_myo)
 
-    # ── LVSI -> Yes / No ──────────────────────────────────────────────────────
+    # â”€â”€ LVSI -> Yes / No â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if "canon__lvsi" in out.columns:
         out["canon__lvsi"] = out["canon__lvsi"].map(
             lambda x: "Yes" if str(x).strip().upper() == "YES"
             else ("No" if str(x).strip().upper() == "NO" else (pd.NA if pd.isna(x) else x))
         )
 
-    # ── Risk group: normalise to LOW / INTERMEDIATE / INTERMEDIATE-HIGH / HIGH ─
+    # â”€â”€ Risk group: normalise to LOW / INTERMEDIATE / INTERMEDIATE-HIGH / HIGH â”€
     if "canon__risk_group" in out.columns:
         def _norm_risk(x):
             if pd.isna(x): return x
@@ -1275,7 +1327,7 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
             return x
         out["canon__risk_group"] = out["canon__risk_group"].map(_norm_risk)
 
-    # ── KI67: unify into a single percentage-scale column ────────────────────
+    # â”€â”€ KI67: unify into a single percentage-scale column â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Endo source (FFPE_KI67): stored as percentage (0-100)
     # Breast DCS source (clin_dcs__KI67): stored as fraction (0.0-1.0) for most rows,
     #   but some are range strings like '20-25%', '>50%', '70-75%'
@@ -1286,7 +1338,7 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
             axis=1,
         )
 
-    # ── P53 IHC -> Positive / Negative (unified) ─────────────────────────────
+    # â”€â”€ P53 IHC -> Positive / Negative (unified) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Endo: stored as fraction (FFPE_TP53_IHC); breast: fraction (clin_dcs__p53)
     # Convention: >= 0.1 (10%) = aberrant/positive p53
     if "canon__p53_ihc" in out.columns:
@@ -1295,11 +1347,11 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
         out["canon__p53_ihc_numeric"] = p53_parsed.map(lambda t: t[0])
         out["canon__p53_status"] = p53_parsed.map(lambda t: t[1] if t[1] is not None else pd.NA)
 
-    # ── Menarche ──────────────────────────────────────────────────────────────
+    # â”€â”€ Menarche â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if "canon__menarche_age" in out.columns:
         out["canon__menarche_age"] = out["canon__menarche_age"].apply(extract_first_number)
 
-    # ── Menopause ─────────────────────────────────────────────────────────────
+    # â”€â”€ Menopause â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def _parse_menopause_age(x) -> Optional[float]:
         if pd.isna(x): return None
         s = _norm_text(x)
@@ -1314,15 +1366,15 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
         out["canon__menopause_age"] = s.apply(_parse_menopause_age)
         out["canon__menopause_status"] = s.apply(lambda x: _norm_text(x) if _norm_text(x) else pd.NA)
 
-    # ── Grade: numeric coercion (covers both endo text 'G1' and breast integer) ─
+    # â”€â”€ Grade: numeric coercion (covers both endo text 'G1' and breast integer) â”€
     if "canon__grade" in out.columns:
         out["canon__grade"] = out["canon__grade"].apply(parse_grade)
 
-    # ── FIGO stage ────────────────────────────────────────────────────────────
+    # â”€â”€ FIGO stage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if "canon__figo_stage" in out.columns:
         out["canon__figo_stage"] = out["canon__figo_stage"].apply(parse_figo_stage)
 
-    # ── AU endometrial ER/PR: numeric raw -> Positive/Negative (threshold >= 1%) ─
+    # â”€â”€ AU endometrial ER/PR: numeric raw -> Positive/Negative (threshold >= 1%) â”€
     if "canon__er_raw" in out.columns:
         er_parsed = out["canon__er_raw"].apply(parse_receptor_value)
         out["canon__er_pct"] = er_parsed.map(lambda t: t[0])
@@ -1335,7 +1387,7 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
         if _col not in out.columns:
             out[_col] = pd.NA
 
-    # ── SP breast ER/PR: POSITIVO/NEGATIVO -> Positive/Negative ──────────────
+    # â”€â”€ SP breast ER/PR: POSITIVO/NEGATIVO -> Positive/Negative â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     _sp_er_map = {"POSITIVO": "Positive", "NEGATIVO": "Negative"}
     if "canon__er_status_breast" in out.columns:
         out["canon__er_status_breast"] = (
@@ -1355,11 +1407,11 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
         mask = out["canon__pr_status"].isna() & out["canon__pr_status_breast"].notna()
         out.loc[mask, "canon__pr_status"] = out.loc[mask, "canon__pr_status_breast"]
 
-    # ── HER2 copies ───────────────────────────────────────────────────────────
+    # â”€â”€ HER2 copies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if "canon__her2_copies" in out.columns:
         out["canon__her2_copies"] = out["canon__her2_copies"].apply(extract_first_number)
 
-    # ── HER2 note + triple negative flag ─────────────────────────────────────
+    # â”€â”€ HER2 note + triple negative flag â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if "canon__her2_copies_note" in out.columns:
         note = out["canon__her2_copies_note"].copy()
         note_num = note.apply(extract_first_number)
@@ -1369,7 +1421,7 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
         ).map({True: "Yes", False: "No"})
         out.loc[out["canon__her2_copies_note"].isna(), "canon__triple_negative_flag"] = pd.NA
 
-    # ── Performed/cuts: fix the always-null bug (was checking 'nan' string) ───
+    # â”€â”€ Performed/cuts: fix the always-null bug (was checking 'nan' string) â”€â”€â”€
     if "canon__performed_or_cuts" in out.columns:
         out["canon__performed_or_cuts__yesno"] = out["canon__performed_or_cuts"].apply(
             lambda x: "Yes" if pd.notna(x) and str(x).strip().lower() not in ("", "nan", "none") else pd.NA
@@ -1414,7 +1466,7 @@ def harmonise(df_raw_merged: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, 
     # Apply semantic transforms to canon columns (types, derived flags, etc.)
     harm = apply_semantic_transforms(harm)
 
-    # ── Drop columns that are >99% empty ──────────────────────────────────────
+    # â”€â”€ Drop columns that are >99% empty â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Keeps the file clean by removing placeholder/unfilled columns (e.g. the
     # AU endometrial MUTATION TYPE detail columns which are all blank).
     # Canon columns and core identity columns are always protected regardless
@@ -1441,7 +1493,7 @@ def harmonise(df_raw_merged: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, 
             cols_to_drop.append(col)
 
     if cols_to_drop:
-        print(f"[INFO] Dropping {len(cols_to_drop)} columns that are ≥99% empty:")
+        print(f"[INFO] Dropping {len(cols_to_drop)} columns that are â‰¥99% empty:")
         for c in cols_to_drop:
             print(f"  - {c}")
         harm = harm.drop(columns=cols_to_drop)
@@ -1487,7 +1539,7 @@ def load_sequenced_snp_codes(manifests_dir: Path) -> set:
     sequenced: set = set()
 
     if not manifests_dir.exists():
-        print(f"[WARN] Manifests directory not found: {manifests_dir} — sequencing flags will be skipped.")
+        print(f"[WARN] Manifests directory not found: {manifests_dir} â€” sequencing flags will be skipped.")
         return sequenced
 
     for fname, (num_pattern, prefix) in MANIFEST_PATTERNS.items():
@@ -1501,7 +1553,7 @@ def load_sequenced_snp_codes(manifests_dir: Path) -> set:
 
         for bam in bams:
             bam_name = Path(bam).stem  # filename without .bam
-            # Skip replicates — they have the same patient, don't double-count
+            # Skip replicates â€” they have the same patient, don't double-count
             if "repeticion" in bam_name.lower():
                 # Still add the base sample number
                 pass

@@ -129,7 +129,7 @@ from scipy import stats
 from scipy.stats import false_discovery_control, fisher_exact, mannwhitneyu
 
 from association_runtime import script17_defaults
-from figure_style import COMPARATIVE_TAG, COHORT_COLORS, GENOTYPE_COLORS, IMPACT_COLORS, arm_color, cohort_color
+from figure_style import COMPARATIVE_TAG, COHORT_COLORS, GENOTYPE_COLORS, IMPACT_COLORS, arm_color, cohort_color, tagged_title
 from pipeline_utils import attach_amplicon_warning_columns, build_amplicon_warning_lookup
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_percentage_columns
 
@@ -1669,7 +1669,7 @@ def _draw_volcano(tvh, p_col, sig_col, thresh, title_suffix, out_path):
         if not sub.empty:
             n_tumour = int(sub['N_Tumour'].iloc[0])
             n_control = int(sub['N_Control'].iloc[0])
-            ax.set_title(f"{grp} | Tumour n={n_tumour}, Control n={n_control}", fontsize=12, fontweight="bold", pad=8)
+            ax.set_title(f"{grp} | Tumour n={n_tumour}, Pooled control n={n_control}", fontsize=12, fontweight="bold", pad=8)
         else:
             ax.set_title(f"{grp}", fontsize=12, fontweight="bold", pad=8)
         _style_ax(ax, grid=False)
@@ -2833,7 +2833,7 @@ def make_genotype_composition_plots(tvh, merged, out_dir):
                    loc="upper center", ncol=3, frameon=False,
                    bbox_to_anchor=(0.5, 1.02))
         fig.suptitle(
-            f"Genotype Composition in Tumour and Control Samples: {analysis_group} Comparison [{COMPARATIVE_TAG}]",
+            tagged_title(f"Genotype Composition in Tumour and Pooled Control Samples: {analysis_group} Comparison", COMPARATIVE_TAG),
             fontsize=12,
             fontweight="bold",
             y=1.04,
@@ -2913,7 +2913,7 @@ def make_summary_panel(tvh, breast_clin, endo_clin, surv_res, out_dir):
             ax_freq.set_xlim(0, 100)
             ax_freq.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}%"))
             ax_freq.set_title(
-                "A  Distribution of GSDMB SNP Frequencies in Tumour and Control Samples\n(top 20 variants per cohort)",
+                "A  Distribution of GSDMB SNP Frequencies in Tumour and Pooled Control Samples\n(top 20 variants per cohort)",
                 fontsize=9,
                 fontweight="bold",
                 loc="left",

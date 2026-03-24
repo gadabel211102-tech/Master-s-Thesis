@@ -102,7 +102,7 @@ from scipy import stats
 from scipy.stats import false_discovery_control, fisher_exact, mannwhitneyu
 
 from association_runtime import script18_defaults
-from figure_style import COMPARATIVE_TAG, COHORT_COLORS, HAPLOTYPE_STATUS_COLORS, arm_color, cohort_color
+from figure_style import COMPARATIVE_TAG, COHORT_COLORS, HAPLOTYPE_STATUS_COLORS, arm_color, cohort_color, tagged_title
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_percentage_columns
 
 try:
@@ -1182,8 +1182,8 @@ def survival_analysis(merged: pd.DataFrame) -> Tuple[pd.DataFrame, List]:
 
                 # KM plot
                 fig, ax = plt.subplots(figsize=(6, 4))
-                for grp_val, grp_label, col in [(0, "Non-carrier", HAPLOTYPE_STATUS_COLORS["Non-carrier"]),
-                                                 (1, "Carrier",     HAPLOTYPE_STATUS_COLORS["Heterozygous carrier"])]:
+                for grp_val, grp_label, col in [(0, "Wild-type", HAPLOTYPE_STATUS_COLORS["Wild-type"]),
+                                                 (1, "Carrier",     HAPLOTYPE_STATUS_COLORS["Heterozygous"])]:
                     mask = carrier == grp_val
                     if mask.sum() < 2:
                         continue
@@ -1192,7 +1192,7 @@ def survival_analysis(merged: pd.DataFrame) -> Tuple[pd.DataFrame, List]:
                             label=f"{grp_label} (n={mask.sum()})")
                     kmf.plot_survival_function(ax=ax, ci_show=True, color=col)
                 ax.set_title(
-                    f"Kaplan-Meier Analysis of {endpoint} According to {hap_id} Carrier Status\n"
+                    f"Kaplan-Meier analysis of {endpoint} according to {hap_id} genotype grouping\n"
                     f"{cohort_label} | Log-rank p={lr_p:.4f}",
                     fontsize=9,
                 )
@@ -1345,7 +1345,7 @@ def make_volcano(tvh: pd.DataFrame, out_dir: Path):
             continue
         ax.scatter(sub["OR"].apply(lambda x: np.log2(x)),
                    -np.log10(sub["P_Value"]),
-                   c=col, label=f"{cohort} (tumour n={int(sub['N_Tumour'].iloc[0])}, control n={int(sub['N_Control'].iloc[0])})", alpha=0.7, s=60, zorder=3)
+                   c=col, label=f"{cohort} (tumour n={int(sub['N_Tumour'].iloc[0])}, pooled control n={int(sub['N_Control'].iloc[0])})", alpha=0.7, s=60, zorder=3)
         placed = []
         offsets = [(4, 4), (4, -8), (-10, 6), (-10, -8)]
         for _, row in sub[sub["Nominal_Sig"]].iterrows():
@@ -1363,7 +1363,7 @@ def make_volcano(tvh: pd.DataFrame, out_dir: Path):
     ax.axvline(0, ls=":", c="#cccccc", lw=0.8)
     ax.set_xlabel("log₂(OR)  —  tumour vs control")
     ax.set_ylabel("-log₁₀(p)")
-    ax.set_title(f"Haplotype Volcano [{COMPARATIVE_TAG}]", fontweight="bold")
+    ax.set_title(tagged_title("Haplotype Volcano", COMPARATIVE_TAG), fontweight="bold")
     ax.legend(fontsize=9)
     _style_ax(ax)
     plt.tight_layout()
@@ -1721,9 +1721,9 @@ def make_haplotype_composition_plots(tvh: pd.DataFrame, merged: pd.DataFrame, ou
     if tvh.empty:
         return
 
-    top_n = 8
-    status_order = ['Non-carrier', 'Heterozygous carrier', 'Homozygous carrier']
-    dosage_labels = {0: 'Non-carrier', 1: 'Heterozygous carrier', 2: 'Homozygous carrier'}
+    top_n = 6
+    status_order = ['Wild-type', 'Heterozygous', 'Homozygous']
+    dosage_labels = {0: 'Wild-type', 1: 'Heterozygous', 2: 'Homozygous'}
 
     sample_manifest = merged[~merged['is_replicate']].drop_duplicates('snp_code').copy()
     pooled_controls = sample_manifest[sample_manifest['Tissue'] == 'Healthy'].copy()
@@ -1792,7 +1792,7 @@ def make_haplotype_composition_plots(tvh: pd.DataFrame, merged: pd.DataFrame, ou
                 vals = perc[status].to_numpy(dtype=float)
                 ax.bar(xpos, vals, bottom=bottoms, color=HAPLOTYPE_STATUS_COLORS[status], edgecolor='white', linewidth=1.0, width=0.58)
                 for xi, val, bottom in zip(xpos, vals, bottoms):
-                    if val >= 9:
+                    if val >= 8:
                         ax.text(xi, bottom + val / 2, f'{val:.0f}%', ha='center', va='center', fontsize=8.5, color='white', fontweight='bold')
                 bottoms += vals
 
@@ -1800,7 +1800,7 @@ def make_haplotype_composition_plots(tvh: pd.DataFrame, merged: pd.DataFrame, ou
             ax.set_xticks(xpos)
             ax.set_xticklabels([f'{label}\n(n={int(totals.loc[label])})' for label in counts.index], fontsize=8.5)
             ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f'{v:.0f}%'))
-            ax.set_ylabel('Haplotype composition (%)', fontsize=9)
+            ax.set_ylabel('Combined genotype state (%)', fontsize=9)
             p_val = row['FDR_P_Value'] if bool(row.get('FDR_Sig', False)) else row['P_Value']
             sig_label = 'FDR' if bool(row.get('FDR_Sig', False)) else ('p<0.05' if bool(row.get('Nominal_Sig', False)) else 'top hit')
             ax.set_title(f'Haplotype {hap_id}\nOR={row["OR"]:.2f} | p={p_val:.3g} ({sig_label})', fontsize=8.5, fontweight='bold')
@@ -1810,8 +1810,8 @@ def make_haplotype_composition_plots(tvh: pd.DataFrame, merged: pd.DataFrame, ou
             ax.set_visible(False)
 
         handles = [plt.Rectangle((0, 0), 1, 1, facecolor=HAPLOTYPE_STATUS_COLORS[s], edgecolor='white') for s in status_order]
-        fig.legend(handles, status_order, title='Haplotype status', loc='upper center', ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.02))
-        fig.suptitle(f'Haplotype Composition in Tumour and Control Samples: {cohort} Comparison [{COMPARATIVE_TAG}]', fontsize=12, fontweight='bold', y=1.04)
+        fig.legend(handles, status_order, title='Genotype state', loc='upper center', ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.02))
+        fig.suptitle(tagged_title(f'Combined genotype state in tumour and pooled control samples: {cohort}', COMPARATIVE_TAG), fontsize=12, fontweight='bold', y=1.04)
         plt.tight_layout(rect=[0, 0, 1, 0.95])
         out_path = out_dir / f'18_HaplotypeComposition_{cohort}.png'
         plt.savefig(out_path, dpi=300, bbox_inches='tight')
@@ -2340,44 +2340,50 @@ def main():
 
     # ── FIGURE GENERATION ────────────────────────────────────────────────────
     print("=== Generating figures ===")
+    supplementary_dir = out_dir / "supplementary_figures"
+    supplementary_dir.mkdir(parents=True, exist_ok=True)
+    for stale in [
+        out_dir / "18_Haplo_Volcano_raw_p.png",
+        out_dir / "18_Haplo_Heatmap_Breast.png",
+        out_dir / "18_Haplo_Heatmap_Endometrial.png",
+        out_dir / "18_Haplo_Heatmap_Breast_AgeAdj.png",
+        out_dir / "18_Haplo_Heatmap_Endometrial_AgeAdj.png",
+        out_dir / "18_Haplo_Forest_CancerRisk.png",
+        out_dir / "GSDMB_Haplotype_KM_Curves_All_Cohorts.pdf",
+    ]:
+        if stale.exists():
+            stale.unlink()
 
-    # Volcano: tumour vs control
-    make_volcano(tvh, out_dir)
-
-    # Heatmaps: unadjusted p-values
+    # Supplementary overview figures
+    make_volcano(tvh, supplementary_dir)
     make_heatmap(
         b_clin, "Breast", "P_Unadj", "Unadjusted (full view)",
-        out_dir / "18_Haplo_Heatmap_Breast.png",
+        supplementary_dir / "18_Haplo_Heatmap_Breast.png",
     )
     make_heatmap(
         e_clin, "Endometrial", "P_Unadj", "Unadjusted (full view)",
-        out_dir / "18_Haplo_Heatmap_Endometrial.png",
+        supplementary_dir / "18_Haplo_Heatmap_Endometrial.png",
     )
-    make_main_text_heatmaps(b_clin, e_clin, out_dir)
-
-    # Heatmaps: age-adjusted p-values (if available)
     if not b_clin.empty and "P_Adj_Age" in b_clin.columns and b_clin["P_Adj_Age"].notna().any():
         make_heatmap(
             b_clin, "Breast", "P_Adj_Age", "Age-adjusted (full view)",
-            out_dir / "18_Haplo_Heatmap_Breast_AgeAdj.png",
+            supplementary_dir / "18_Haplo_Heatmap_Breast_AgeAdj.png",
         )
     if not e_clin.empty and "P_Adj_Age" in e_clin.columns and e_clin["P_Adj_Age"].notna().any():
         make_heatmap(
             e_clin, "Endometrial", "P_Adj_Age", "Age-adjusted (full view)",
-            out_dir / "18_Haplo_Heatmap_Endometrial_AgeAdj.png",
+            supplementary_dir / "18_Haplo_Heatmap_Endometrial_AgeAdj.png",
         )
 
+    # Main set
+    make_main_text_heatmaps(b_clin, e_clin, out_dir)
     make_haplotype_composition_plots(tvh, merged, out_dir)
-
-    # Forest plots: binary clinical associations
     make_forest(b_clin, "Breast",      out_dir / "18_Haplo_Forest_Breast.png")
     make_forest(e_clin, "Endometrial", out_dir / "18_Haplo_Forest_Endometrial.png")
 
-    # Forest plot: cancer risk (case-control)
-    make_risk_forest(risk_res, out_dir / "18_Haplo_Forest_CancerRisk.png")
-
-    # Kaplan-Meier PDF
-    make_km_pdf(all_km_pages, out_dir / "GSDMB_Haplotype_KM_Curves_All_Cohorts.pdf")
+    # Secondary outputs
+    make_risk_forest(risk_res, supplementary_dir / "18_Haplo_Forest_CancerRisk.png")
+    make_km_pdf(all_km_pages, supplementary_dir / "GSDMB_Haplotype_KM_Curves_All_Cohorts.pdf")
 
     print()
     print("=" * 60)

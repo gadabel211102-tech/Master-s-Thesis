@@ -20,12 +20,14 @@ snp_clinical_dir = "/home/gadeaalonsoj/tfm/analysis_results/17_snp_clinical_asso
 haplotype_clinical_dir = "/home/gadeaalonsoj/tfm/analysis_results/18_haplotype_clinical_associations"
 thousand_genomes_results = "/home/gadeaalonsoj/tfm/analysis_results/19_1000g_haplotype_comparison"
 isoform_expression_dir = "/home/gadeaalonsoj/tfm/analysis_results/20_isoform_expression_associations"
+objective2_rna_qc_dir = "/home/gadeaalonsoj/tfm/analysis_results/19b_objective2_rna_qc"
+objective2_rna_qc_manifest = "/home/gadeaalonsoj/tfm/analysis_results/19b_objective2_rna_qc/RNA_QC_Manifest.tsv"
 annotated_report = "/home/gadeaalonsoj/tfm/analysis_results/07_annotated_variants/GSDMB_Annotated_Variants.xlsx"
 harmonised_master = "/home/gadeaalonsoj/tfm/MASTER_SNP_plus_clinical_HARMONISED.xlsx"
 haplotype_phased = "/home/gadeaalonsoj/tfm/analysis_results/15_haplotype_phasing/phased_genotypes.tsv"
 haplotype_results = "/home/gadeaalonsoj/tfm/analysis_results/15_haplotype_statistics/GSDMB_Haplotype_Results.xlsx"
 manifests_dir = "/home/gadeaalonsoj/tfm/manifests"
-objective2_expression_workbook = "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/HAPLOTIPOS Y PORCENTAJES DE ISOFORMAS(3)(4)_EVA.(2).xlsx"
+objective2_expression_workbook = "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/clinical variables-snps/HAPLOTIPOS Y PORCENTAJES DE ISOFORMAS(3)(4)_EVA.(2).xlsx"
 objective2_rna_bed = "/home/gadeaalonsoj/tfm/rna_bed/IAD258499_4_Designed.bed"
 
 [thresholds]

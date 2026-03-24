@@ -63,6 +63,20 @@ def script19_defaults() -> dict[str, object]:
     }
 
 
+
+def script19b_defaults() -> dict[str, object]:
+    """Return the canonical configuration bundle for the standalone RNA QC stage."""
+    paths = get_paths()
+    return {
+        "expr_xlsx": paths["objective2_expression_workbook"],
+        "master": paths["harmonised_master"],
+        "rna_bed": paths["objective2_rna_bed"],
+        "rna_qc_manifest": paths["objective2_rna_qc_manifest"],
+        "out_dir": paths["objective2_rna_qc_dir"],
+        "rna_qc_manifest": paths["objective2_rna_qc_manifest"],
+    }
+
+
 def script20_defaults() -> dict[str, object]:
     """Return the canonical configuration bundle for objective-2 isoform analysis."""
     paths = get_paths()
@@ -74,6 +88,7 @@ def script20_defaults() -> dict[str, object]:
         "haplotype_input": paths["haplotype_phased"],
         "out_dir": paths["isoform_expression_dir"],
         "rna_bed": paths["objective2_rna_bed"],
+        "rna_qc_manifest": paths["objective2_rna_qc_manifest"],
         "min_nfe_af": thresholds["min_nfe_af"],
         "min_hap_freq": thresholds["min_hap_freq"],
         "min_carriers": thresholds["min_carriers"],

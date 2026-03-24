@@ -273,6 +273,146 @@ def attach_rna_qc(expr: pd.DataFrame, sample_qc: pd.DataFrame) -> pd.DataFrame:
         out[col] = out[col].fillna("")
     return out
 
+
+RNA_MANIFEST_DECISION_COLUMNS = [
+    "RNA_QC_Analysis_Ready",
+    "RNA_QC_Final_Status",
+    "RNA_QC_Exclusion_Reason",
+    "RNA_QC_Eligibility_Note",
+]
+
+
+def classify_rna_analysis_row(row: pd.Series) -> tuple[bool, str, str, str]:
+    if not bool(row.get("master_join_success", False)) or pd.isna(row.get("snp_code")):
+        return False, "Excluded", "Unmatched to harmonised master", "The expression row could not be reconciled to a harmonised RNA sample." 
+
+    qc_status = str(row.get("RNA_Coverage_QC_Status", "") or "").strip()
+    risk_level = str(row.get("RNA_Coverage_Risk_Level", "") or "").strip()
+    risk_note = str(row.get("RNA_Coverage_Risk_Note", "") or "").strip()
+    bam_path = str(row.get("RNA_BAM_Path", "") or "").strip()
+    bai_present = bool(row.get("RNA_BAI_Present", False))
+    gsdmb_target_count = pd.to_numeric(pd.Series([row.get("RNA_GSDMB_Target_Count")]), errors="coerce").iloc[0]
+    gsdmb_targets_covered = pd.to_numeric(pd.Series([row.get("RNA_GSDMB_Targets_Covered")]), errors="coerce").iloc[0]
+    gsdmb_mean_depth = pd.to_numeric(pd.Series([row.get("RNA_GSDMB_Mean_Depth")]), errors="coerce").iloc[0]
+
+    if not bam_path or qc_status == "Missing_BAM":
+        return False, "Excluded", "Missing BAM", "No matched RNA BAM was available for this sample."
+    if not bai_present:
+        return False, "Excluded", "BAM/index failure", risk_note or "RNA BAM indexing was not available for downstream QC."
+    if qc_status != "Complete":
+        lowered = risk_note.lower()
+        if "bed" in lowered or "target" in lowered:
+            return False, "Excluded", "Missing/invalid RNA BED QC context", risk_note or "RNA target design context was not available."
+        if "index" in lowered or "samtools" in lowered:
+            return False, "Excluded", "BAM/index failure", risk_note or "RNA QC could not be completed because BAM indexing failed."
+        return False, "Excluded", "RNA QC incomplete", risk_note or "RNA coverage QC did not complete."
+    if pd.isna(gsdmb_target_count) or gsdmb_target_count <= 0:
+        return False, "Excluded", "Missing/invalid RNA BED QC context", risk_note or "The RNA panel design did not yield a measurable GSDMB target set."
+    if pd.isna(gsdmb_targets_covered) or gsdmb_targets_covered <= 0 or pd.isna(gsdmb_mean_depth) or gsdmb_mean_depth <= 0:
+        return False, "Excluded", "No measurable GSDMB target coverage", risk_note or "No measurable coverage was detected across the GSDMB RNA targets."
+    if risk_level == "High":
+        return False, "Excluded", "Severe low-depth/high-risk coverage failure", risk_note or "RNA target coverage was too weak for QC-gated analysis."
+    if risk_level in {"Moderate", "Unavailable"}:
+        return False, "Excluded", "Suboptimal RNA target coverage", risk_note or "RNA target coverage was below the analysis-ready threshold."
+    return True, "Analysis-ready", "", risk_note or "RNA BAM and GSDMB target coverage passed the QC gate."
+
+
+def build_analysis_manifest(expr_with_qc: pd.DataFrame) -> pd.DataFrame:
+    manifest = expr_with_qc.copy()
+    decisions = manifest.apply(classify_rna_analysis_row, axis=1, result_type="expand")
+    decisions.columns = RNA_MANIFEST_DECISION_COLUMNS
+    manifest = pd.concat([manifest, decisions], axis=1)
+    manifest["RNA_QC_Analysis_Ready"] = manifest["RNA_QC_Analysis_Ready"].fillna(False).astype(bool)
+    manifest["RNA_QC_Final_Status"] = manifest["RNA_QC_Final_Status"].fillna("Excluded")
+    manifest["RNA_QC_Exclusion_Reason"] = manifest["RNA_QC_Exclusion_Reason"].fillna("")
+    manifest["RNA_QC_Eligibility_Note"] = manifest["RNA_QC_Eligibility_Note"].fillna("")
+    return manifest
+
+
+def summarise_analysis_manifest(manifest: pd.DataFrame) -> pd.DataFrame:
+    if manifest.empty:
+        return pd.DataFrame(columns=["group", "total_rows", "matched_rows", "qc_passed_rows", "qc_excluded_rows", "pass_percentage"])
+    rows = []
+    groups = [g for g in ["Breast_Tumour", "Endometrial_Tumour", "Breast_Normal", "Endometrial_Normal"] if g in manifest["analysis_group"].astype(str).unique()]
+    for group in groups + ["Overall"]:
+        sub = manifest if group == "Overall" else manifest[manifest["analysis_group"].astype(str) == group]
+        total = len(sub)
+        matched = int(sub["master_join_success"].fillna(False).sum()) if total else 0
+        passed = int(sub["RNA_QC_Analysis_Ready"].fillna(False).sum()) if total else 0
+        excluded = total - passed
+        rows.append({
+            "group": group,
+            "total_rows": total,
+            "matched_rows": matched,
+            "qc_passed_rows": passed,
+            "qc_excluded_rows": excluded,
+            "pass_percentage": (passed / total * 100.0) if total else 0.0,
+        })
+    return pd.DataFrame(rows)
+
+
+def summarise_exclusion_reasons(manifest: pd.DataFrame) -> pd.DataFrame:
+    if manifest.empty:
+        return pd.DataFrame(columns=["group", "exclusion_reason", "sample_count", "excluded_total", "excluded_percentage"])
+    rows = []
+    groups = [g for g in ["Breast_Tumour", "Endometrial_Tumour", "Breast_Normal", "Endometrial_Normal"] if g in manifest["analysis_group"].astype(str).unique()]
+    excluded = manifest[~manifest["RNA_QC_Analysis_Ready"].fillna(False)].copy()
+    for group in groups + ["Overall"]:
+        sub = excluded if group == "Overall" else excluded[excluded["analysis_group"].astype(str) == group]
+        total = len(sub)
+        counts = sub["RNA_QC_Exclusion_Reason"].replace("", "Unspecified").value_counts() if total else pd.Series(dtype=int)
+        if counts.empty:
+            rows.append({"group": group, "exclusion_reason": "No excluded samples", "sample_count": 0, "excluded_total": total, "excluded_percentage": 0.0})
+        else:
+            for reason, count in counts.items():
+                rows.append({
+                    "group": group,
+                    "exclusion_reason": reason,
+                    "sample_count": int(count),
+                    "excluded_total": total,
+                    "excluded_percentage": (count / total * 100.0) if total else 0.0,
+                })
+    return pd.DataFrame(rows)
+
+
+def plot_rna_gate_summary(summary_df: pd.DataFrame, out_path: str | Path) -> None:
+    if summary_df.empty:
+        return
+    plot_df = summary_df.copy()
+    fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    xpos = np.arange(len(plot_df))
+    ax.bar(xpos, plot_df["total_rows"], color="#ececec", edgecolor="#b0b0b0", width=0.7, label="Total")
+    ax.bar(xpos, plot_df["qc_passed_rows"], color="#2e8b57", width=0.48, label="QC-passed")
+    ax.bar(xpos, plot_df["qc_excluded_rows"], bottom=plot_df["qc_passed_rows"], color="#d95d39", width=0.48, label="Excluded")
+    for idx, row in plot_df.iterrows():
+        ax.text(idx, row["total_rows"] + max(plot_df["total_rows"].max() * 0.02, 0.2), f"{row['pass_percentage']:.1f}%", ha="center", va="bottom", fontsize=8.5)
+    ax.set_xticks(xpos)
+    ax.set_xticklabels([str(x).replace("_", "\n") for x in plot_df["group"]], fontsize=8.5)
+    ax.set_ylabel("Rows")
+    ax.set_title("Objective 2 RNA QC pass summary", fontweight="bold")
+    ax.legend(frameon=False, ncol=3, loc="upper center", bbox_to_anchor=(0.5, 1.04))
+    ax.grid(axis="y", linestyle=":", alpha=0.3)
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_rna_exclusion_summary(exclusion_df: pd.DataFrame, out_path: str | Path) -> None:
+    if exclusion_df.empty:
+        return
+    plot_df = exclusion_df[exclusion_df["group"] == "Overall"].copy()
+    fig, ax = plt.subplots(figsize=(8.5, 5.2), constrained_layout=True)
+    if plot_df.empty or plot_df["sample_count"].sum() == 0:
+        ax.text(0.5, 0.5, "No excluded RNA samples", ha="center", va="center", fontsize=11, fontweight="bold")
+        ax.axis("off")
+    else:
+        wedges, _ = ax.pie(plot_df["sample_count"], startangle=90, wedgeprops={"width": 0.42, "edgecolor": "white"})
+        labels = [f"{row.exclusion_reason} ({int(row.sample_count)})" for row in plot_df.itertuples()]
+        ax.legend(wedges, labels, frameon=False, loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=8)
+        ax.set_title("Objective 2 RNA exclusion reasons", fontweight="bold")
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_rna_qc(sample_qc: pd.DataFrame, out_dir: str | Path) -> None:
     if sample_qc.empty:
         return

@@ -344,6 +344,95 @@ def main():
     if not hap.empty: heat(hap.sort_values("P_Value"),"Haplotype_ID","Endpoint","P_Value",out/"20_Haplotype_Isoform_Heatmap.png","Top haplotype vs isoform associations")
     if not clin.empty: heat(clin.sort_values("P_Value"),"Clin_Label","Endpoint","P_Value",out/"20_Clinical_Isoform_Heatmap.png","Top isoform vs clinical associations")
     print("=== Objective 2 summary ==="); print(f"Workbook rows                    : {len(expr)}"); print(f"Matched RNA rows                : {int(merged['master_join_success'].sum())}"); print(f"Primary tumour samples analysed : {primary['snp_code'].nunique()}"); print(f"Unmatched/ambiguous RNA rows    : {len(audit)}"); print(f"Common-SNP backbone             : {back['Variant_ID'].nunique()} variants"); print(f"Haplotypes retained             : {hf['Haplotype_ID'].nunique() if not hf.empty else 0}"); print(f"SNP vs isoform tests            : {len(snp)}"); print(f"Haplotype vs isoform tests      : {len(hap)}"); print(f"Isoform vs clinical tests       : {len(clin)}"); print(f"Panel-gene report files         : {len(gene_reports)}"); print(f"BAM inventory rows              : {len(bami)}"); print(f"Results workbook                : {xlsx}"); print(f"Panel-gene reports              : {gene_report_dir}"); print(f"Figures                         : {out}")
+
+
+def _load_optional_tsv(path: Path, **kwargs) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path, **kwargs)
+
+
+def _apply_rna_qc_gate(merged: pd.DataFrame, root: Path, bedp: Path | None, manifest_path: Path | None):
+    from objective2_rna_qc import (
+        RNA_MANIFEST_DECISION_COLUMNS,
+        build_analysis_manifest,
+        summarise_analysis_manifest,
+        summarise_exclusion_reasons,
+    )
+    if manifest_path and manifest_path.exists():
+        manifest = pd.read_csv(manifest_path, sep="\t")
+        gate_cols = [c for c in RNA_QC_COLUMNS + RNA_MANIFEST_DECISION_COLUMNS if c in manifest.columns]
+        join_cols = ["snp_code"] + gate_cols
+        gate = manifest[join_cols].copy()
+        if "RNA_QC_Analysis_Ready" in gate.columns:
+            gate = gate.sort_values(["RNA_QC_Analysis_Ready"], ascending=[False]).drop_duplicates("snp_code")
+        else:
+            gate = gate.drop_duplicates("snp_code")
+        merged = merged.drop(columns=[c for c in gate_cols if c in merged.columns], errors="ignore").merge(gate, on="snp_code", how="left")
+        for col in RNA_QC_COLUMNS + RNA_MANIFEST_DECISION_COLUMNS:
+            if col not in merged.columns:
+                merged[col] = np.nan
+        merged["RNA_QC_Analysis_Ready"] = merged["RNA_QC_Analysis_Ready"].fillna(False).astype(bool)
+        qc_dir = manifest_path.parent
+        sampleqc = _load_optional_tsv(qc_dir / "RNA_Sample_QC.tsv", sep="\t")
+        targetcov = _load_optional_tsv(qc_dir / "RNA_Target_Coverage.tsv.gz", sep="\t", compression="gzip")
+        bami = _load_optional_tsv(qc_dir / "RNA_BAM_Inventory.tsv", sep="\t")
+        bams = _load_optional_tsv(qc_dir / "RNA_BAM_Validation_Summary.tsv", sep="\t")
+        paneldesign = _load_optional_tsv(qc_dir / "RNA_Panel_Design.tsv", sep="\t")
+        qc_summary = _load_optional_tsv(qc_dir / "RNA_QC_Summary.tsv", sep="\t")
+        exclusion_summary = _load_optional_tsv(qc_dir / "RNA_QC_Exclusion_Reasons.tsv", sep="\t")
+        return merged, manifest, qc_summary, exclusion_summary, bami, targetcov, bams, sampleqc, paneldesign
+
+    bami, targetcov, bams, sampleqc, paneldesign = bam_validation(root, merged, bedp, sx)
+    merged = attach_rna_qc(merged, sampleqc)
+    manifest = build_analysis_manifest(merged)
+    qc_summary = summarise_analysis_manifest(manifest)
+    exclusion_summary = summarise_exclusion_reasons(manifest)
+    return merged, manifest, qc_summary, exclusion_summary, bami, targetcov, bams, sampleqc, paneldesign
+
+
+def parse_args():
+    ap=argparse.ArgumentParser(description="Objective 2 workbook-first GSDMB isoform analysis")
+    ap.add_argument("--expr-xlsx",default=str(D["expr_xlsx"]))
+    ap.add_argument("--master",default=str(D["master"]))
+    ap.add_argument("--variant-workbook",default=str(D["variant_workbook"]))
+    ap.add_argument("--haplotype-input",default=str(D["haplotype_input"]))
+    ap.add_argument("--out-dir",default=str(D["out_dir"]))
+    ap.add_argument("--rna-bed",default=str(D.get("rna_bed","")))
+    ap.add_argument("--rna-qc-manifest",default=str(D.get("rna_qc_manifest","")))
+    ap.add_argument("--include-controls-context",action="store_true")
+    return ap.parse_args()
+
+
+def main():
+    a=parse_args(); exprp=Path(a.expr_xlsx); masterp=Path(a.master); varp=Path(a.variant_workbook); happ=Path(a.haplotype_input); out=Path(a.out_dir); bedp=Path(a.rna_bed) if a.rna_bed else None; manifestp=Path(a.rna_qc_manifest) if a.rna_qc_manifest else None; out.mkdir(parents=True,exist_ok=True)
+    for p,l in [(exprp,"Expression workbook"),(masterp,"Harmonised master"),(varp,"Variant workbook"),(happ,"Haplotype input")]:
+        if not p.exists(): raise FileNotFoundError(f"{l} not found: {p}")
+    expr=load_expr(exprp); master=load_master(masterp); merged,audit=match_expr(expr,master)
+    merged, rna_manifest, rna_qc_summary, rna_exclusion_summary, bami, targetcov, bams, sampleqc, paneldesign = _apply_rna_qc_gate(merged, Path(__file__).resolve().parent, bedp, manifestp)
+    primary=merged[merged["analysis_include_primary"] & merged["RNA_QC_Analysis_Ready"].fillna(False)].copy()
+    if primary.empty: raise ValueError("No primary tumour RNA samples passed the RNA QC gate.")
+    back=load_backbone(varp); gl,gw,hd,hf,hc=load_phased(happ,back); mergedg=merged.merge(gw,on="snp_code",how="left"); summ=summarise(mergedg); snp=assoc_genetic(primary,gl,"Variant_ID","SNP_vs_Isoform"); hap=assoc_genetic(primary,hc,"Haplotype_ID","Haplotype_vs_Isoform"); clin=assoc_clin(primary); br=bridge(snp,hap,clin); genes=panel_cols(expr); expl=exploratory(primary,gl,hc,snp,hap,genes)
+    mancols=[c for c in ["snp_code","NOMBRE DE LA MUESTRA","CODIGO JC","analysis_group","analysis_role","match_status","match_method","sample_id","case_id","sheet","cohort","tumour_normal","Tissue","TIENEN RNA","FALTA MUESTRA","observaciones EVA","isoform_total_scale","isoform_total_sum","isoform_total_flag","endpoint_missing_count","canon__age","canon__bmi"]+RNA_QC_COLUMNS+["RNA_QC_Analysis_Ready","RNA_QC_Final_Status","RNA_QC_Exclusion_Reason","RNA_QC_Eligibility_Note"] if c in merged.columns]; man=merged[mancols].sort_values(["analysis_group","snp_code","CODIGO JC"])
+    gene_report_dir=out/"panel_gene_reports"; gene_reports=export_panel_gene_reports(merged,primary,genes,gl,hc,gene_report_dir,CB,CE,MIN_C,FDR,mancols)
+    xlsx=out/"GSDMB_Objective2_Isoform_Results.xlsx"
+    with pd.ExcelWriter(xlsx,engine="openpyxl") as w:
+        mergedg.sort_values(["analysis_group","snp_code","CODIGO JC"]).to_excel(w,sheet_name="expression_cleaned",index=False); summ.to_excel(w,sheet_name="cohort_summary",index=False); audit.to_excel(w,sheet_name="unmatched_sample_audit",index=False); back.to_excel(w,sheet_name="snp_backbone",index=False); hf.to_excel(w,sheet_name="haplotype_frequencies",index=False); man.to_excel(w,sheet_name="sample_manifest",index=False)
+        (snp if not snp.empty else pd.DataFrame({"Note":["No SNP-vs-isoform tests met the minimum thresholds."]})).to_excel(w,sheet_name="snp_isoform_assoc",index=False)
+        (hap if not hap.empty else pd.DataFrame({"Note":["No haplotype-vs-isoform tests met the minimum thresholds."]})).to_excel(w,sheet_name="haplotype_isoform_assoc",index=False)
+        (clin if not clin.empty else pd.DataFrame({"Note":["No isoform-vs-clinical tests met the minimum thresholds."]})).to_excel(w,sheet_name="clinical_isoform_assoc",index=False)
+        br.to_excel(w,sheet_name="bridge_analysis",index=False); expl.to_excel(w,sheet_name="exploratory_panel_genes",index=False); gene_reports.to_excel(w,sheet_name="panel_gene_reports",index=False); paneldesign.to_excel(w,sheet_name="rna_panel_design",index=False)
+        (sampleqc if not sampleqc.empty else pd.DataFrame({"Note":["No sample-level RNA QC rows were available."]})).to_excel(w,sheet_name="rna_sample_qc",index=False)
+        (targetcov if not targetcov.empty else pd.DataFrame({"Note":["No target-level RNA coverage rows were available."]})).to_excel(w,sheet_name="rna_target_coverage",index=False)
+        bami.to_excel(w,sheet_name="bam_inventory",index=False); bams.to_excel(w,sheet_name="bam_validation_summary",index=False)
+        (rna_qc_summary if not rna_qc_summary.empty else pd.DataFrame({"Note":["No RNA QC summary rows were available."]})).to_excel(w,sheet_name="rna_qc_summary",index=False)
+        (rna_exclusion_summary if not rna_exclusion_summary.empty else pd.DataFrame({"Note":["No RNA QC exclusion rows were available."]})).to_excel(w,sheet_name="rna_qc_exclusions",index=False)
+    plot_dist(merged,out,bool(a.include_controls_context)); plot_rna_qc(sampleqc,out)
+    if not snp.empty: heat(snp.sort_values("P_Value"),"Variant_ID","Endpoint","P_Value",out/"20_SNP_Isoform_Heatmap.png","Top SNP vs isoform associations")
+    if not hap.empty: heat(hap.sort_values("P_Value"),"Haplotype_ID","Endpoint","P_Value",out/"20_Haplotype_Isoform_Heatmap.png","Top haplotype vs isoform associations")
+    if not clin.empty: heat(clin.sort_values("P_Value"),"Clin_Label","Endpoint","P_Value",out/"20_Clinical_Isoform_Heatmap.png","Top isoform vs clinical associations")
+    print("=== Objective 2 summary ==="); print(f"Workbook rows                    : {len(expr)}"); print(f"Matched RNA rows                : {int(merged['master_join_success'].sum())}"); print(f"RNA QC-passed rows             : {int(merged['RNA_QC_Analysis_Ready'].fillna(False).sum())}"); print(f"RNA QC-excluded rows           : {int((~merged['RNA_QC_Analysis_Ready'].fillna(False)).sum())}"); print(f"Primary tumour samples analysed : {primary['snp_code'].nunique()}"); print(f"Unmatched/ambiguous RNA rows    : {len(audit)}"); print(f"Common-SNP backbone             : {back['Variant_ID'].nunique()} variants"); print(f"Haplotypes retained             : {hf['Haplotype_ID'].nunique() if not hf.empty else 0}"); print(f"SNP vs isoform tests            : {len(snp)}"); print(f"Haplotype vs isoform tests      : {len(hap)}"); print(f"Isoform vs clinical tests       : {len(clin)}"); print(f"Panel-gene report files         : {len(gene_reports)}"); print(f"BAM inventory rows              : {len(bami)}"); print(f"RNA QC manifest                 : {manifestp if manifestp and manifestp.exists() else 'built inline'}"); print(f"Results workbook                : {xlsx}"); print(f"Panel-gene reports              : {gene_report_dir}"); print(f"Figures                         : {out}")
+
 if __name__=="__main__": main()
 
 

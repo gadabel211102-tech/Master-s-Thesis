@@ -28,6 +28,7 @@ Date: February 2026
 """
 
 import os
+from pathlib import Path
 import glob
 import pandas as pd
 import numpy as np
@@ -1294,6 +1295,627 @@ def run_complete_pipeline():
     print(f"\n  Total plots generated: 21")
     print("="*70 + "\n")
 
+
+
+
+# ==============================================================================
+# 7. THESIS-FACING REDESIGN HELPERS
+# ==============================================================================
+GROUP_FIX = {
+    "Breast Tumour": "Breast_Tumour",
+    "Breast Control": "Breast_Control",
+    "Endometrium Tumour": "Endometrium_Tumour",
+    "Endometrium Control": "Endometrium_Control",
+}
+DISPLAY_FIX = {
+    "Breast_Tumour": "Breast tumour",
+    "Breast_Control": "Breast control",
+    "Endometrium_Tumour": "Endometrium tumour",
+    "Endometrium_Control": "Endometrium control",
+    "Overall": "Overall",
+}
+FIXED_GROUP_ORDER = [
+    "Breast_Tumour",
+    "Breast_Control",
+    "Endometrium_Tumour",
+    "Endometrium_Control",
+]
+REDESIGN_COHORT_PALETTE = {
+    "Breast_Tumour": "#B55D6A",
+    "Breast_Control": "#E8C547",
+    "Endometrium_Tumour": "#3D7EA6",
+    "Endometrium_Control": "#7FB069",
+}
+FAILURE_REASON_COLORS = ["#0B5C8C", "#5A8F7B", "#D98E04", "#C8553D", "#7C7287", "#5F9EA0", "#9A6FB0"]
+
+
+def _norm_group(value: str) -> str:
+    return GROUP_FIX.get(str(value), str(value).replace(" ", "_"))
+
+
+def _display_group(value: str) -> str:
+    return DISPLAY_FIX.get(value, str(value).replace("_", " "))
+
+
+def _display_tick(value: str, counts=None) -> str:
+    label = _display_group(value).replace(" ", "\n")
+    if counts is not None and value in counts.index:
+        return f"{label}\n(n={int(counts.loc[value])})"
+    return label
+
+
+def _ensure_redesign_dirs():
+    main_dir = os.path.join(PATHS["plots_dir"], "main")
+    audit_dir = os.path.join(PATHS["plots_dir"], "audit")
+    tables_dir = os.path.join(PATHS["out_dir"], "tables")
+    for path in [main_dir, audit_dir, tables_dir, PATHS["samples_dir"]]:
+        os.makedirs(path, exist_ok=True)
+    return main_dir, audit_dir, tables_dir
+
+
+def _split_fail_reasons(value) -> list:
+    if pd.isna(value):
+        return []
+    return [item.strip() for item in str(value).split(";") if item.strip()]
+
+
+def _build_dna_qc_summary_tables(full_qc_df: pd.DataFrame, tables_dir: str):
+    df = full_qc_df.copy()
+    if df.empty:
+        empty = pd.DataFrame()
+        return empty, empty, empty
+    df["group_fixed"] = df["cohort"].map(_norm_group)
+    pass_rows = []
+    for group in FIXED_GROUP_ORDER:
+        sub = df[df["group_fixed"] == group].copy()
+        total = len(sub)
+        passed = int((sub["status"] == "Pass").sum())
+        failed = int((sub["status"] == "Fail").sum())
+        pass_rows.append({
+            "group": group,
+            "display_group": _display_group(group),
+            "total_samples": total,
+            "passed_samples": passed,
+            "failed_samples": failed,
+            "pass_percentage": (passed / total * 100.0) if total else 0.0,
+        })
+    pass_summary = pd.DataFrame(pass_rows)
+    overall = {
+        "group": "Overall",
+        "display_group": "Overall",
+        "total_samples": int(pass_summary["total_samples"].sum()),
+        "passed_samples": int(pass_summary["passed_samples"].sum()),
+        "failed_samples": int(pass_summary["failed_samples"].sum()),
+    }
+    overall["pass_percentage"] = (overall["passed_samples"] / overall["total_samples"] * 100.0) if overall["total_samples"] else 0.0
+    pass_summary = pd.concat([pass_summary, pd.DataFrame([overall])], ignore_index=True)
+
+    failed = df[df["status"] == "Fail"].copy()
+    failed["reason_list"] = failed["fail_reasons"].apply(_split_fail_reasons)
+    reason_rows = []
+    combo_rows = []
+    for group in FIXED_GROUP_ORDER + ["Overall"]:
+        sub = failed if group == "Overall" else failed[failed["group_fixed"] == group]
+        failed_total = len(sub)
+        exploded = sub[["sample_norm", "reason_list"]].explode("reason_list") if not sub.empty else pd.DataFrame(columns=["sample_norm", "reason_list"])
+        exploded["reason_list"] = exploded.get("reason_list", pd.Series(dtype=object)).fillna("").astype(str).str.strip()
+        exploded = exploded[exploded["reason_list"] != ""] if not exploded.empty else exploded
+        if exploded.empty:
+            reason_rows.append({
+                "group": group,
+                "failure_reason": "No failed samples" if failed_total == 0 else "Unspecified",
+                "failed_samples_with_reason": 0,
+                "failed_samples_total": failed_total,
+                "failed_sample_percentage": 0.0,
+            })
+        else:
+            counts = exploded.groupby("reason_list")["sample_norm"].nunique().sort_values(ascending=False)
+            for reason, count in counts.items():
+                reason_rows.append({
+                    "group": group,
+                    "failure_reason": reason,
+                    "failed_samples_with_reason": int(count),
+                    "failed_samples_total": failed_total,
+                    "failed_sample_percentage": (count / failed_total * 100.0) if failed_total else 0.0,
+                })
+        if sub.empty:
+            combo_rows.append({
+                "group": group,
+                "failure_combination": "No failed samples",
+                "sample_count": 0,
+                "failed_samples_total": 0,
+                "failed_sample_percentage": 0.0,
+            })
+        else:
+            combo_counts = (sub["fail_reasons"].fillna("")
+                            .map(lambda x: "; ".join(_split_fail_reasons(x)) if _split_fail_reasons(x) else "Unspecified")
+                            .value_counts())
+            for combo, count in combo_counts.items():
+                combo_rows.append({
+                    "group": group,
+                    "failure_combination": combo,
+                    "sample_count": int(count),
+                    "failed_samples_total": failed_total,
+                    "failed_sample_percentage": (count / failed_total * 100.0) if failed_total else 0.0,
+                })
+
+    reason_table = pd.DataFrame(reason_rows)
+    combo_table = pd.DataFrame(combo_rows).sort_values(["group", "sample_count", "failure_combination"], ascending=[True, False, True])
+    pass_summary.to_csv(os.path.join(tables_dir, "DNA_QC_Pass_Summary.tsv"), sep="\t", index=False)
+    reason_table.to_csv(os.path.join(tables_dir, "DNA_QC_Failure_Reason_Incidence.tsv"), sep="\t", index=False)
+    combo_table.to_csv(os.path.join(tables_dir, "DNA_QC_Failure_Combinations.tsv"), sep="\t", index=False)
+    return pass_summary, reason_table, combo_table
+
+
+def _export_sample_level_tables_redesign(cohort_dfs: dict):
+    meta = {"chr", "start", "end", "id", "annotation", "annot_id", "display_label"}
+    for cohort, df in cohort_dfs.items():
+        s_cols = [c for c in df.columns if c not in meta]
+        coords = df[["id", "chr", "start", "end"]].drop_duplicates().set_index("id")
+        cohort_dir = os.path.join(PATHS["samples_dir"], _norm_group(cohort))
+        os.makedirs(cohort_dir, exist_ok=True)
+        for s in s_cols:
+            out = coords.join(df.set_index("id")[s].rename("depth"))
+            out.to_csv(os.path.join(cohort_dir, f"{s}.coverage.tsv.gz"), sep="\t", compression="gzip")
+
+
+def _ordered_amplicons(cohort_dfs: dict) -> pd.DataFrame:
+    frames = []
+    for df in cohort_dfs.values():
+        tmp = df[["id", "chr", "start", "end", "display_label", "annot_id"]].drop_duplicates("id").copy()
+        frames.append(tmp)
+    ordered = pd.concat(frames, ignore_index=True).drop_duplicates("id")
+    def _chr_key(value):
+        text = str(value).replace("chr", "")
+        mapping = {"X": 23, "Y": 24, "M": 25, "MT": 25}
+        try:
+            return int(text)
+        except Exception:
+            return mapping.get(text.upper(), 999)
+    ordered["_chr_rank"] = ordered["chr"].map(_chr_key)
+    return ordered.sort_values(["_chr_rank", "start", "end", "display_label"])
+
+
+
+def _save_fig(fig, *paths):
+    for path in paths:
+        fig.savefig(path, dpi=300, bbox_inches="tight")
+
+
+def _plot_metric_overview_redesign(full_qc_df: pd.DataFrame, main_dir: str):
+    if full_qc_df.empty:
+        return
+    df = full_qc_df.copy()
+    df["group_fixed"] = df["cohort"].map(_norm_group)
+    metrics = [
+        ("total_reads", "Total reads", QC_LIMITS["total_reads"]),
+        ("mapped_pct", "Mapped (%)", QC_LIMITS["mapped_pct"]),
+        ("on_target_pct", "On-target (%)", QC_LIMITS["on_target_pct"]),
+        ("mean_cov", "Mean coverage (x)", QC_LIMITS["mean_cov"]),
+        ("uniformity_100x", "Uniformity >100x (%)", QC_LIMITS["uniformity_100x"]),
+    ]
+    counts = df.groupby("group_fixed")["sample_norm"].nunique().reindex(FIXED_GROUP_ORDER).fillna(0)
+    fig, axes = plt.subplots(2, 3, figsize=(16, 9), facecolor="white")
+    axes = axes.flatten()
+    legend_handles = None
+    legend_labels = None
+    for ax, (metric, title, threshold) in zip(axes, metrics):
+        sub = df[["group_fixed", "status", metric]].dropna().copy()
+        if sub.empty:
+            ax.set_visible(False)
+            continue
+        sns.boxplot(data=sub, x="group_fixed", y=metric, order=FIXED_GROUP_ORDER, color="#F2F2F2", fliersize=0, linewidth=1.0, ax=ax)
+        sns.stripplot(data=sub, x="group_fixed", y=metric, hue="status", order=FIXED_GROUP_ORDER, hue_order=["Pass", "Fail"], palette=STATUS_PALETTE, size=4.8, alpha=0.85, ax=ax)
+        ax.axhline(threshold, color="#C0392B", linestyle="--", linewidth=1.2)
+        ax.text(0.01, 0.97, f"Threshold: {threshold:g}", transform=ax.transAxes, ha="left", va="top", fontsize=8.5, color="#C0392B")
+        ax.set_title(title, fontweight="bold", fontsize=11)
+        ax.set_xlabel("")
+        ax.set_ylabel(title)
+        ax.set_xticks(np.arange(len(FIXED_GROUP_ORDER)))
+        ax.set_xticklabels([_display_tick(group, counts) for group in FIXED_GROUP_ORDER], fontsize=8.5)
+        ax.grid(axis="y", linestyle=":", alpha=0.3)
+        if legend_handles is None:
+            legend_handles, legend_labels = ax.get_legend_handles_labels()
+        lgd = ax.get_legend()
+        if lgd is not None:
+            lgd.remove()
+    retention_ax = axes[len(metrics)]
+    status_counts = (df.groupby(["group_fixed", "status"]).size().unstack(fill_value=0).reindex(FIXED_GROUP_ORDER).fillna(0))
+    bottoms = np.zeros(len(status_counts.index))
+    for status in ["Pass", "Fail"]:
+        vals = status_counts.get(status, pd.Series(0, index=status_counts.index)).to_numpy(dtype=float)
+        retention_ax.bar(np.arange(len(status_counts.index)), vals, bottom=bottoms, color=STATUS_PALETTE[status], width=0.62, label=status)
+        bottoms += vals
+    totals = status_counts.sum(axis=1)
+    for idx, total in enumerate(totals):
+        retention_ax.text(idx, total + max(float(totals.max()) * 0.02, 0.2), f"n={int(total)}", ha="center", va="bottom", fontsize=8.5)
+    retention_ax.set_title("QC pass/fail split", fontweight="bold", fontsize=11)
+    retention_ax.set_xticks(np.arange(len(status_counts.index)))
+    retention_ax.set_xticklabels([_display_group(g).replace(" ", "\n") for g in status_counts.index], fontsize=8.5)
+    retention_ax.set_ylabel("Samples")
+    retention_ax.grid(axis="y", linestyle=":", alpha=0.3)
+    if legend_handles:
+        fig.legend(legend_handles[:2], legend_labels[:2], loc="upper center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 1.01))
+    fig.suptitle("DNA QC metric overview", fontsize=14, fontweight="bold", y=1.03)
+    plt.tight_layout()
+    _save_fig(fig, os.path.join(main_dir, "01_QC_Metric_Overview.png"))
+    plt.close(fig)
+
+
+def _plot_pca_redesign(full_qc_df: pd.DataFrame, out_path: str, pass_only: bool = False):
+    if full_qc_df.empty:
+        return
+    df = full_qc_df.copy()
+    df["group_fixed"] = df["cohort"].map(_norm_group)
+    if pass_only:
+        df = df[df["status"] == "Pass"].copy()
+    feats = ["mean_cov", "on_target_pct", "total_reads", "mapped_pct", "uniformity_100x"]
+    df = df.dropna(subset=feats).copy()
+    if len(df) < 4:
+        return
+    scaler = StandardScaler()
+    X = scaler.fit_transform(df[feats])
+    pca = PCA(n_components=2)
+    pcs = pca.fit_transform(X)
+    df["PC1"] = pcs[:, 0]
+    df["PC2"] = pcs[:, 1]
+    dist = np.sqrt(df["PC1"] ** 2 + df["PC2"] ** 2)
+    annotate_idx = set(df[df["status"] == "Fail"].index.tolist())
+    annotate_idx.update(df.loc[dist.nlargest(min(6, len(df))).index].index.tolist())
+    fig, ax = plt.subplots(figsize=(9.5, 7), facecolor="white")
+    for status, marker, size in [("Pass", "o", 58), ("Fail", "X", 90)]:
+        sub = df[df["status"] == status].copy()
+        if sub.empty:
+            continue
+        sns.scatterplot(data=sub, x="PC1", y="PC2", hue="group_fixed", hue_order=FIXED_GROUP_ORDER, palette=REDESIGN_COHORT_PALETTE, marker=marker, s=size, edgecolor="white", linewidth=0.6, ax=ax, legend=(status == "Pass"))
+    for idx in annotate_idx:
+        row = df.loc[idx]
+        ax.text(row["PC1"], row["PC2"], str(row["sample"])[:18], fontsize=7.2, ha="left", va="bottom")
+    ax.axhline(0, color="#DDDDDD", linewidth=0.8)
+    ax.axvline(0, color="#DDDDDD", linewidth=0.8)
+    ax.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0] * 100:.1f}% variance)")
+    ax.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1] * 100:.1f}% variance)")
+    ax.set_title("QC PCA: passing samples only" if pass_only else "QC PCA: all samples", fontweight="bold")
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        n = min(len(FIXED_GROUP_ORDER), len(labels))
+        ax.legend(handles[:n], [_display_group(lbl) for lbl in labels[:n]], title="Group", bbox_to_anchor=(1.02, 1), loc="upper left")
+    ax.grid(alpha=0.25, linestyle=":")
+    plt.tight_layout()
+    _save_fig(fig, out_path)
+    plt.close(fig)
+
+
+def _plot_amplicon_risk_heatmap_redesign(cohort_dfs: dict, main_dir: str):
+    if not cohort_dfs:
+        return
+    ordered = _ordered_amplicons(cohort_dfs)
+    meta = {"chr", "start", "end", "id", "annotation", "annot_id", "display_label"}
+    matrix = pd.DataFrame(index=ordered["id"], columns=FIXED_GROUP_ORDER, dtype=float)
+    label_map = ordered.set_index("id")["display_label"].to_dict()
+    for cohort, df in cohort_dfs.items():
+        key = _norm_group(cohort)
+        if key not in FIXED_GROUP_ORDER:
+            continue
+        s_cols = [c for c in df.columns if c not in meta]
+        depth = df.set_index("id")[s_cols].apply(pd.to_numeric, errors="coerce")
+        matrix[key] = ((depth < QC_LIMITS["worst_amplicon_floor"]).sum(axis=1) / max(len(s_cols), 1) * 100.0).reindex(matrix.index)
+    plot_df = matrix.fillna(0)
+    fig_h = max(7, min(22, 0.18 * len(plot_df)))
+    fig, ax = plt.subplots(figsize=(8.5, fig_h), facecolor="white")
+    sns.heatmap(plot_df, cmap=sns.color_palette(["#F4F4F4", "#F2C14E", "#D95D39", "#7F0000"], as_cmap=True), vmin=0, vmax=max(5.0, float(np.nanmax(plot_df.values))), linewidths=0.15, linecolor="#FFFFFF", cbar_kws={"label": "% of samples below 50x"}, ax=ax)
+    step = max(1, len(plot_df) // 45)
+    ax.set_yticks(np.arange(0, len(plot_df), step) + 0.5)
+    ax.set_yticklabels([label_map.get(plot_df.index[i], plot_df.index[i]) for i in range(0, len(plot_df), step)], fontsize=7)
+    ax.set_xticklabels([_display_group(g).replace(" ", "\n") for g in plot_df.columns], rotation=0)
+    ax.set_title("Amplicon risk heatmap", fontweight="bold")
+    ax.set_xlabel("")
+    ax.set_ylabel("Amplicon")
+    plt.tight_layout()
+    _save_fig(fig, os.path.join(main_dir, "03_Amplicon_Risk_Heatmap.png"))
+    plt.close(fig)
+
+
+def _plot_genomic_landscape_redesign(cohort_dfs: dict, main_dir: str):
+    if not cohort_dfs:
+        return
+    ordered = _ordered_amplicons(cohort_dfs)
+    ordered_ids = ordered["id"].tolist()
+    xvals = np.arange(len(ordered_ids))
+    meta = {"chr", "start", "end", "id", "annotation", "annot_id", "display_label"}
+    fig, ax = plt.subplots(figsize=(15, 6.5), facecolor="white")
+    medians = []
+    for cohort, df in cohort_dfs.items():
+        group_key = _norm_group(cohort)
+        if group_key not in FIXED_GROUP_ORDER:
+            continue
+        s_cols = [c for c in df.columns if c not in meta]
+        depth = df.set_index("id")[s_cols].apply(pd.to_numeric, errors="coerce").reindex(ordered_ids)
+        median = depth.median(axis=1)
+        q25 = depth.quantile(0.25, axis=1)
+        q75 = depth.quantile(0.75, axis=1)
+        medians.append(median.rename(group_key))
+        ax.plot(xvals, median.values, color=REDESIGN_COHORT_PALETTE[group_key], linewidth=2.0, label=_display_group(group_key))
+        ax.fill_between(xvals, q25.values, q75.values, color=REDESIGN_COHORT_PALETTE[group_key], alpha=0.18)
+    ax.axhline(QC_LIMITS["mean_cov"], color="#D98E04", linestyle=":", linewidth=1.4, label=f"Mean target {QC_LIMITS['mean_cov']:.0f}x")
+    ax.axhline(QC_LIMITS["worst_amplicon_floor"], color="#C0392B", linestyle="--", linewidth=1.4, label=f"Minimum floor {QC_LIMITS['worst_amplicon_floor']:.0f}x")
+    ax.set_yscale("log")
+    ax.set_ylabel("Coverage depth (x)")
+    ax.set_xlabel("Genomic order across the panel")
+    ax.set_title("Genomic coverage landscape", fontweight="bold")
+    step = max(1, len(ordered_ids) // 25)
+    tick_idx = np.arange(0, len(ordered_ids), step)
+    ax.set_xticks(tick_idx)
+    ax.set_xticklabels(ordered.iloc[tick_idx]["display_label"].astype(str).tolist(), rotation=45, ha="right", fontsize=7.5)
+    if medians:
+        combined = pd.concat(medians, axis=1)
+        label_map = ordered.set_index("id")["display_label"].to_dict()
+        weakest = combined.median(axis=1).sort_values().head(min(6, len(combined)))
+        for amp_id in weakest.index:
+            idx = ordered_ids.index(amp_id)
+            value = weakest.loc[amp_id]
+            ax.text(idx, max(value, 1.0) * 1.15, label_map.get(amp_id, amp_id), fontsize=7, rotation=35, ha="left", va="bottom")
+    ax.legend(frameon=False, bbox_to_anchor=(1.02, 1), loc="upper left")
+    ax.grid(axis="y", linestyle=":", alpha=0.3)
+    plt.tight_layout()
+    _save_fig(fig, os.path.join(main_dir, "04_Genomic_Coverage_Landscape.png"))
+    plt.close(fig)
+
+
+
+def _plot_pass_summary_redesign(pass_summary: pd.DataFrame, main_dir: str):
+    if pass_summary.empty:
+        return
+    plot_df = pass_summary.copy()
+    fig, ax = plt.subplots(figsize=(10, 5.8), facecolor="white")
+    xpos = np.arange(len(plot_df))
+    ax.bar(xpos, plot_df["total_samples"], color="#E8E8E8", edgecolor="#B0B0B0", width=0.68, label="Total")
+    ax.bar(xpos, plot_df["passed_samples"], color=STATUS_PALETTE["Pass"], width=0.46, label="Passed")
+    ax.bar(xpos, plot_df["failed_samples"], bottom=plot_df["passed_samples"], color=STATUS_PALETTE["Fail"], width=0.46, label="Failed")
+    for idx, row in plot_df.iterrows():
+        ax.text(idx, row["total_samples"] + max(float(plot_df["total_samples"].max()) * 0.02, 0.2), f"{row['pass_percentage']:.1f}% pass", ha="center", va="bottom", fontsize=8.5)
+        if row["passed_samples"] > 0:
+            ax.text(idx, row["passed_samples"] / 2.0, f"{int(row['passed_samples'])}", ha="center", va="center", fontsize=8.5, color="white", fontweight="bold")
+    ax.set_xticks(xpos)
+    ax.set_xticklabels([row["display_group"].replace(" ", "\n") for _, row in plot_df.iterrows()], fontsize=8.5)
+    ax.set_ylabel("Samples")
+    ax.set_title("DNA QC pass summary", fontweight="bold")
+    ax.legend(frameon=False, ncol=3, loc="upper center", bbox_to_anchor=(0.5, 1.03))
+    ax.grid(axis="y", linestyle=":", alpha=0.3)
+    plt.tight_layout()
+    _save_fig(fig, os.path.join(main_dir, "05_DNA_QC_Pass_Summary.png"), os.path.join(main_dir, "DNA_QC_Pass_Summary.png"))
+    plt.close(fig)
+
+
+def _donut_plot(ax, sub: pd.DataFrame, title: str):
+    if sub.empty or sub["failed_samples_with_reason"].sum() == 0:
+        ax.text(0.5, 0.5, "No failed samples", ha="center", va="center", fontsize=10, fontweight="bold")
+        ax.set_title(title, fontsize=10.5, fontweight="bold")
+        ax.axis("off")
+        return
+    sub = sub.sort_values("failed_samples_with_reason", ascending=False)
+    wedges, _ = ax.pie(sub["failed_samples_with_reason"], startangle=90, colors=FAILURE_REASON_COLORS[:len(sub)], wedgeprops={"width": 0.42, "edgecolor": "white"})
+    labels = [f"{r.failure_reason} ({int(r.failed_samples_with_reason)})" for r in sub.itertuples()]
+    ax.legend(wedges, labels, fontsize=7.3, loc="center left", bbox_to_anchor=(1.0, 0.5), frameon=False)
+    ax.set_title(title, fontsize=10.5, fontweight="bold")
+
+
+def _plot_failure_reason_redesign(reason_table: pd.DataFrame, main_dir: str):
+    if reason_table.empty:
+        return
+    global_df = reason_table[(reason_table["group"] == "Overall") & (reason_table["failed_samples_with_reason"] > 0)].copy()
+    cohort_sub = {group: reason_table[(reason_table["group"] == group) & (reason_table["failed_samples_with_reason"] > 0)].copy() for group in FIXED_GROUP_ORDER}
+
+    fig1, ax1 = plt.subplots(figsize=(9, 5.5), facecolor="white")
+    _donut_plot(ax1, global_df, "Global DNA QC failure reasons")
+    plt.tight_layout()
+    _save_fig(fig1, os.path.join(main_dir, "DNA_QC_Failure_Reasons_Global.png"))
+    plt.close(fig1)
+
+    fig2, axes2 = plt.subplots(2, 2, figsize=(12, 9), facecolor="white")
+    for ax, group in zip(axes2.flatten(), FIXED_GROUP_ORDER):
+        _donut_plot(ax, cohort_sub[group], _display_group(group))
+    plt.tight_layout()
+    _save_fig(fig2, os.path.join(main_dir, "DNA_QC_Failure_Reasons_ByCohort.png"))
+    plt.close(fig2)
+
+    fig3 = plt.figure(figsize=(15, 9), facecolor="white")
+    gs = fig3.add_gridspec(2, 3, width_ratios=[1.25, 1, 1])
+    ax_global = fig3.add_subplot(gs[:, 0])
+    _donut_plot(ax_global, global_df, "Global failure-reason incidence")
+    for idx, group in enumerate(FIXED_GROUP_ORDER):
+        row = idx // 2
+        col = 1 + (idx % 2)
+        ax = fig3.add_subplot(gs[row, col])
+        _donut_plot(ax, cohort_sub[group], _display_group(group))
+    fig3.suptitle("DNA QC failure reasons", fontsize=14, fontweight="bold", y=1.01)
+    plt.tight_layout()
+    _save_fig(fig3, os.path.join(main_dir, "06_DNA_QC_Failure_Reasons.png"))
+    plt.close(fig3)
+
+
+def _plot_audit_heatmaps_redesign(cohort_dfs: dict, full_qc_df: pd.DataFrame, audit_dir: str):
+    meta = {"chr", "start", "end", "id", "annotation", "annot_id", "display_label"}
+    sample_status = full_qc_df.set_index("sample_norm")["status"].to_dict() if not full_qc_df.empty else {}
+    for cohort, df in cohort_dfs.items():
+        s_cols = [c for c in df.columns if c not in meta]
+        if not s_cols:
+            continue
+        depth = df.set_index("display_label")[s_cols].apply(pd.to_numeric, errors="coerce")
+        sample_order = sorted(s_cols, key=lambda s: (sample_status.get(normalise_sample(s), "Pass") != "Fail", float(depth[s].median(skipna=True)) if s in depth else 0.0), reverse=False)
+        depth = depth[sample_order]
+        plotmat = np.log10(depth.fillna(0) + 1)
+        fig_height = max(7, min(18, 0.18 * len(plotmat)))
+        fig, ax = plt.subplots(figsize=(14, fig_height), facecolor="white")
+        cmap = sns.color_palette("magma", as_cmap=True)
+        cmap.set_bad(color="#DADADA")
+        sns.heatmap(plotmat, cmap=cmap, mask=depth.isna(), vmin=0, vmax=4.2, cbar_kws={"label": "log10(depth + 1)"}, ax=ax)
+        ax.set_xticks(np.arange(len(sample_order)) + 0.5)
+        ax.set_xticklabels([f"{s}\n{'FAIL' if sample_status.get(normalise_sample(s), 'Pass') == 'Fail' else ''}" for s in sample_order], rotation=90, fontsize=6)
+        step = max(1, len(plotmat) // 40)
+        ax.set_yticks(np.arange(0, len(plotmat), step) + 0.5)
+        ax.set_yticklabels(plotmat.index[::step], fontsize=7)
+        ax.set_title(f"Sample-level coverage heatmap: {_display_group(_norm_group(cohort))}", fontweight="bold")
+        ax.set_xlabel("Samples")
+        ax.set_ylabel("Amplicon")
+        plt.tight_layout()
+        _save_fig(fig, os.path.join(audit_dir, f"08_Heatmap_{_norm_group(cohort)}.png"))
+        plt.close(fig)
+
+
+def _plot_gap_and_audit_panels_redesign(cohort_dfs: dict, full_qc_df: pd.DataFrame, audit_dir: str):
+    meta = {"chr", "start", "end", "id", "annotation", "annot_id", "display_label"}
+    rows = []
+    worst_rows = []
+    for cohort, df in cohort_dfs.items():
+        group_key = _norm_group(cohort)
+        s_cols = [c for c in df.columns if c not in meta]
+        for sample in s_cols:
+            vals = pd.to_numeric(df[sample], errors="coerce")
+            rows.append({"group_fixed": group_key, "sample": sample, "gap_count": int(((vals < QC_LIMITS['worst_amplicon_floor']) & vals.notna()).sum())})
+            worst_rows.append({"group_fixed": group_key, "sample": sample, "min_depth": vals.min(skipna=True)})
+    gap_df = pd.DataFrame(rows)
+    worst_df = pd.DataFrame(worst_rows).dropna()
+    if not gap_df.empty:
+        fig, ax = plt.subplots(figsize=(10, 6), facecolor="white")
+        sns.boxplot(data=gap_df, x="group_fixed", y="gap_count", order=FIXED_GROUP_ORDER, palette=REDESIGN_COHORT_PALETTE, fliersize=0, ax=ax)
+        sns.stripplot(data=gap_df, x="group_fixed", y="gap_count", order=FIXED_GROUP_ORDER, palette=REDESIGN_COHORT_PALETTE, size=4, alpha=0.6, ax=ax)
+        ax.set_xticks(np.arange(len(FIXED_GROUP_ORDER)))
+        ax.set_xticklabels([_display_group(g).replace(" ", "\n") for g in FIXED_GROUP_ORDER], fontsize=8.5)
+        ax.set_title("Coverage gaps per sample", fontweight="bold")
+        ax.set_ylabel("Amplicons below 50x")
+        ax.set_xlabel("")
+        ax.grid(axis="y", linestyle=":", alpha=0.3)
+        plt.tight_layout()
+        _save_fig(fig, os.path.join(audit_dir, "09_Coverage_Gaps.png"))
+        plt.close(fig)
+    if not full_qc_df.empty:
+        df = full_qc_df.copy()
+        df["group_fixed"] = df["cohort"].map(_norm_group)
+        fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), facecolor="white")
+        for ax, metric, title, threshold in [
+            (axes[0], "mapped_pct", "Mapping efficiency (%)", QC_LIMITS["mapped_pct"]),
+            (axes[1], "on_target_pct", "On-target specificity (%)", QC_LIMITS["on_target_pct"]),
+        ]:
+            sub = df[["group_fixed", "status", metric]].dropna().copy()
+            sns.boxplot(data=sub, x="group_fixed", y=metric, order=FIXED_GROUP_ORDER, color="#F5F5F5", fliersize=0, ax=ax)
+            sns.stripplot(data=sub, x="group_fixed", y=metric, order=FIXED_GROUP_ORDER, hue="status", hue_order=["Pass", "Fail"], palette=STATUS_PALETTE, size=4.6, alpha=0.82, ax=ax)
+            ax.axhline(threshold, color="#C0392B", linestyle="--", linewidth=1.2)
+            ax.set_title(title, fontweight="bold")
+            ax.set_xticks(np.arange(len(FIXED_GROUP_ORDER)))
+            ax.set_xticklabels([_display_group(g).replace(" ", "\n") for g in FIXED_GROUP_ORDER], fontsize=8.5)
+            ax.set_xlabel("")
+            ax.grid(axis="y", linestyle=":", alpha=0.3)
+            lgd = ax.get_legend()
+            if lgd is not None:
+                lgd.remove()
+        handles = [plt.Line2D([0], [0], marker="o", linestyle="", color=STATUS_PALETTE[s], label=s) for s in ["Pass", "Fail"]]
+        fig.legend(handles, ["Pass", "Fail"], loc="upper center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 1.02))
+        plt.tight_layout()
+        _save_fig(fig, os.path.join(audit_dir, "10_Mapping_OnTarget_Audit.png"))
+        plt.close(fig)
+    if not worst_df.empty:
+        fig, ax = plt.subplots(figsize=(10, 6), facecolor="white")
+        sns.boxplot(data=worst_df, x="group_fixed", y="min_depth", order=FIXED_GROUP_ORDER, color="#F5F5F5", fliersize=0, ax=ax)
+        sns.stripplot(data=worst_df, x="group_fixed", y="min_depth", order=FIXED_GROUP_ORDER, palette=REDESIGN_COHORT_PALETTE, size=4.5, alpha=0.75, ax=ax)
+        ax.axhline(QC_LIMITS["worst_amplicon_floor"], color="#C0392B", linestyle="--", linewidth=1.2)
+        ax.set_yscale("symlog", linthresh=10)
+        ax.set_title("Worst amplicon depth per sample", fontweight="bold")
+        ax.set_ylabel("Minimum amplicon depth (x)")
+        ax.set_xlabel("")
+        ax.set_xticks(np.arange(len(FIXED_GROUP_ORDER)))
+        ax.set_xticklabels([_display_group(g).replace(" ", "\n") for g in FIXED_GROUP_ORDER], fontsize=8.5)
+        ax.grid(axis="y", linestyle=":", alpha=0.3)
+        plt.tight_layout()
+        _save_fig(fig, os.path.join(audit_dir, "11_Worst_Amplicon_Per_Sample.png"))
+        plt.close(fig)
+
+
+def _plot_systemic_failure_redesign(cohort_dfs: dict, audit_dir: str, label_col: str, out_name: str, title: str):
+    meta = {"chr", "start", "end", "id", "annotation", "annot_id", "display_label"}
+    fig, axes = plt.subplots(len(FIXED_GROUP_ORDER), 1, figsize=(13, 3.2 * len(FIXED_GROUP_ORDER)), facecolor="white")
+    if len(FIXED_GROUP_ORDER) == 1:
+        axes = [axes]
+    for ax, group in zip(axes, FIXED_GROUP_ORDER):
+        cohort_name = next((c for c in cohort_dfs if _norm_group(c) == group), None)
+        df = cohort_dfs.get(cohort_name) if cohort_name is not None else None
+        if df is None or df.empty:
+            ax.axis("off")
+            continue
+        s_cols = [c for c in df.columns if c not in meta]
+        fail_mask = df[s_cols].apply(pd.to_numeric, errors="coerce") < QC_LIMITS["worst_amplicon_floor"]
+        tmp = pd.DataFrame({label_col: df[label_col].fillna(df["display_label"]), "fail_count": fail_mask.sum(axis=1).values})
+        agg = tmp.groupby(label_col, as_index=False)["fail_count"].sum().sort_values("fail_count", ascending=False)
+        agg = agg[agg["fail_count"] > 0].head(15)
+        if agg.empty:
+            ax.text(0.5, 0.5, "No recurrent failures", ha="center", va="center")
+            ax.axis("off")
+            continue
+        plot_df = agg.iloc[::-1]
+        ax.barh(plot_df[label_col], plot_df["fail_count"], color="#C8553D")
+        ax.set_title(_display_group(group), fontweight="bold", fontsize=10.5)
+        ax.grid(axis="x", linestyle=":", alpha=0.3)
+    axes[-1].set_xlabel("Failed samples below 50x")
+    fig.suptitle(title, fontsize=13, fontweight="bold", y=1.01)
+    plt.tight_layout()
+    _save_fig(fig, os.path.join(audit_dir, out_name))
+    plt.close(fig)
+
+
+def _plot_global_depth_hist_redesign(all_cov: pd.DataFrame, audit_dir: str):
+    if all_cov.empty:
+        return
+    values = pd.to_numeric(pd.Series(all_cov.to_numpy().ravel()), errors="coerce").dropna()
+    if values.empty:
+        return
+    upper = values.quantile(0.995)
+    clipped = values.clip(upper=upper)
+    fig, ax = plt.subplots(figsize=(10, 5.5), facecolor="white")
+    sns.histplot(clipped, bins=60, color="#3D7EA6", ax=ax)
+    ax.axvline(QC_LIMITS["mean_cov"], color="#D98E04", linestyle=":", linewidth=1.4)
+    ax.axvline(QC_LIMITS["worst_amplicon_floor"], color="#C0392B", linestyle="--", linewidth=1.4)
+    ax.set_title("Global panel depth distribution", fontweight="bold")
+    ax.set_xlabel(f"Coverage depth (x), clipped at 99.5th percentile = {upper:.0f}x")
+    ax.set_ylabel("Amplicon observations")
+    ax.grid(axis="y", linestyle=":", alpha=0.3)
+    plt.tight_layout()
+    _save_fig(fig, os.path.join(audit_dir, "14_Global_Depth_Histogram.png"))
+    plt.close(fig)
+
+
+def run_complete_pipeline():
+    print("\n" + "=" * 70)
+    print("QC VISUALISATION PIPELINE")
+    print("=" * 70 + "\n")
+    main_dir, audit_dir, tables_dir = _ensure_redesign_dirs()
+    legacy_root = list(Path(PATHS["plots_dir"]).glob("[0-9][0-9]_*.png")) if False else None
+    for legacy in Path(PATHS["plots_dir"]).glob("[0-9][0-9]_*.png"):
+        legacy.unlink(missing_ok=True)
+    full_qc_df, cohort_dfs, annotation_df, all_cov, failing_samples = build_pipeline()
+    if full_qc_df.empty and not cohort_dfs:
+        print("[WARN] No QC inputs found.")
+        return
+    for cohort, df in list(cohort_dfs.items()):
+        if "display_label" not in df.columns:
+            cohort_dfs[cohort] = df.copy()
+            cohort_dfs[cohort]["display_label"] = cohort_dfs[cohort].apply(create_display_label, axis=1)
+    _export_sample_level_tables_redesign(cohort_dfs)
+    pass_summary, reason_table, combo_table = _build_dna_qc_summary_tables(full_qc_df, tables_dir)
+    _plot_metric_overview_redesign(full_qc_df, main_dir)
+    _plot_pca_redesign(full_qc_df, os.path.join(main_dir, "02_QC_PCA_AllSamples.png"), pass_only=False)
+    _plot_amplicon_risk_heatmap_redesign(cohort_dfs, main_dir)
+    _plot_genomic_landscape_redesign(cohort_dfs, main_dir)
+    _plot_pass_summary_redesign(pass_summary, main_dir)
+    _plot_failure_reason_redesign(reason_table, main_dir)
+    _plot_audit_heatmaps_redesign(cohort_dfs, full_qc_df, audit_dir)
+    _plot_pca_redesign(full_qc_df, os.path.join(audit_dir, "07_QC_PCA_PassOnly.png"), pass_only=True)
+    _plot_gap_and_audit_panels_redesign(cohort_dfs, full_qc_df, audit_dir)
+    _plot_systemic_failure_redesign(cohort_dfs, audit_dir, "display_label", "12_Systemic_Failures_By_Annotation.png", "Systemic low-coverage amplicons by annotation")
+    _plot_systemic_failure_redesign(cohort_dfs, audit_dir, "annot_id", "13_Systemic_Failures_By_Amplicon_ID.png", "Systemic low-coverage amplicons by raw amplicon ID")
+    _plot_global_depth_hist_redesign(all_cov, audit_dir)
+    print("Main figures   :", main_dir)
+    print("Audit figures  :", audit_dir)
+    print("Summary tables :", tables_dir)
 
 if __name__ == "__main__":
     run_complete_pipeline()

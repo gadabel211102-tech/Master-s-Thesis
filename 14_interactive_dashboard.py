@@ -22,7 +22,7 @@ import plotly.express as px
 import os
 import warnings
 
-from figure_style import COMPARATIVE_TAG, DASHBOARD_THEME, DESCRIPTIVE_TAG, IMPACT_COLORS, QUALITATIVE_COLORBLIND_SEQUENCE, SEQUENTIAL_COLORBLIND_SCALE, arm_color, cohort_color
+from figure_style import COMPARATIVE_TAG, DASHBOARD_THEME, DESCRIPTIVE_TAG, IMPACT_COLORS, QUALITATIVE_COLORBLIND_SEQUENCE, SEQUENTIAL_COLORBLIND_SCALE, arm_color, cohort_color, tagged_title
 from pipeline_utils import combine_gnomad_nfe, ensure_directory, find_col, get_paths, standardize_cohort_labels, standardize_tissue_labels
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_required_columns
 warnings.filterwarnings('ignore')
@@ -32,11 +32,6 @@ PATHS = get_paths()
 OUTPUT_DIR = ensure_directory(PATHS["interactive_dashboard_dir"])
 INPUT_FILE = str(PATHS["annotated_report"])
 OUTPUT_HTML = str(OUTPUT_DIR / "GSDMB_Interactive_Variant_Dashboard.html")
-
-
-def tagged_title(title, tag):
-    """Append a short interpretive tag to a dashboard plot title."""
-    return f"{title} [{tag}]"
 
 
 def cohort_color_map(values):
