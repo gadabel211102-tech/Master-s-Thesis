@@ -9,7 +9,7 @@ The main launcher is now profile-aware.
 ### Core rerun
 
 ```bash
-cd /home/gadeaalonsoj/tfm
+cd /path/to/tfm
 ./run_full_pipeline.sh
 ```
 

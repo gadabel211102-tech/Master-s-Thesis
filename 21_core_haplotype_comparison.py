@@ -1,4 +1,5 @@
 import argparse
+import os
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -7,10 +8,54 @@ from collections import Counter
 from pathlib import Path
 import textwrap
 
-ROOT = Path('/home/gadeaalonsoj/tfm')
+ROOT = Path(__file__).resolve().parent
+DOCS_DIR = ROOT / "docs"
+
+
+def _iter_docs_search_dirs() -> list[Path]:
+    seen: set[str] = set()
+    candidates: list[Path] = []
+
+    env_docs = os.environ.get("TFM_DOCS_DIR", "").strip()
+    if env_docs:
+        env_path = Path(env_docs)
+        candidates.extend([env_path / "clinical variables-snps", env_path])
+
+    candidates.extend([DOCS_DIR / "source_workbooks", DOCS_DIR / "derived_workbooks", DOCS_DIR])
+
+    users_root = Path("/mnt/c/Users")
+    if users_root.exists():
+        for user_dir in sorted(users_root.iterdir()):
+            if not user_dir.is_dir():
+                continue
+            downloads = user_dir / "Downloads"
+            if downloads.exists():
+                candidates.append(downloads)
+            for onedrive_dir in sorted(user_dir.glob("OneDrive*")):
+                docs_dir = onedrive_dir / "Documents" / "TFM" / "Docs"
+                candidates.extend([docs_dir / "clinical variables-snps", docs_dir])
+
+    existing: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen or not candidate.exists():
+            continue
+        seen.add(key)
+        existing.append(candidate)
+    return existing
+
+
+def _discover_doc_file(filename: str, fallback_dir: Path) -> Path:
+    for search_dir in _iter_docs_search_dirs():
+        candidate = search_dir / filename
+        if candidate.exists():
+            return candidate
+    return fallback_dir / filename
+
+
 DEFAULT_PHASED_PATH = ROOT / 'analysis_results/15_haplotype_phasing/phased_genotypes.tsv'
 DEFAULT_META_PATH = ROOT / 'analysis_results/15_haplotype_phasing/sample_metadata.tsv'
-DEFAULT_COLLAB_PATH = Path('/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/clinical variables-snps/SNPS PROYECTO MAMA_ENDOMETRIO(8).xlsx')
+DEFAULT_COLLAB_PATH = _discover_doc_file('SNPS PROYECTO MAMA_ENDOMETRIO(8).xlsx', DOCS_DIR / 'source_workbooks')
 DEFAULT_OUTDIR = ROOT / 'analysis_results/19_1000g_haplotype_comparison/core_haplotype_comparison'
 
 SNP_SETS = {

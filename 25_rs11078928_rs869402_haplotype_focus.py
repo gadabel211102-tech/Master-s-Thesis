@@ -29,7 +29,7 @@ from openpyxl.utils import get_column_letter
 from scipy.stats import fisher_exact
 
 
-BASE = Path("/home/gadeaalonsoj/tfm")
+BASE = Path(__file__).resolve().parent
 RESULTS = BASE / "analysis_results"
 HAPLO_STATS_XLSX = RESULTS / "15_haplotype_statistics" / "GSDMB_Haplotype_Results.xlsx"
 PHASED_TSV = RESULTS / "15_haplotype_phasing" / "phased_genotypes.tsv"

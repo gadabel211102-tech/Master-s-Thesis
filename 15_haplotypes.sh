@@ -65,11 +65,11 @@ set -euo pipefail
 # Edit these paths if your directory structure differs
 # =============================================================================
 
-BASE="/home/gadeaalonsoj/tfm"
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS="${BASE}/analysis_results"
 HAPLO_DIR="${RESULTS}/15_haplotype_phasing"
 BEAGLE="${BASE}/beagle.jar"
-THREADS=4
+THREADS="${THREADS:-4}"
 
 # 1000G Phase 3 reference panel (chr17:39800000-39950000 subset)
 # See header comments for how to prepare this file

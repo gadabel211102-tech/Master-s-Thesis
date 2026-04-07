@@ -71,12 +71,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--age-max", type=int, default=65, help="Maximum diagnosis age in years.")
     parser.add_argument(
         "--out-dir",
-        default="/home/gadeaalonsoj/tfm/analysis_results/24_external_cross_validation/tcga_prep",
+        default=str(Path(__file__).resolve().parent / "analysis_results/24_external_cross_validation/tcga_prep"),
         help="Directory for audit tables and the workbook summary.",
     )
     parser.add_argument(
         "--manifest-dir",
-        default="/home/gadeaalonsoj/tfm/manifests",
+        default=str(Path(__file__).resolve().parent / "manifests"),
         help="Directory where GDC manifest TSVs will be written.",
     )
     return parser.parse_args()

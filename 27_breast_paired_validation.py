@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import os
 import re
 import unicodedata
 from pathlib import Path
@@ -34,32 +35,74 @@ from typing import Iterable
 import pandas as pd
 
 
-ONEDRIVE_DOCS_DIR = Path(
-    "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs"
-)
-CLINICAL_DOCS_DIR = ONEDRIVE_DOCS_DIR / "clinical variables-snps"
+ROOT = Path(__file__).resolve().parent
+DOCS_DIR = ROOT / "docs"
 
-DEFAULT_CLINICAL_XLSX = CLINICAL_DOCS_DIR / "MUESTRAS + VARIABLES CLINICAS PROY SNPs GM(4).xlsx"
-DEFAULT_NOMENCLATURE_XLSX = CLINICAL_DOCS_DIR / "Muestras SNPs nomenclaturas, equivalencias y cuantificaciones.xlsx"
-DEFAULT_MASTER_XLSX = Path("/home/gadeaalonsoj/tfm/docs/derived_workbooks/MASTER_SNP_plus_clinical_HARMONISED.xlsx")
-DEFAULT_KEY_SNP_TSV = Path(
-    "/home/gadeaalonsoj/tfm/analysis_results/25_rs11078928_rs869402_haplotype_focus/25_Target_SNP_Metadata.tsv"
+
+def _iter_docs_search_dirs() -> list[Path]:
+    seen: set[str] = set()
+    candidates: list[Path] = []
+
+    env_docs = os.environ.get("TFM_DOCS_DIR", "").strip()
+    if env_docs:
+        env_path = Path(env_docs)
+        candidates.extend([env_path / "clinical variables-snps", env_path])
+
+    candidates.extend([DOCS_DIR / "source_workbooks", DOCS_DIR / "derived_workbooks", DOCS_DIR])
+
+    users_root = Path("/mnt/c/Users")
+    if users_root.exists():
+        for user_dir in sorted(users_root.iterdir()):
+            if not user_dir.is_dir():
+                continue
+            downloads = user_dir / "Downloads"
+            if downloads.exists():
+                candidates.append(downloads)
+            for onedrive_dir in sorted(user_dir.glob("OneDrive*")):
+                docs_dir = onedrive_dir / "Documents" / "TFM" / "Docs"
+                candidates.extend([docs_dir / "clinical variables-snps", docs_dir])
+
+    existing: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen or not candidate.exists():
+            continue
+        seen.add(key)
+        existing.append(candidate)
+    return existing
+
+
+def _discover_doc_file(filename: str, fallback_dir: Path) -> Path:
+    for search_dir in _iter_docs_search_dirs():
+        candidate = search_dir / filename
+        if candidate.exists():
+            return candidate
+    return fallback_dir / filename
+
+
+DEFAULT_CLINICAL_XLSX = _discover_doc_file(
+    "MUESTRAS + VARIABLES CLINICAS PROY SNPs GM(4).xlsx",
+    DOCS_DIR / "source_workbooks",
 )
-DEFAULT_OUTDIR = Path("/home/gadeaalonsoj/tfm/analysis_results/27_breast_paired_validation")
-DEFAULT_OUT_XLSX = Path(
-    "/home/gadeaalonsoj/tfm/docs/derived_workbooks/BREAST_PAIRED_TUMOUR_NORMAL_VALIDATION.xlsx"
+DEFAULT_NOMENCLATURE_XLSX = _discover_doc_file(
+    "Muestras SNPs nomenclaturas, equivalencias y cuantificaciones.xlsx",
+    DOCS_DIR / "source_workbooks",
 )
+DEFAULT_MASTER_XLSX = DOCS_DIR / "derived_workbooks/MASTER_SNP_plus_clinical_HARMONISED.xlsx"
+DEFAULT_KEY_SNP_TSV = ROOT / "analysis_results/25_rs11078928_rs869402_haplotype_focus/25_Target_SNP_Metadata.tsv"
+DEFAULT_OUTDIR = ROOT / "analysis_results/27_breast_paired_validation"
+DEFAULT_OUT_XLSX = DOCS_DIR / "derived_workbooks/BREAST_PAIRED_TUMOUR_NORMAL_VALIDATION.xlsx"
 
 TUMOUR_BAM_DIRS = [
-    Path("/home/gadeaalonsoj/tfm/breast/tumour/dna"),
-    Path("/home/gadeaalonsoj/tfm/breast/tumour/dna_qc/pass_bams"),
+    ROOT / "breast/tumour/dna",
+    ROOT / "breast/tumour/dna_qc/pass_bams",
 ]
 NORMAL_BAM_DIRS = [
-    Path("/home/gadeaalonsoj/tfm/breast/normal/dna"),
-    Path("/home/gadeaalonsoj/tfm/breast/normal/dna_qc/pass_bams"),
+    ROOT / "breast/normal/dna",
+    ROOT / "breast/normal/dna_qc/pass_bams",
 ]
-TUMOUR_DNA_CALLS_DIR = Path("/home/gadeaalonsoj/tfm/breast/tumour/dna_calls")
-NORMAL_DNA_CALLS_DIR = Path("/home/gadeaalonsoj/tfm/breast/normal/dna_calls")
+TUMOUR_DNA_CALLS_DIR = ROOT / "breast/tumour/dna_calls"
+NORMAL_DNA_CALLS_DIR = ROOT / "breast/normal/dna_calls"
 
 
 def _to_str(value: object) -> str:

@@ -162,10 +162,10 @@ DEFAULT_VARIANT_WHITELIST = DEFAULTS.get("variant_whitelist")
 # These are the ground truth for which samples have actually been sequenced.
 # Set to None to skip manifest filtering (falls back to extraction_flag logic).
 DEFAULT_MANIFESTS = DEFAULTS.get("manifests", {
-    "endometrium-tumour": Path("/home/gadeaalonsoj/tfm/manifests/endometrium-tumour-pass_manifest.txt"),
-    "endometrium-normal": Path("/home/gadeaalonsoj/tfm/manifests/endometrium-normal-pass_manifest.txt"),
-    "breast-tumour":      Path("/home/gadeaalonsoj/tfm/manifests/breast-tumour-pass_manifest.txt"),
-    "breast-normal":      Path("/home/gadeaalonsoj/tfm/manifests/breast-normal-pass_manifest.txt"),
+    "endometrium-tumour": Path(__file__).resolve().parent / "manifests/endometrium-tumour-pass_manifest.txt",
+    "endometrium-normal": Path(__file__).resolve().parent / "manifests/endometrium-normal-pass_manifest.txt",
+    "breast-tumour":      Path(__file__).resolve().parent / "manifests/breast-tumour-pass_manifest.txt",
+    "breast-normal":      Path(__file__).resolve().parent / "manifests/breast-normal-pass_manifest.txt",
 })
 
 FDR_THRESHOLD  = float(DEFAULTS.get("fdr_threshold", 0.10))

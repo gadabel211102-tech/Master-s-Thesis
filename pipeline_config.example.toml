@@ -1,4 +1,4 @@
-# Public, shareable configuration template for the GSDMB workflow.
+# Public, shareable configuration template for the GSDMB thesis workflow.
 #
 # Copy this file to `pipeline_config.toml` and edit the paths for your local
 # machine before running the pipeline. Repo-local paths are intentionally kept

@@ -1,47 +1,47 @@
 script_name	current_path	category	role_summary	required_by_core	recommended_default_run
-run_full_pipeline.sh	/home/gadeaalonsoj/tfm/run_full_pipeline.sh	UTILITY_REPORTING	Primary launcher. Now defaults to the thesis core profile and can also run exploratory, utility, or full profiles.	yes	yes
-.run_full_pipeline_clean.sh	/home/gadeaalonsoj/tfm/.run_full_pipeline_clean.sh	UTILITY_REPORTING	Mirror launcher copy retained for compatibility with the cleaned workflow wrapper.	no	no
-01_check_and_index.sh	/home/gadeaalonsoj/tfm/01_check_and_index.sh	CORE	Validates DNA BAM integrity and creates missing BAM indices before downstream QC and calling.	yes	yes
-02_dna_qc.sh	/home/gadeaalonsoj/tfm/02_dna_qc.sh	CORE	Runs the primary DNA QC workflow and produces cohort-level QC summaries used to define pass/fail status.	yes	yes
-02b_more-qc.sh	/home/gadeaalonsoj/tfm/02b_more-qc.sh	CORE	Builds PASS manifests and zero-coverage summaries from the DNA QC outputs; required for core calling inputs.	yes	yes
-02c_zerocovinfo.py	/home/gadeaalonsoj/tfm/02c_zerocovinfo.py	UTILITY_REPORTING	Formats zero-coverage outputs into an Excel report for review; useful documentation but not a core dependency.	no	no
-03_qc_visualisation.py	/home/gadeaalonsoj/tfm/03_qc_visualisation.py	UTILITY_REPORTING	Generates DNA QC plots and audit tables for supervisor-facing review and presentation.	no	no
-04_technical_audit.py	/home/gadeaalonsoj/tfm/04_technical_audit.py	UTILITY_REPORTING	Performs technical amplicon audits and highlights poorly performing regions for diagnostics.	no	no
-04b_amplicon_failure_visualisation.py	/home/gadeaalonsoj/tfm/04b_amplicon_failure_visualisation.py	UTILITY_REPORTING	Creates per-locus failed-versus-passed amplicon visualisations for diagnostic follow-up.	no	no
-04b_amplicon_failure_panel.py	/home/gadeaalonsoj/tfm/04b_amplicon_failure_panel.py	UTILITY_REPORTING	Builds an overview panel of the worst flagged amplicon failures from the 04b visualisation outputs.	no	no
-05_variant_calling.sh	/home/gadeaalonsoj/tfm/05_variant_calling.sh	CORE	Runs targeted variant calling on QC-passed DNA BAMs and produces the filtered cohort VCFs used downstream.	yes	yes
-06_annotation.sh	/home/gadeaalonsoj/tfm/06_annotation.sh	CORE	Annotates filtered VCFs with VEP and external resources to create the canonical variant annotation layer.	yes	yes
-07_merge_annotations.py	/home/gadeaalonsoj/tfm/07_merge_annotations.py	CORE	Merges annotated VCFs into the canonical project workbook that underpins the SNP branch of the pipeline.	yes	yes
-07b_variant_qc.py	/home/gadeaalonsoj/tfm/07b_variant_qc.py	UTILITY_REPORTING	Performs variant-level QC checks on the merged annotation workbook for diagnostic assurance.	no	no
-08_mapping.py	/home/gadeaalonsoj/tfm/08_mapping.py	UTILITY_REPORTING	Creates global variant landscape figures and tables; descriptive and presentation-facing rather than core-generative.	no	no
-09_gsdmb_only.py	/home/gadeaalonsoj/tfm/09_gsdmb_only.py	UTILITY_REPORTING	Creates GSDMB-focused landscape figures and tables for descriptive reporting.	no	no
-09b_landscape_comparison.py	/home/gadeaalonsoj/tfm/09b_landscape_comparison.py	EXPLORATORY_VALIDATION	Compares normal and tumour landscape patterns as a follow-up sensitivity layer to the descriptive plots.	no	no
-10_variant_stats.py	/home/gadeaalonsoj/tfm/10_variant_stats.py	UTILITY_REPORTING	Generates descriptive variant consequence and impact summaries for reporting.	no	no
-11_SNPs.py	/home/gadeaalonsoj/tfm/11_SNPs.py	CORE	Defines the common-SNP backbone and benchmarking tables used by the core SNP analyses.	yes	yes
-12_stats_enrichment.py	/home/gadeaalonsoj/tfm/12_stats_enrichment.py	CORE	Runs the principal tumour-versus-control SNP enrichment analyses that support objective 1.	yes	yes
-13_permutation_testing.py	/home/gadeaalonsoj/tfm/13_permutation_testing.py	EXPLORATORY_VALIDATION	Adds a permutation-based sensitivity analysis for the SNP branch; informative but not required for the canonical rerun.	no	no
-14_interactive_dashboard.py	/home/gadeaalonsoj/tfm/14_interactive_dashboard.py	UTILITY_REPORTING	Builds an interactive dashboard for exploratory review of the variant results.	no	no
-15_haplotypes.sh	/home/gadeaalonsoj/tfm/15_haplotypes.sh	CORE	Builds the phased cohort haplotype matrix used by the haplotype and RNA integration branches.	yes	yes
-15_haplotype_stats.R	/home/gadeaalonsoj/tfm/15_haplotype_stats.R	CORE	Produces the principal haplotype frequency and association results for the thesis haplotype branch.	yes	yes
-install_haplotype_r_dependencies.R	/home/gadeaalonsoj/tfm/install_haplotype_r_dependencies.R	UTILITY_REPORTING	Bootstraps missing R dependencies for the haplotype statistics runtime when needed.	yes	no
-16_excel_harmonisation.py	/home/gadeaalonsoj/tfm/16_excel_harmonisation.py	CORE	Builds the harmonised master workbook that anchors the clinical and RNA branches.	yes	yes
-17_snp_association.py	/home/gadeaalonsoj/tfm/17_snp_association.py	CORE	Runs the principal SNP-clinical association analyses for breast and endometrial cohorts.	yes	yes
-18_haplotype_association.py	/home/gadeaalonsoj/tfm/18_haplotype_association.py	CORE	Runs the principal haplotype-clinical association analyses for objective 1.	yes	yes
-19_1000g_haplotype_comparison.py	/home/gadeaalonsoj/tfm/19_1000g_haplotype_comparison.py	EXPLORATORY_VALIDATION	Places study haplotypes in an external 1000 Genomes context; secondary validation rather than main discovery.	no	no
-19b_rna_qc.py	/home/gadeaalonsoj/tfm/19b_rna_qc.py	CORE	Builds the RNA QC manifest that gates the objective-2 RNA analyses.	yes	yes
-20_objective2_isoform_expression_association.py	/home/gadeaalonsoj/tfm/20_objective2_isoform_expression_association.py	CORE	Runs the workbook-first isoform and RNA association workflow for thesis objective 2.	yes	yes
-20b_panel_gene_expression.py	/home/gadeaalonsoj/tfm/20b_panel_gene_expression.py	CORE	Adds BAM-derived panel-gene expression quantification used by the RNA integration layer.	yes	yes
-21_core_haplotype_comparison.py	/home/gadeaalonsoj/tfm/21_core_haplotype_comparison.py	UTILITY_REPORTING	Produces a compact collaborator-facing core haplotype summary when the external workbook is available.	no	no
-22_haplotype_first_interpretation.py	/home/gadeaalonsoj/tfm/22_haplotype_first_interpretation.py	EXPLORATORY_VALIDATION	Builds an interpretation layer for significant haplotypes; useful downstream context but not a required core generator.	no	no
-23_rna_integration.py	/home/gadeaalonsoj/tfm/23_rna_integration.py	CORE	Integrates RNA, significant SNPs, and significant haplotypes for the final thesis objective-2 reporting layer.	yes	yes
-24_prepare_tcga_inputs.py	/home/gadeaalonsoj/tfm/24_prepare_tcga_inputs.py	UTILITY_REPORTING	Historical TCGA-preparation helper retained only for reference; it is not part of the active pipeline because the TCGA germline branch was not accessible.	no	no
-24_external_cross_validation.py	/home/gadeaalonsoj/tfm/24_external_cross_validation.py	EXPLORATORY_VALIDATION	Runs external breast and endometrial validation against female-only 1000 Genomes reference samples.	no	no
-25_rs11078928_rs869402_haplotype_focus.py	/home/gadeaalonsoj/tfm/25_rs11078928_rs869402_haplotype_focus.py	EXPLORATORY_VALIDATION	Performs a focused follow-up analysis on the rs11078928 and rs869402 haplotypic context.	no	no
-26_snp_functional_interpretation.py	/home/gadeaalonsoj/tfm/26_snp_functional_interpretation.py	EXPLORATORY_VALIDATION	Adds a SNP biological interpretation layer combining annotations, RNA context, and optional external support.	no	no
-27_breast_paired_validation.py	/home/gadeaalonsoj/tfm/27_breast_paired_validation.py	UTILITY_REPORTING	Historical paired breast tumour-normal prototype retained only for reference; it is not part of the active pipeline because the breast BAM cohort is unpaired.	no	no
-association_runtime.py	/home/gadeaalonsoj/tfm/association_runtime.py	UTILITY_REPORTING	Shared runtime defaults used by the association and RNA scripts to keep paths and thresholds aligned.	yes	no
-objective2_gene_report_exports.py	/home/gadeaalonsoj/tfm/objective2_gene_report_exports.py	UTILITY_REPORTING	Shared export helpers used by the core objective-2 RNA workflow.	yes	no
-objective2_rna_qc_utils.py	/home/gadeaalonsoj/tfm/objective2_rna_qc_utils.py	UTILITY_REPORTING	Shared RNA QC and matching helpers used by stages 19b and 20.	yes	no
-pipeline_utils.py	/home/gadeaalonsoj/tfm/pipeline_utils.py	UTILITY_REPORTING	Shared config and helper utilities used across the core and optional workflows.	yes	no
-pipeline_validation.py	/home/gadeaalonsoj/tfm/pipeline_validation.py	UTILITY_REPORTING	Shared validation helpers that keep analytical assumptions and input checks consistent.	yes	no
-figure_style.py	/home/gadeaalonsoj/tfm/figure_style.py	UTILITY_REPORTING	Shared plotting style helpers reused by multiple reporting and association scripts.	yes	no
+run_full_pipeline.sh	./run_full_pipeline.sh	UTILITY_REPORTING	Primary launcher. Now defaults to the thesis core profile and can also run exploratory, utility, or full profiles.	yes	yes
+.run_full_pipeline_clean.sh	./.run_full_pipeline_clean.sh	UTILITY_REPORTING	Mirror launcher copy retained for compatibility with the cleaned workflow wrapper.	no	no
+01_check_and_index.sh	./01_check_and_index.sh	CORE	Validates DNA BAM integrity and creates missing BAM indices before downstream QC and calling.	yes	yes
+02_dna_qc.sh	./02_dna_qc.sh	CORE	Runs the primary DNA QC workflow and produces cohort-level QC summaries used to define pass/fail status.	yes	yes
+02b_more-qc.sh	./02b_more-qc.sh	CORE	Builds PASS manifests and zero-coverage summaries from the DNA QC outputs; required for core calling inputs.	yes	yes
+02c_zerocovinfo.py	./02c_zerocovinfo.py	UTILITY_REPORTING	Formats zero-coverage outputs into an Excel report for review; useful documentation but not a core dependency.	no	no
+03_qc_visualisation.py	./03_qc_visualisation.py	UTILITY_REPORTING	Generates DNA QC plots and audit tables for supervisor-facing review and presentation.	no	no
+04_technical_audit.py	./04_technical_audit.py	UTILITY_REPORTING	Performs technical amplicon audits and highlights poorly performing regions for diagnostics.	no	no
+04b_amplicon_failure_visualisation.py	./04b_amplicon_failure_visualisation.py	UTILITY_REPORTING	Creates per-locus failed-versus-passed amplicon visualisations for diagnostic follow-up.	no	no
+04b_amplicon_failure_panel.py	./04b_amplicon_failure_panel.py	UTILITY_REPORTING	Builds an overview panel of the worst flagged amplicon failures from the 04b visualisation outputs.	no	no
+05_variant_calling.sh	./05_variant_calling.sh	CORE	Runs targeted variant calling on QC-passed DNA BAMs and produces the filtered cohort VCFs used downstream.	yes	yes
+06_annotation.sh	./06_annotation.sh	CORE	Annotates filtered VCFs with VEP and external resources to create the canonical variant annotation layer.	yes	yes
+07_merge_annotations.py	./07_merge_annotations.py	CORE	Merges annotated VCFs into the canonical project workbook that underpins the SNP branch of the pipeline.	yes	yes
+07b_variant_qc.py	./07b_variant_qc.py	UTILITY_REPORTING	Performs variant-level QC checks on the merged annotation workbook for diagnostic assurance.	no	no
+08_mapping.py	./08_mapping.py	UTILITY_REPORTING	Creates global variant landscape figures and tables; descriptive and presentation-facing rather than core-generative.	no	no
+09_gsdmb_only.py	./09_gsdmb_only.py	UTILITY_REPORTING	Creates GSDMB-focused landscape figures and tables for descriptive reporting.	no	no
+09b_landscape_comparison.py	./09b_landscape_comparison.py	EXPLORATORY_VALIDATION	Compares normal and tumour landscape patterns as a follow-up sensitivity layer to the descriptive plots.	no	no
+10_variant_stats.py	./10_variant_stats.py	UTILITY_REPORTING	Generates descriptive variant consequence and impact summaries for reporting.	no	no
+11_SNPs.py	./11_SNPs.py	CORE	Defines the common-SNP backbone and benchmarking tables used by the core SNP analyses.	yes	yes
+12_stats_enrichment.py	./12_stats_enrichment.py	CORE	Runs the principal tumour-versus-control SNP enrichment analyses that support objective 1.	yes	yes
+13_permutation_testing.py	./13_permutation_testing.py	EXPLORATORY_VALIDATION	Adds a permutation-based sensitivity analysis for the SNP branch; informative but not required for the canonical rerun.	no	no
+14_interactive_dashboard.py	./14_interactive_dashboard.py	UTILITY_REPORTING	Builds an interactive dashboard for exploratory review of the variant results.	no	no
+15_haplotypes.sh	./15_haplotypes.sh	CORE	Builds the phased cohort haplotype matrix used by the haplotype and RNA integration branches.	yes	yes
+15_haplotype_stats.R	./15_haplotype_stats.R	CORE	Produces the principal haplotype frequency and association results for the thesis haplotype branch.	yes	yes
+install_haplotype_r_dependencies.R	./install_haplotype_r_dependencies.R	UTILITY_REPORTING	Bootstraps missing R dependencies for the haplotype statistics runtime when needed.	yes	no
+16_excel_harmonisation.py	./16_excel_harmonisation.py	CORE	Builds the harmonised master workbook that anchors the clinical and RNA branches.	yes	yes
+17_snp_association.py	./17_snp_association.py	CORE	Runs the principal SNP-clinical association analyses for breast and endometrial cohorts.	yes	yes
+18_haplotype_association.py	./18_haplotype_association.py	CORE	Runs the principal haplotype-clinical association analyses for objective 1.	yes	yes
+19_1000g_haplotype_comparison.py	./19_1000g_haplotype_comparison.py	EXPLORATORY_VALIDATION	Places study haplotypes in an external 1000 Genomes context; secondary validation rather than main discovery.	no	no
+19b_rna_qc.py	./19b_rna_qc.py	CORE	Builds the RNA QC manifest that gates the objective-2 RNA analyses.	yes	yes
+20_objective2_isoform_expression_association.py	./20_objective2_isoform_expression_association.py	CORE	Runs the workbook-first isoform and RNA association workflow for thesis objective 2.	yes	yes
+20b_panel_gene_expression.py	./20b_panel_gene_expression.py	CORE	Adds BAM-derived panel-gene expression quantification used by the RNA integration layer.	yes	yes
+21_core_haplotype_comparison.py	./21_core_haplotype_comparison.py	UTILITY_REPORTING	Produces a compact collaborator-facing core haplotype summary when the external workbook is available.	no	no
+22_haplotype_first_interpretation.py	./22_haplotype_first_interpretation.py	EXPLORATORY_VALIDATION	Builds an interpretation layer for significant haplotypes; useful downstream context but not a required core generator.	no	no
+23_rna_integration.py	./23_rna_integration.py	CORE	Integrates RNA, significant SNPs, and significant haplotypes for the final thesis objective-2 reporting layer.	yes	yes
+24_prepare_tcga_inputs.py	./24_prepare_tcga_inputs.py	UTILITY_REPORTING	Historical TCGA-preparation helper retained only for reference; it is not part of the active pipeline because the TCGA germline branch was not accessible.	no	no
+24_external_cross_validation.py	./24_external_cross_validation.py	EXPLORATORY_VALIDATION	Runs external breast and endometrial validation against female-only 1000 Genomes reference samples.	no	no
+25_rs11078928_rs869402_haplotype_focus.py	./25_rs11078928_rs869402_haplotype_focus.py	EXPLORATORY_VALIDATION	Performs a focused follow-up analysis on the rs11078928 and rs869402 haplotypic context.	no	no
+26_snp_functional_interpretation.py	./26_snp_functional_interpretation.py	EXPLORATORY_VALIDATION	Adds a SNP biological interpretation layer combining annotations, RNA context, and optional external support.	no	no
+27_breast_paired_validation.py	./27_breast_paired_validation.py	UTILITY_REPORTING	Historical paired breast tumour-normal prototype retained only for reference; it is not part of the active pipeline because the breast BAM cohort is unpaired.	no	no
+association_runtime.py	./association_runtime.py	UTILITY_REPORTING	Shared runtime defaults used by the association and RNA scripts to keep paths and thresholds aligned.	yes	no
+objective2_gene_report_exports.py	./objective2_gene_report_exports.py	UTILITY_REPORTING	Shared export helpers used by the core objective-2 RNA workflow.	yes	no
+objective2_rna_qc_utils.py	./objective2_rna_qc_utils.py	UTILITY_REPORTING	Shared RNA QC and matching helpers used by stages 19b and 20.	yes	no
+pipeline_utils.py	./pipeline_utils.py	UTILITY_REPORTING	Shared config and helper utilities used across the core and optional workflows.	yes	no
+pipeline_validation.py	./pipeline_validation.py	UTILITY_REPORTING	Shared validation helpers that keep analytical assumptions and input checks consistent.	yes	no
+figure_style.py	./figure_style.py	UTILITY_REPORTING	Shared plotting style helpers reused by multiple reporting and association scripts.	yes	no

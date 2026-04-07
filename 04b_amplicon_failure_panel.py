@@ -7,7 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-ROOT = Path('/home/gadeaalonsoj/tfm')
+ROOT = Path(__file__).resolve().parent
 SUMMARY = ROOT / 'analysis_results/04b_amplicon_failure_visualisation/flagged_amplicon_visualisation_summary.tsv'
 OUT = ROOT / 'analysis_results/04b_amplicon_failure_visualisation/Worst_Flagged_Amplicons_Overview.png'
 PADDING = 80

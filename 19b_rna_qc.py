@@ -406,7 +406,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--rna-bed", default=str(D.get("rna_bed", "")))
     ap.add_argument("--machine-qc-xlsx", default=str(D.get("machine_qc_xlsx", "")))
     ap.add_argument("--recompute-coverage", action="store_true", help="Ignore cached RNA target coverage and rerun BAM-level coverage QC.")
-    ap.add_argument("--out-dir", default="/home/gadeaalonsoj/tfm/analysis_results/19b_objective2_rna_qc")
+    ap.add_argument("--out-dir", default=str(D.get("out_dir", Path(__file__).resolve().parent / "analysis_results/19b_objective2_rna_qc")))
     return ap.parse_args()
 
 

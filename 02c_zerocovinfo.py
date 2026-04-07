@@ -4,7 +4,7 @@ Script: 02c_zero_cov_report.py
 ================================
 Post-processing script for zero-coverage output from 02b_more-qc.sh.
 
-python3 02c_zerocovinfo.py --zero /home/gadeaalonsoj/tfm/endometrium/tumour/zero_coverage/zero_cov_tumour.tsv --qc /home/gadeaalonsoj/tfm/endometrium/tumour/dna_qc/qc_summary.tsv
+python3 02c_zerocovinfo.py --zero /path/to/zero_cov_tumour.tsv --qc /path/to/qc_summary.tsv
 
 Reads one or more zero_cov_*.tsv files (new format with 4 metrics per sample)
 and optionally the qc_summary.tsv from script 02, then produces a colour-coded

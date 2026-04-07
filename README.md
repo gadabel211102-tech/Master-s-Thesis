@@ -94,7 +94,7 @@ These scripts help with QC review, descriptive visualisation, collaborator outpu
 ### Run the core pipeline only
 
 ```bash
-cd /home/gadeaalonsoj/tfm
+cd /path/to/tfm
 ./run_full_pipeline.sh
 ```
 
@@ -158,7 +158,7 @@ Columns:
 Most generated outputs are written under:
 
 ```text
-/home/gadeaalonsoj/tfm/analysis_results
+./analysis_results
 ```
 
 Representative core output locations:
@@ -189,7 +189,7 @@ See [docs/notes/REPRODUCIBILITY.md](docs/notes/REPRODUCIBILITY.md) for the exact
 
 For a public or supervisor-facing GitHub repository, do not upload raw cohort BAMs, generated `analysis_results`, private clinical workbooks, or local environments. The recommended upload plan is documented in [docs/notes/GITHUB_REPOSITORY_GUIDE.md](docs/notes/GITHUB_REPOSITORY_GUIDE.md).
 
-The tracked `pipeline_config.toml` in this working directory still reflects the local machine used during analysis. For GitHub, upload [`pipeline_config.example.toml`](pipeline_config.example.toml) as the reusable template and keep any machine-specific override in an untracked local file such as `pipeline_config.local.toml` or via the `PIPELINE_CONFIG` environment variable.
+The tracked `pipeline_config.toml` in this working directory still reflects the local machine used during analysis. For GitHub, upload [`pipeline_config.example.toml`](pipeline_config.example.toml) as the reusable template and keep any machine-specific override in an untracked local file such as `pipeline_config.local.toml or pipeline_config.local.sh` or via the `PIPELINE_CONFIG` environment variable.
 
 ## Thesis Methods Mapping
 

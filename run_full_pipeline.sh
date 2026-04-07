@@ -7,6 +7,11 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOCAL_PIPELINE_OVERRIDES="${ROOT_DIR}/pipeline_config.local.sh"
+if [[ -f "${LOCAL_PIPELINE_OVERRIDES}" ]]; then
+  # shellcheck source=/dev/null
+  source "${LOCAL_PIPELINE_OVERRIDES}"
+fi
 
 # Runtime discovery prefers an explicitly chosen interpreter, then an active
 # environment, then the repo-local thesis environment.
@@ -45,12 +50,12 @@ R_BIN="${R_BIN:-Rscript}"
 REF_FA="${REF_FA:-${ROOT_DIR}/ref_alt/hg38_canonical.fa}"
 BED_FILE="${BED_FILE:-${ROOT_DIR}/dna_bed/IAD255368_167_Submitted.bed}"
 VCF_1000G="${VCF_1000G:-${ROOT_DIR}/ref/ref_panel_chr17_gsdmb_GRCh38.vcf.gz}"
-PANEL_1000G="${PANEL_1000G:-/home/gadeaalonsoj/1000g_grch38/integrated_call_samples_v3.20130502.ALL.panel}"
+PANEL_1000G="${PANEL_1000G:-}"
 ANALYSIS_ROOT="${ANALYSIS_ROOT:-${ROOT_DIR}/analysis_results}"
 MIN_DP="${MIN_DP:-100}"
 MIN_QUAL="${MIN_QUAL:-20}"
 FEMALE_ONLY_SAMPLE_FILE="${FEMALE_ONLY_SAMPLE_FILE:-${ROOT_DIR}/analysis_results/15_haplotype_phasing/female_by_design_study_samples.tsv}"
-COLLAB_CORE_XLSX="${COLLAB_CORE_XLSX:-/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/clinical variables-snps/SNPS PROYECTO MAMA_ENDOMETRIO(8).xlsx}"
+COLLAB_CORE_XLSX="${COLLAB_CORE_XLSX:-}"
 CROSSVAL_1000G_POPULATION="${CROSSVAL_1000G_POPULATION:-EUR}"
 
 
@@ -290,7 +295,9 @@ ensure_prereqs() {
     mkdir -p "${ROOT_DIR}/manifests"
   fi
 
-  if should_run_step 19; then
+  if should_run_any 19 24; then
+    [[ -n "${VCF_1000G}" ]] || die "VCF_1000G is not set. Provide it via env or pipeline_config.local.sh"
+    [[ -n "${PANEL_1000G}" ]] || die "PANEL_1000G is not set. Provide it via env or pipeline_config.local.sh"
     [[ -f "${VCF_1000G}" ]] || die "1000 Genomes VCF/BCF not found: ${VCF_1000G}"
     [[ -f "${PANEL_1000G}" ]] || die "1000 Genomes panel not found: ${PANEL_1000G}"
   fi

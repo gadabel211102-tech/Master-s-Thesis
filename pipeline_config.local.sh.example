@@ -1,0 +1,6 @@
+# Copy the values you need into pipeline_config.local.sh on your own machine.
+# The launcher sources that file automatically when it exists.
+
+export TFM_DOCS_DIR="/path/to/Docs"
+export PANEL_1000G="/path/to/integrated_call_samples_v3.20130502.ALL.panel"
+export COLLAB_CORE_XLSX="/path/to/SNPS_PROYECTO_MAMA_ENDOMETRIO.xlsx"

@@ -680,37 +680,37 @@ EXAMPLES:
     
     parser.add_argument(
         '--bed',
-        default="/home/gadeaalonsoj/tfm/dna_bed/IAD255368_167_Submitted.bed",
+        default=str(Path(__file__).resolve().parent / "dna_bed/IAD255368_167_Submitted.bed"),
         help='Path to BED file'
     )
     
     parser.add_argument(
         '--fasta',
-        default="/home/gadeaalonsoj/tfm/ref_alt/hg38_alt.fa",
+        default=str(Path(__file__).resolve().parent / "ref_alt/hg38_alt.fa"),
         help='Path to reference FASTA (for comprehensive mode)'
     )
     
     parser.add_argument(
         '--coverage',
-        default="/home/gadeaalonsoj/tfm/analysis_results/03_qc_visualisation/sample_level_coverage_tables/**/*.coverage.tsv.gz",
+        default=str(Path(__file__).resolve().parent / "analysis_results/03_qc_visualisation/sample_level_coverage_tables/**/*.coverage.tsv.gz"),
         help='Glob pattern for individual coverage files (for comprehensive mode)'
     )
     
     parser.add_argument(
         '--zero',
-        default="/home/gadeaalonsoj/tfm/**/zero_coverage/zero_cov_*.tsv",
+        default=str(Path(__file__).resolve().parent / "**/zero_coverage/zero_cov_*.tsv"),
         help='Glob pattern for zero-coverage reports (for comprehensive mode)'
     )
     
     parser.add_argument(
         '--panels',
-        default="/home/gadeaalonsoj/tfm/analysis_results/03_qc_visualisation/GSDMB_*_FullPanel.csv",
+        default=str(Path(__file__).resolve().parent / "analysis_results/03_qc_visualisation/GSDMB_*_FullPanel.csv"),
         help='Glob pattern for panel files (for quick mode)'
     )
     
     parser.add_argument(
         '--output', '-o',
-        default="/home/gadeaalonsoj/tfm/analysis_results/04_technical_audit",
+        default=str(Path(__file__).resolve().parent / "analysis_results/04_technical_audit"),
         help='Output directory'
     )
     

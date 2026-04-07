@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 
-ROOT = Path('/home/gadeaalonsoj/tfm')
+ROOT = Path(__file__).resolve().parent
 AUDIT_CSV = ROOT / 'analysis_results/04_technical_audit/GSDMB_Technical_Audit.csv'
 SAMPLE_TABLES = ROOT / 'analysis_results/03_qc_visualisation/sample_level_coverage_tables'
 OUTPUT_DIR = ROOT / 'analysis_results/04b_amplicon_failure_visualisation'

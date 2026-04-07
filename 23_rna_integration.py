@@ -30,7 +30,7 @@ try:
 except ImportError:
     sns = None
 
-ROOT = Path("/home/gadeaalonsoj/tfm")
+ROOT = Path(__file__).resolve().parent
 RES = ROOT / "analysis_results"
 OUT_DIR = RES / "23_rna_integration"
 

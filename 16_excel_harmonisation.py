@@ -26,25 +26,27 @@ OUTPUT EXCEL (4 sheets)
 4) harmonisation_map
    - Documentation: each canon__* variable and which original columns were used (priority order)
 
-RUN (WSL example)
------------------
+RUN (example)
+---------------
 python3 16_excel_harmonisation.py \
-  --snp_xlsx "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/clinical variables-snps/Muestras SNPs nomenclaturas, equivalencias y cuantificaciones.xlsx" \
-  --clinical_xlsx "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/clinical variables-snps/MUESTRAS + VARIABLES CLINICAS PROY SNPs GM(4).xlsx" \
-  --au_xlsx "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/clinical variables-snps/FINAL_ECLAI_DB_Clinical_v12 febrero26 .xlsx" \
+  --snp_xlsx "/path/to/Muestras SNPs nomenclaturas, equivalencias y cuantificaciones.xlsx" \
+  --clinical_xlsx "/path/to/MUESTRAS + VARIABLES CLINICAS PROY SNPs GM(4).xlsx" \
+  --au_xlsx "/path/to/FINAL_ECLAI_DB_Clinical_v12 febrero26 .xlsx" \
   --au_sheet "Clinical Data" \
-  --out_xlsx "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx" \
-  --manifests_dir "/home/gadeaalonsoj/tfm/manifests"
+  --out_xlsx "/path/to/MASTER_SNP_plus_clinical_HARMONISED.xlsx" \
+  --manifests_dir "/path/to/manifests"
 
 NOTE ON PERMISSION ERRORS
 -------------------------
-If writing to OneDrive gives PermissionError, the file is usually open in Excel or syncing.
-Write to ~/tfm first, then copy to OneDrive, or change --out_xlsx to a new filename.
+If writing to a synced cloud folder gives PermissionError, the file is usually
+open in Excel or still syncing. Write locally first, then copy it back, or use
+a new output filename.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import unicodedata
 from pathlib import Path
@@ -60,34 +62,69 @@ from pipeline_validation import print_validation_summary, validate_file_exists, 
 # =============================================================================
 # DEFAULT CONFIG (override with CLI args)
 # =============================================================================
-# These defaults are convenient if you always run from WSL and keep files in OneDrive.
-# You can override any path at runtime using the command-line arguments.
+# Public code keeps only repo-safe defaults. Your laptop can still provide
+# machine-specific locations via CLI args or the TFM_DOCS_DIR environment
+# variable (for example through pipeline_config.local.sh).
 
-ONEDRIVE_DOCS_DIR = Path(
-    "/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs"
+ROOT_DIR = Path(__file__).resolve().parent
+DOCS_DIR = ROOT_DIR / "docs"
+
+
+def _iter_docs_search_dirs() -> list[Path]:
+    seen: set[str] = set()
+    candidates: list[Path] = []
+
+    env_docs = os.environ.get("TFM_DOCS_DIR", "").strip()
+    if env_docs:
+        env_path = Path(env_docs)
+        candidates.extend([env_path / "clinical variables-snps", env_path])
+
+    candidates.extend([DOCS_DIR / "source_workbooks", DOCS_DIR / "derived_workbooks", DOCS_DIR])
+
+    users_root = Path("/mnt/c/Users")
+    if users_root.exists():
+        for user_dir in sorted(users_root.iterdir()):
+            if not user_dir.is_dir():
+                continue
+            downloads = user_dir / "Downloads"
+            if downloads.exists():
+                candidates.append(downloads)
+            for onedrive_dir in sorted(user_dir.glob("OneDrive*")):
+                docs_dir = onedrive_dir / "Documents" / "TFM" / "Docs"
+                candidates.extend([docs_dir / "clinical variables-snps", docs_dir])
+
+    existing: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen or not candidate.exists():
+            continue
+        seen.add(key)
+        existing.append(candidate)
+    return existing
+
+
+def _discover_doc_file(filename: str, fallback_dir: Path) -> Path:
+    for search_dir in _iter_docs_search_dirs():
+        candidate = search_dir / filename
+        if candidate.exists():
+            return candidate
+    return fallback_dir / filename
+
+
+DEFAULT_SNP_XLSX = _discover_doc_file(
+    "Muestras SNPs nomenclaturas, equivalencias y cuantificaciones.xlsx",
+    DOCS_DIR / "source_workbooks",
 )
-CLINICAL_DOCS_DIR = ONEDRIVE_DOCS_DIR / "clinical variables-snps"
-
-
-def _default_input_path(filename: str) -> Path:
-    """
-    Prefer the current clinical-workbook subfolder, but keep the old Docs/
-    location as a fallback for older machines and archived runs.
-    """
-    preferred = CLINICAL_DOCS_DIR / filename
-    legacy = ONEDRIVE_DOCS_DIR / filename
-    return preferred if preferred.exists() else legacy
-
-
-DEFAULT_SNP_XLSX = _default_input_path(
-    "Muestras SNPs nomenclaturas, equivalencias y cuantificaciones.xlsx"
+DEFAULT_CLINICAL_XLSX = _discover_doc_file(
+    "MUESTRAS + VARIABLES CLINICAS PROY SNPs GM(4).xlsx",
+    DOCS_DIR / "source_workbooks",
 )
-DEFAULT_CLINICAL_XLSX = _default_input_path(
-    "MUESTRAS + VARIABLES CLINICAS PROY SNPs GM(4).xlsx"
+DEFAULT_AU_XLSX = _discover_doc_file(
+    "FINAL_ECLAI_DB_Clinical_v12 febrero26 .xlsx",
+    DOCS_DIR / "source_workbooks",
 )
-DEFAULT_AU_XLSX = _default_input_path("FINAL_ECLAI_DB_Clinical_v12 febrero26 .xlsx")
 DEFAULT_AU_SHEET = "Clinical Data"
-DEFAULT_OUT_XLSX = Path("/home/gadeaalonsoj/tfm/MASTER_SNP_plus_clinical_HARMONISED.xlsx")
+DEFAULT_OUT_XLSX = ROOT_DIR / "MASTER_SNP_plus_clinical_HARMONISED.xlsx"
 
 # Expected SNP workbook sheets we process
 SNP_SHEETS = ["AT=AUs", "EN", "MT-T_N", "MN"]  # ignore OVSER
@@ -1591,7 +1628,7 @@ def harmonise(df_raw_merged: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, 
 # MANIFEST LOADING + SEQUENCED SAMPLE TAGGING
 # =============================================================================
 
-DEFAULT_MANIFESTS_DIR = Path("/home/gadeaalonsoj/tfm/manifests")
+DEFAULT_MANIFESTS_DIR = ROOT_DIR / "manifests"
 
 def _extract_manifest_snp_code(sample_name: str) -> Optional[str]:
     """Parse sequencer BAM names into canonical snp_code values."""

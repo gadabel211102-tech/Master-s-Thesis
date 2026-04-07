@@ -47,7 +47,7 @@ INPUTS
   --bam-dirs         Comma-separated root dirs to search for RNA BAMs
                      e.g. breast/tumour/rna,breast/normal/rna,...
                      Defaults to the standard project layout under --project-root
-  --project-root     Base project directory (default: /home/gadeaalonsoj/tfm)
+  --project-root     Base project directory (default: current repository root)
   --rna-qc-manifest  RNA_QC_Manifest.tsv from script 19b (filters to QC-passed
                      BAMs; if absent, all BAMs found are processed)
   --expr-xlsx        qPCR isoform Excel from script 20 (Sheet3 + eva sheets)
@@ -85,7 +85,7 @@ USAGE
 
   # With explicit paths:
   python3 20b_panel_gene_expression.py \\
-      --project-root /home/gadeaalonsoj/tfm \\
+      --project-root /path/to/tfm \\
       --rna-bed /path/to/IAD258499_4_DataSheet.csv \\
       --expr-xlsx /path/to/expression_workbook.xlsx \\
       --master /path/to/MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx \\

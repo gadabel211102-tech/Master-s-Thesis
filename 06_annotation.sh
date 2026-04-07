@@ -27,10 +27,10 @@ unset PERL_LOCAL_LIB_ROOT
 export PERL5LIB=""
 
 # --- Global resources and reference data ---
-ROOT_DIR="/home/gadeaalonsoj/tfm" 
-REF_FA="/home/gadeaalonsoj/tfm/.vep/homo_sapiens/112_GRCh38/Homo_sapiens.GRCh38.dna.toplevel.fa.gz"
-CACHE_DIR="/home/gadeaalonsoj/tfm/.vep"
-THREADS=4
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REF_FA="${REF_FA:-${ROOT_DIR}/.vep/homo_sapiens/112_GRCh38/Homo_sapiens.GRCh38.dna.toplevel.fa.gz}"
+CACHE_DIR="${CACHE_DIR:-${ROOT_DIR}/.vep}"
+THREADS="${THREADS:-4}"
 
 # 1. Ensure we are in the VEP environment
 # If you are running this from VS Code terminal, make sure you ran 'conda activate vep_env' first

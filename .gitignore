@@ -45,6 +45,8 @@ docs/derived_workbooks/
 docs/presentations/*.pptx
 docs/presentations/~$*.pptx
 pipeline_config.local.toml
+pipeline_config.toml
+pipeline_config.local.sh
 
 # Temporary local check files
 tmp_*.xlsx

@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
+#
+# Thesis launcher for the numbered GSDMB workflow stages.
+# The file stays intentionally explicit so supervisors and external readers can
+# see the execution order, runtime split, and optional branches without needing
+# to reverse-engineer helper wrappers.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOCAL_PIPELINE_OVERRIDES="${ROOT_DIR}/pipeline_config.local.sh"
+if [[ -f "${LOCAL_PIPELINE_OVERRIDES}" ]]; then
+  # shellcheck source=/dev/null
+  source "${LOCAL_PIPELINE_OVERRIDES}"
+fi
 
+# Runtime discovery prefers an explicitly chosen interpreter, then an active
+# environment, then the repo-local thesis environment.
 THREADS="${THREADS:-8}"
 BAM_ENV_NAME="${BAM_ENV_NAME:-bam-steps}"
 VEP_ENV_NAME="${VEP_ENV_NAME:-vep_env}"
@@ -38,12 +50,12 @@ R_BIN="${R_BIN:-Rscript}"
 REF_FA="${REF_FA:-${ROOT_DIR}/ref_alt/hg38_canonical.fa}"
 BED_FILE="${BED_FILE:-${ROOT_DIR}/dna_bed/IAD255368_167_Submitted.bed}"
 VCF_1000G="${VCF_1000G:-${ROOT_DIR}/ref/ref_panel_chr17_gsdmb_GRCh38.vcf.gz}"
-PANEL_1000G="${PANEL_1000G:-/home/gadeaalonsoj/1000g_grch38/integrated_call_samples_v3.20130502.ALL.panel}"
+PANEL_1000G="${PANEL_1000G:-}"
 ANALYSIS_ROOT="${ANALYSIS_ROOT:-${ROOT_DIR}/analysis_results}"
 MIN_DP="${MIN_DP:-100}"
 MIN_QUAL="${MIN_QUAL:-20}"
 FEMALE_ONLY_SAMPLE_FILE="${FEMALE_ONLY_SAMPLE_FILE:-${ROOT_DIR}/analysis_results/15_haplotype_phasing/female_by_design_study_samples.tsv}"
-COLLAB_CORE_XLSX="${COLLAB_CORE_XLSX:-/mnt/c/Users/gadab/OneDrive - Uppsala universitet/Documents/TFM/Docs/clinical variables-snps/SNPS PROYECTO MAMA_ENDOMETRIO(8).xlsx}"
+COLLAB_CORE_XLSX="${COLLAB_CORE_XLSX:-}"
 CROSSVAL_1000G_POPULATION="${CROSSVAL_1000G_POPULATION:-EUR}"
 
 
@@ -53,6 +65,8 @@ PROFILE="${PROFILE:-core}"
 FROM_STEP="01"
 TO_STEP="26"
 
+# Step groups mirror the workflow classification in README.md and
+# script_classification_table.tsv.
 STEP_ORDER=(01 02 02b 02c 03 04 04bV 04bP 05 06 07 07b 08 09 09b 10 11 12 13 14 15 15R 16 17 18 19 19b 20 20b 21 22 23 24 25 26)
 CORE_STEPS=(01 02 02b 05 06 07 11 12 15 15R 16 17 18 19b 20 20b 23)
 EXPLORATORY_VALIDATION_STEPS=(09b 13 19 22 24 25 26)
@@ -242,6 +256,7 @@ should_run_any() {
 }
 
 ensure_prereqs() {
+  # Only validate the toolchains required by the selected profile / step range.
   if should_run_any "${BAM_STEPS[@]}"; then
     command -v micromamba >/dev/null 2>&1 || die "micromamba is required for BAM-stage execution."
   fi
@@ -280,7 +295,9 @@ ensure_prereqs() {
     mkdir -p "${ROOT_DIR}/manifests"
   fi
 
-  if should_run_step 19; then
+  if should_run_any 19 24; then
+    [[ -n "${VCF_1000G}" ]] || die "VCF_1000G is not set. Provide it via env or pipeline_config.local.sh"
+    [[ -n "${PANEL_1000G}" ]] || die "PANEL_1000G is not set. Provide it via env or pipeline_config.local.sh"
     [[ -f "${VCF_1000G}" ]] || die "1000 Genomes VCF/BCF not found: ${VCF_1000G}"
     [[ -f "${PANEL_1000G}" ]] || die "1000 Genomes panel not found: ${PANEL_1000G}"
   fi
@@ -324,6 +341,8 @@ run_qc_loops() {
   local zero_cov_dir
   local manifest
 
+  # The DNA QC stages iterate over the fixed cohort/tissue matrix that underpins
+  # the whole thesis dataset.
   for cohort in breast endometrium; do
     for tissue in normal tumour; do
       input_dir="$(cohort_input_dir "${cohort}" "${tissue}")"
@@ -360,6 +379,8 @@ run_variant_calling_loop() {
   local manifest
   local calls_dir
 
+  # The DNA QC stages iterate over the fixed cohort/tissue matrix that underpins
+  # the whole thesis dataset.
   for cohort in breast endometrium; do
     for tissue in normal tumour; do
       manifest="$(cohort_manifest "${cohort}" "${tissue}")"
@@ -413,6 +434,8 @@ if [[ -n "${COLLAB_CORE_XLSX}" ]]; then
 fi
 log "Cross-validation 1000G population: ${CROSSVAL_1000G_POPULATION}"
 
+# The execution block below is intentionally linear so the numbered thesis steps
+# remain easy to cross-reference in the manuscript and repository docs.
 if should_run_any 01 02 02b; then run_qc_loops; fi
 if should_run_step 02c; then announce_step "02c" "Building zero-coverage Excel report"; run_python_script 02c_zerocovinfo.py --zero "${ROOT_DIR}/breast/normal/zero_coverage/zero_cov_normal.tsv" "${ROOT_DIR}/breast/tumour/zero_coverage/zero_cov_tumour.tsv" "${ROOT_DIR}/endometrium/normal/zero_coverage/zero_cov_normal.tsv" "${ROOT_DIR}/endometrium/tumour/zero_coverage/zero_cov_tumour.tsv" --qc "${ROOT_DIR}/breast/normal/dna_qc/qc_summary.tsv" "${ROOT_DIR}/breast/tumour/dna_qc/qc_summary.tsv" "${ROOT_DIR}/endometrium/normal/dna_qc/qc_summary.tsv" "${ROOT_DIR}/endometrium/tumour/dna_qc/qc_summary.tsv" --output "${ANALYSIS_ROOT}/02c_zero_coverage_report/GSDMB_Zero_Coverage_Report.xlsx"; fi
 if should_run_step 03; then announce_step "03" "Generating QC visualisations"; run_python_script 03_qc_visualisation.py; fi
@@ -425,7 +448,7 @@ if should_run_step 07; then announce_step "07" "Merging annotated VCFs into the 
 if should_run_step 07b; then announce_step "07b" "Running variant-level QC checks"; run_python_script 07b_variant_qc.py; fi
 if should_run_step 08; then announce_step "08" "Generating the global variant landscape"; run_python_script 08_mapping.py; fi
 if should_run_step 09; then announce_step "09" "Generating the GSDMB-only landscape"; run_python_script 09_gsdmb_only.py; fi
-if should_run_step 09b; then announce_step "09b" "Comparing normal-versus-tumour landscape pattens with QC and significance checks"; run_python_script 09b_landscape_comparison.py; fi
+if should_run_step 09b; then announce_step "09b" "Comparing normal-versus-tumour landscape patterns with QC and significance checks"; run_python_script 09b_landscape_comparison.py; fi
 if should_run_step 10; then announce_step "10" "Summarising descriptive variant statistics"; run_python_script 10_variant_stats.py; fi
 if should_run_step 11; then announce_step "11" "Identifying common SNPs and benchmarking frequencies"; run_python_script 11_SNPs.py; fi
 if should_run_step 12; then announce_step "12" "Running SNP enrichment testing"; run_python_script 12_stats_enrichment.py; fi
