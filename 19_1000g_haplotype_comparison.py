@@ -1,0 +1,950 @@
+#!/usr/bin/env python3
+"""Script 19: 1000 Genomes haplotype comparison.
+
+This script compares the threshold-specific LD-block haplotypes derived in the
+study cohort against phased reference haplotypes from the 1000 Genomes / IGSR
+resource. Two complementary comparisons are produced:
+
+1. Independent LD-block comparison.
+   The 1000 Genomes subset is used to define LD blocks across the study SNP
+   backbone at r^2 >= 0.80. These blocks are then compared with
+   the study-defined blocks by SNP-set overlap.
+
+2. Fixed-region haplotype comparison.
+   Each LD block discovered in the study cohort is projected onto the selected
+   1000 Genomes population so that haplotype frequencies can be compared on an
+   identical SNP set.
+
+The outputs are designed to support thesis-level reporting by separating block
+structure concordance from haplotype-frequency concordance.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import textwrap
+from collections import Counter
+from pathlib import Path
+from typing import Iterable
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import pysam
+import seaborn as sns
+from scipy.spatial.distance import jensenshannon
+
+from association_runtime import script19_defaults
+from figure_style import QUALITATIVE_COLORBLIND_SEQUENCE
+from pipeline_utils import ensure_directory, find_col
+
+
+sns.set_theme(style="whitegrid", context="talk")
+
+TARGET_THRESHOLD_LABELS = ("r2_080",)
+
+
+def short_label(value: object, max_len: int = 34) -> str:
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    return text if len(text) <= max_len else text[: max_len - 1].rstrip() + "..."
+
+
+def wrap_label(value: object, width: int = 18, max_lines: int = 3) -> str:
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    wrapped = textwrap.wrap(text, width=width, break_long_words=False, break_on_hyphens=False)
+    if not wrapped:
+        return text
+    if len(wrapped) > max_lines:
+        tail = " ".join(wrapped[max_lines - 1:])
+        wrapped = wrapped[: max_lines - 1] + [short_label(tail, max_len=width)]
+    return "\n".join(wrapped)
+
+
+def set_wrapped_ticklabels(ax, axis: str = "x", width: int = 18, max_lines: int = 3, rotation: int = 0, ha: str = "center", fontsize: int = 9) -> None:
+    labels = ax.get_xticklabels() if axis == "x" else ax.get_yticklabels()
+    wrapped = [wrap_label(label.get_text(), width=width, max_lines=max_lines) for label in labels]
+    if axis == "x":
+        ax.set_xticklabels(wrapped, rotation=rotation, ha=ha, fontsize=fontsize)
+    else:
+        ax.set_yticklabels(wrapped, rotation=rotation, ha=ha, fontsize=fontsize)
+
+
+def extract_block_number(label: object) -> int:
+    """Extract the trailing block number for natural ordering and display."""
+    match = re.search(r"Block(\d+)$", str(label).strip())
+    return int(match.group(1)) if match else 10**9
+
+
+def short_block_label(label: object) -> str:
+    """Convert verbose region names such as LD_Block_r2_080_Block10 to Block10."""
+    match = re.search(r"(Block\d+)$", str(label).strip())
+    return match.group(1) if match else short_label(label, max_len=14)
+
+
+def add_margin_labels(ax, points: list[tuple[float, float, str]], side: str = "right", fontsize: float = 7.0, max_labels: int = 6) -> None:
+    if not points:
+        return
+    points = sorted(points, key=lambda item: item[1], reverse=True)[:max_labels]
+    y_min, y_max = ax.get_ylim()
+    pad = (y_max - y_min) * 0.06 if y_max != y_min else 0.5
+    y_positions = np.linspace(y_max - pad, y_min + pad, len(points))
+    x_text = 1.05 if side == "right" else -0.08
+    ha = "left" if side == "right" else "right"
+    for (x_val, y_val, label), y_text in zip(points, y_positions):
+        ax.annotate(
+            short_label(label, 24),
+            xy=(x_val, y_val),
+            xycoords="data",
+            xytext=(x_text, y_text),
+            textcoords=ax.get_yaxis_transform(),
+            ha=ha,
+            va="center",
+            fontsize=fontsize,
+            clip_on=False,
+            bbox=dict(boxstyle="round,pad=0.22", fc="white", ec="#bdbdbd", alpha=0.92, linewidth=0.8),
+            arrowprops=dict(arrowstyle="-", color="#888888", lw=0.8),
+        )
+
+
+def normalise_allele_string(value: object, expected_width: int | None = None) -> str | None:
+    """Normalise haplotype bitstrings while preserving leading zeroes when possible."""
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return None
+    if expected_width and re.fullmatch(r"\d+(?:\.0+)?", text):
+        text = text.split(".", 1)[0].zfill(expected_width)
+    return text
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the 1000 Genomes comparison step."""
+    defaults = script19_defaults()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compare study LD-block haplotypes with phased 1000 Genomes haplotypes "
+            "at the standard r-squared threshold 0.80."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--vcf", required=True, help="Path to the phased 1000 Genomes VCF/BCF (indexed).")
+    parser.add_argument("--panel", required=True, help="Path to the 1000 Genomes sample panel / population metadata file.")
+    parser.add_argument("--haplo-results", default=str(defaults["haplotype_results"]), help="Study haplotype workbook generated by script 15.")
+    parser.add_argument("--out-dir", default=str(defaults["out_dir"]), help="Directory where 1000 Genomes comparison outputs will be written.")
+    parser.add_argument("--populations", nargs="+", default=list(defaults["populations"]), help="1000 Genomes populations or super-populations to analyse.")
+    parser.add_argument("--contig", default="17", help="Primary contig name to search in the reference VCF.")
+    parser.add_argument("--sex-filter", default="female", choices=["female", "male", "all"], help="Reference-panel sex subset to use when the population panel provides sex metadata.")
+    return parser.parse_args()
+
+
+def normalise_threshold_label(value: object) -> str | None:
+    """Normalise threshold encodings to the standard r2_080-style label."""
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.startswith("r2_"):
+        return text
+    try:
+        numeric = float(text)
+    except ValueError:
+        return text
+    return f"r2_{int(round(numeric * 100)):03d}"
+
+
+def _normalise_sex_label(value: object) -> str | None:
+    text = str(value).strip().lower()
+    if not text or text == "nan":
+        return None
+    mapping = {
+        "female": "FEMALE",
+        "f": "FEMALE",
+        "2": "FEMALE",
+        "male": "MALE",
+        "m": "MALE",
+        "1": "MALE",
+    }
+    return mapping.get(text)
+
+
+def read_population_panel(panel_path: Path) -> pd.DataFrame:
+    """Load the IGSR panel and harmonise its key sample/population columns."""
+    panel = pd.read_csv(panel_path, sep=None, engine="python")
+    sample_col = find_col(panel, "sample") or find_col(panel, "sample_id") or find_col(panel, "Sample name")
+    pop_col = find_col(panel, "pop") or find_col(panel, "population") or find_col(panel, "population_code")
+    super_col = (
+        find_col(panel, "super_pop")
+        or find_col(panel, "super_population")
+        or find_col(panel, "superpopulation")
+        or find_col(panel, "super_pop_code")
+    )
+    sex_col = (
+        find_col(panel, "sex")
+        or find_col(panel, "gender")
+        or find_col(panel, "Sex")
+        or find_col(panel, "Gender")
+    )
+    missing = [name for name, col in (("sample", sample_col), ("population", pop_col), ("super_population", super_col)) if col is None]
+    if missing:
+        raise ValueError("Panel file is missing the required columns: " + ", ".join(missing))
+    keep_cols = [sample_col, pop_col, super_col] + ([sex_col] if sex_col is not None else [])
+    out = panel[keep_cols].copy()
+    rename_map = {sample_col: "Sample", pop_col: "Population", super_col: "SuperPopulation"}
+    if sex_col is not None:
+        rename_map[sex_col] = "Panel_Sex"
+    out = out.rename(columns=rename_map)
+    out["Sample"] = out["Sample"].astype(str).str.strip()
+    out["Population"] = out["Population"].astype(str).str.strip().str.upper()
+    out["SuperPopulation"] = out["SuperPopulation"].astype(str).str.strip().str.upper()
+    if "Panel_Sex" in out.columns:
+        out["Panel_Sex"] = out["Panel_Sex"].map(_normalise_sex_label)
+    else:
+        out["Panel_Sex"] = None
+    return out.drop_duplicates(subset=["Sample"])
+
+
+def load_local_haplotype_data(haplo_results_path: Path) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame], pd.DataFrame]:
+    """Load the study LD-block definitions and their haplotype frequency sheets."""
+    workbook = pd.ExcelFile(haplo_results_path)
+    snp_meta = pd.read_excel(workbook, sheet_name="SNPs_Used")
+    required_snp_cols = {"POS_int", "rsID_clean", "REF", "ALT"}
+    missing_snp_cols = required_snp_cols - set(snp_meta.columns)
+    if missing_snp_cols:
+        raise ValueError(f"SNPs_Used sheet is missing columns: {sorted(missing_snp_cols)}")
+    snp_meta = snp_meta.copy()
+    snp_meta["POS_int"] = pd.to_numeric(snp_meta["POS_int"], errors="coerce").astype("Int64")
+    snp_meta["rsID_clean"] = snp_meta["rsID_clean"].astype(str).str.strip()
+    snp_meta["REF"] = snp_meta["REF"].astype(str).str.upper().str.strip()
+    snp_meta["ALT"] = snp_meta["ALT"].astype(str).str.upper().str.strip()
+    if "Gene" not in snp_meta.columns:
+        snp_meta["Gene"] = "Unknown"
+
+    summary = pd.read_excel(workbook, sheet_name="Region_Summary")
+    summary = summary.copy()
+    summary["Threshold_Label"] = summary.get("Threshold_Label", pd.Series(index=summary.index)).map(normalise_threshold_label)
+    ld_summary = summary[
+        summary["Region_Type"].astype(str).eq("LD_Block")
+        & summary["Threshold_Label"].isin(TARGET_THRESHOLD_LABELS)
+    ].copy()
+    if ld_summary.empty:
+        raise ValueError("No threshold-specific LD-block regions were found in the study haplotype workbook.")
+
+    freq_tables: dict[str, pd.DataFrame] = {}
+    for region in ld_summary["Region"].astype(str):
+        sheet_name = f"{region}_Freqs"
+        if sheet_name not in workbook.sheet_names:
+            continue
+        freq_df = pd.read_excel(workbook, sheet_name=sheet_name)
+        if "Allele_String" not in freq_df.columns or "Frequency" not in freq_df.columns:
+            continue
+        freq_tables[region] = freq_df.copy()
+
+    if not freq_tables:
+        raise ValueError("No LD-block frequency tables were available for the selected study regions.")
+
+    local_blocks = pd.read_excel(workbook, sheet_name="LD_Blocks") if "LD_Blocks" in workbook.sheet_names else pd.DataFrame()
+    if not local_blocks.empty:
+        local_blocks = local_blocks.copy()
+        local_blocks["Threshold_Label"] = local_blocks["Threshold_Label"].map(normalise_threshold_label)
+        local_blocks = local_blocks[local_blocks["Threshold_Label"].isin(TARGET_THRESHOLD_LABELS)].copy()
+        local_blocks["Region"] = local_blocks["Threshold_Label"].astype(str).radd("LD_Block_") + "_" + local_blocks["Block"].astype(str)
+        local_blocks["rsID"] = local_blocks["rsID"].astype(str).str.strip()
+
+    return snp_meta, ld_summary, freq_tables, local_blocks
+
+
+def candidate_contigs(vcf: pysam.VariantFile, contig_hint: str) -> list[str]:
+    """Return sensible contig aliases to try when searching the VCF."""
+    header_contigs = set(vcf.header.contigs)
+    stripped = contig_hint.replace("chr", "")
+    candidates = [contig_hint, stripped, f"chr{stripped}"]
+    return [name for name in dict.fromkeys(candidates) if name in header_contigs]
+
+
+def get_population_samples(
+    panel_df: pd.DataFrame,
+    vcf_samples: Iterable[str],
+    population_label: str,
+    sex_filter: str = "female",
+) -> tuple[list[str], dict[str, object]]:
+    """Resolve a requested population label and optionally restrict it by panel sex metadata."""
+    available = set(vcf_samples)
+    label = population_label.upper()
+    if label == "ALL":
+        pop_mask = pd.Series(True, index=panel_df.index)
+    else:
+        pop_mask = (panel_df["Population"] == label) | (panel_df["SuperPopulation"] == label)
+    population_subset = panel_df.loc[pop_mask].copy()
+    initial_matches = [sample for sample in population_subset["Sample"] if sample in available]
+    metadata = {
+        "Population": label,
+        "Requested_Sex_Filter": str(sex_filter).upper(),
+        "Population_Matched_Before_Sex_Filter": len(initial_matches),
+        "Sex_Metadata_Available": bool(population_subset["Panel_Sex"].notna().any()),
+        "Sex_Filter_Applied": False,
+        "Sex_Filter_Status": "Unfiltered",
+        "VCF_Samples_Selected": len(initial_matches),
+    }
+
+    sex_filter_norm = str(sex_filter).strip().lower()
+    filtered_subset = population_subset
+    if sex_filter_norm in {"female", "male"}:
+        target = sex_filter_norm.upper()
+        if population_subset["Panel_Sex"].notna().any():
+            filtered_subset = population_subset[population_subset["Panel_Sex"] == target].copy()
+            metadata["Sex_Filter_Applied"] = True
+            metadata["Sex_Filter_Status"] = f"Filtered_to_{target}"
+            metadata["Panel_Samples_After_Sex_Filter"] = int(filtered_subset["Sample"].nunique())
+        else:
+            metadata["Sex_Filter_Status"] = "Requested_but_panel_lacks_sex_metadata"
+            metadata["Panel_Samples_After_Sex_Filter"] = int(population_subset["Sample"].nunique())
+    else:
+        metadata["Sex_Filter_Status"] = "All_reference_samples_requested"
+        metadata["Panel_Samples_After_Sex_Filter"] = int(population_subset["Sample"].nunique())
+
+    samples = [sample for sample in filtered_subset["Sample"] if sample in available]
+    metadata["VCF_Samples_Selected"] = len(samples)
+    if not samples:
+        raise ValueError(f"No VCF samples matched the requested 1000 Genomes population '{population_label}' after applying the sex filter.")
+    return samples, metadata
+
+
+def match_vcf_record(
+    vcf: pysam.VariantFile,
+    contigs: list[str],
+    pos: int,
+    ref: str,
+    alt: str,
+) -> tuple[pysam.VariantRecord | None, int | None, str | None]:
+    """Fetch the exact VCF record matching one study SNP definition."""
+    for contig in contigs:
+        try:
+            iterator = vcf.fetch(contig, pos - 1, pos)
+        except ValueError:
+            continue
+        for record in iterator:
+            if record.pos != pos:
+                continue
+            if record.ref.upper() != ref.upper():
+                continue
+            alt_alleles = [allele.upper() for allele in (record.alts or ())]
+            if alt.upper() not in alt_alleles:
+                continue
+            alt_index = alt_alleles.index(alt.upper()) + 1
+            return record, alt_index, contig
+    return None, None, None
+
+
+def allele_to_binary(gt_value: int | None, alt_index: int) -> float:
+    """Map a VCF allele index to the study bi-allelic frame."""
+    if gt_value is None or gt_value < 0:
+        return np.nan
+    if gt_value == 0:
+        return 0.0
+    if gt_value == alt_index:
+        return 1.0
+    return np.nan
+
+
+def load_reference_backbone(
+    vcf_path: Path,
+    snp_meta: pd.DataFrame,
+    selected_samples: list[str],
+    contig_hint: str,
+) -> tuple[np.ndarray, np.ndarray, pd.DataFrame, pd.DataFrame]:
+    """Load the study SNP backbone from the reference VCF for one population subset."""
+    vcf = pysam.VariantFile(vcf_path)
+    contigs = candidate_contigs(vcf, contig_hint)
+    if not contigs:
+        raise ValueError(f"Contig '{contig_hint}' was not found in the reference VCF header.")
+
+    matched_rows: list[dict[str, object]] = []
+    qc_rows: list[dict[str, object]] = []
+    allele1_vectors: list[np.ndarray] = []
+    allele2_vectors: list[np.ndarray] = []
+
+    for row in snp_meta.sort_values("POS_int").itertuples(index=False):
+        pos = int(row.POS_int)
+        ref = str(row.REF).upper()
+        alt = str(row.ALT).upper()
+        rsid = str(row.rsID_clean)
+        gene = str(getattr(row, "Gene", "Unknown"))
+
+        record, alt_index, matched_contig = match_vcf_record(vcf, contigs, pos, ref, alt)
+        if record is None or alt_index is None:
+            qc_rows.append(
+                {
+                    "rsID": rsid,
+                    "POS": pos,
+                    "REF": ref,
+                    "ALT": alt,
+                    "Gene": gene,
+                    "Status": "Not found in reference VCF",
+                    "Matched_Contig": None,
+                }
+            )
+            continue
+
+        allele1 = np.full(len(selected_samples), np.nan, dtype=float)
+        allele2 = np.full(len(selected_samples), np.nan, dtype=float)
+        callable_samples = 0
+        for idx, sample in enumerate(selected_samples):
+            gt = record.samples[sample].get("GT")
+            if gt is None or len(gt) < 2:
+                continue
+            a1 = allele_to_binary(gt[0], alt_index)
+            a2 = allele_to_binary(gt[1], alt_index)
+            allele1[idx] = a1
+            allele2[idx] = a2
+            if not np.isnan(a1) and not np.isnan(a2):
+                callable_samples += 1
+
+        matched_rows.append(
+            {
+                "POS_int": pos,
+                "rsID_clean": rsid,
+                "REF": ref,
+                "ALT": alt,
+                "Gene": gene,
+                "Contig": matched_contig,
+                "Callable_Samples": callable_samples,
+            }
+        )
+        qc_rows.append(
+            {
+                "rsID": rsid,
+                "POS": pos,
+                "REF": ref,
+                "ALT": alt,
+                "Gene": gene,
+                "Status": "Matched",
+                "Matched_Contig": matched_contig,
+            }
+        )
+        allele1_vectors.append(allele1)
+        allele2_vectors.append(allele2)
+
+    if not matched_rows:
+        raise ValueError("None of the study SNPs could be matched in the supplied 1000 Genomes VCF.")
+
+    matched_meta = pd.DataFrame(matched_rows)
+    a1 = np.column_stack(allele1_vectors)
+    a2 = np.column_stack(allele2_vectors)
+    qc_df = pd.DataFrame(qc_rows)
+    return a1, a2, matched_meta, qc_df
+
+
+def compute_ld_matrix(a1: np.ndarray, a2: np.ndarray) -> np.ndarray:
+    """Compute pairwise r-squared values from phased allele matrices."""
+    dosage = a1 + a2
+    n_snps = dosage.shape[1]
+    ld = np.full((n_snps, n_snps), np.nan, dtype=float)
+    np.fill_diagonal(ld, 1.0)
+    for i in range(n_snps):
+        for j in range(i + 1, n_snps):
+            xi = dosage[:, i]
+            xj = dosage[:, j]
+            keep = ~(np.isnan(xi) | np.isnan(xj))
+            if keep.sum() < 3:
+                continue
+            xi_keep = xi[keep]
+            xj_keep = xj[keep]
+            if np.nanstd(xi_keep) == 0 or np.nanstd(xj_keep) == 0:
+                continue
+            corr = np.corrcoef(xi_keep, xj_keep)[0, 1]
+            if np.isnan(corr):
+                continue
+            ld[i, j] = corr ** 2
+            ld[j, i] = corr ** 2
+    return ld
+
+
+def define_ld_blocks(ld_matrix: np.ndarray, threshold: float, min_snps: int = 2, max_snps: int = 12) -> dict[str, list[int]]:
+    """Replicate the conservative maximal-window LD-block algorithm used in script 15."""
+    n_snps = ld_matrix.shape[0]
+    if n_snps < min_snps:
+        return {}
+
+    def block_coherent(start: int, end: int) -> bool:
+        sub = ld_matrix[start : end + 1, start : end + 1]
+        tril = sub[np.tril_indices_from(sub, k=-1)]
+        return tril.size > 0 and np.all(~np.isnan(tril) & (tril >= threshold))
+
+    blocks: dict[str, list[int]] = {}
+    block_id = 1
+    i = 0
+    while i < n_snps:
+        if i + min_snps > n_snps:
+            break
+        best_end = None
+        max_end = min(n_snps - 1, i + max_snps - 1)
+        for j in range(max_end, i + min_snps - 2, -1):
+            if block_coherent(i, j):
+                best_end = j
+                break
+        if best_end is None:
+            i += 1
+            continue
+        blocks[f"Block{block_id}"] = list(range(i, best_end + 1))
+        block_id += 1
+        i = best_end + 1
+    return blocks
+
+
+def haplotype_frequency_table(
+    a1_region: np.ndarray,
+    a2_region: np.ndarray,
+    region_meta: pd.DataFrame,
+    population: str,
+    region_name: str,
+) -> tuple[pd.DataFrame, int]:
+    """Estimate haplotype frequencies on an identical SNP region in 1000 Genomes."""
+    callable_mask = (~np.isnan(a1_region).any(axis=1)) & (~np.isnan(a2_region).any(axis=1))
+    callable_n = int(callable_mask.sum())
+    if callable_n == 0:
+        return pd.DataFrame(), 0
+
+    hap1 = ["".join(str(int(bit)) for bit in row) for row in a1_region[callable_mask].astype(int)]
+    hap2 = ["".join(str(int(bit)) for bit in row) for row in a2_region[callable_mask].astype(int)]
+    counts = Counter(hap1 + hap2)
+    total_haps = 2 * callable_n
+    rows = []
+    for allele_string, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+        alt_rsids = [region_meta.iloc[idx]["rsID_clean"] for idx, bit in enumerate(allele_string) if bit == "1"]
+        rows.append(
+            {
+                "Region": region_name,
+                "Population": population,
+                "Allele_String": allele_string,
+                "Frequency": count / total_haps,
+                "Count": count,
+                "Callable_Samples": callable_n,
+                "Variant_Content": "Reference-like" if not alt_rsids else "; ".join(alt_rsids),
+            }
+        )
+    freq_df = pd.DataFrame(rows)
+    freq_df["Reference_Haplotype_ID"] = [f"1000G_H{i}" for i in range(1, len(freq_df) + 1)]
+    return freq_df, callable_n
+
+
+def compare_frequency_tables(
+    local_freq_df: pd.DataFrame,
+    ref_freq_df: pd.DataFrame,
+    region_name: str,
+    threshold_label: str,
+    population: str,
+    callable_samples: int,
+    matched_snps: int,
+    total_snps: int,
+) -> pd.DataFrame:
+    """Create a union frequency table for one study region and one reference population."""
+    local = local_freq_df[["Allele_String", "Frequency", "Haplotype_ID", "Variant_Content"]].copy()
+    local.columns = ["Allele_String", "Study_Frequency", "Study_Haplotype_ID", "Study_Variant_Content"]
+    ref = ref_freq_df[["Allele_String", "Frequency", "Reference_Haplotype_ID", "Variant_Content"]].copy()
+    ref.columns = ["Allele_String", "Reference_Frequency", "Reference_Haplotype_ID", "Reference_Variant_Content"]
+
+    local["Allele_String"] = local["Allele_String"].map(lambda value: normalise_allele_string(value, total_snps))
+    ref["Allele_String"] = ref["Allele_String"].map(lambda value: normalise_allele_string(value, total_snps))
+
+    merged = local.merge(ref, on="Allele_String", how="outer")
+    merged["Study_Frequency"] = merged["Study_Frequency"].fillna(0.0)
+    merged["Reference_Frequency"] = merged["Reference_Frequency"].fillna(0.0)
+    merged["Study_Haplotype_ID"] = merged["Study_Haplotype_ID"].fillna("Not observed")
+    merged["Reference_Haplotype_ID"] = merged["Reference_Haplotype_ID"].fillna("Not observed")
+    merged["Study_Variant_Content"] = merged["Study_Variant_Content"].fillna("Reference-like")
+    merged["Reference_Variant_Content"] = merged["Reference_Variant_Content"].fillna("Reference-like")
+    merged["Region"] = region_name
+    merged["Threshold_Label"] = threshold_label
+    merged["Population"] = population
+    merged["Callable_1000G_Samples"] = callable_samples
+    merged["Matched_SNPs"] = matched_snps
+    merged["Total_Study_SNPs"] = total_snps
+    merged["Frequency_Difference"] = merged["Study_Frequency"] - merged["Reference_Frequency"]
+    merged["Abs_Frequency_Difference"] = merged["Frequency_Difference"].abs()
+    merged["Shared_Haplotype"] = (merged["Study_Frequency"] > 0) & (merged["Reference_Frequency"] > 0)
+    return merged.sort_values(["Region", "Abs_Frequency_Difference", "Allele_String"], ascending=[True, False, True])
+
+
+def summarise_concordance(freq_compare_df: pd.DataFrame, best_overlap: pd.Series | None) -> dict[str, object]:
+    """Reduce one region/population comparison to a compact concordance summary."""
+    study = freq_compare_df["Study_Frequency"].to_numpy(dtype=float)
+    ref = freq_compare_df["Reference_Frequency"].to_numpy(dtype=float)
+    shared = float(np.minimum(study, ref).sum())
+    jsd = float(jensenshannon(study, ref, base=2.0)) if study.sum() > 0 and ref.sum() > 0 else np.nan
+    summary = {
+        "Region": freq_compare_df["Region"].iloc[0],
+        "Threshold_Label": freq_compare_df["Threshold_Label"].iloc[0],
+        "Population": freq_compare_df["Population"].iloc[0],
+        "Callable_1000G_Samples": int(freq_compare_df["Callable_1000G_Samples"].iloc[0]),
+        "Matched_SNPs": int(freq_compare_df["Matched_SNPs"].iloc[0]),
+        "Total_Study_SNPs": int(freq_compare_df["Total_Study_SNPs"].iloc[0]),
+        "Study_Haplotype_Count": int((freq_compare_df["Study_Frequency"] > 0).sum()),
+        "Reference_Haplotype_Count": int((freq_compare_df["Reference_Frequency"] > 0).sum()),
+        "Shared_Haplotype_Count": int(freq_compare_df["Shared_Haplotype"].sum()),
+        "Shared_Frequency_Mass": shared,
+        "Jensen_Shannon_Distance": jsd,
+        "Max_Absolute_Frequency_Difference": float(freq_compare_df["Abs_Frequency_Difference"].max()),
+    }
+    if best_overlap is not None and not best_overlap.empty:
+        summary["Best_1000G_Block"] = best_overlap["Reference_Block_Region"]
+        summary["Best_Block_Jaccard"] = float(best_overlap["Jaccard"])
+        summary["Exact_Block_Match"] = bool(best_overlap["Exact_Match"])
+    else:
+        summary["Best_1000G_Block"] = None
+        summary["Best_Block_Jaccard"] = np.nan
+        summary["Exact_Block_Match"] = False
+    return summary
+
+
+def block_definition_table(
+    blocks: dict[str, list[int]],
+    matched_meta: pd.DataFrame,
+    threshold_label: str,
+    population: str,
+) -> pd.DataFrame:
+    """Convert 1000 Genomes block definitions into a long-form workbook table."""
+    rows = []
+    for block_name, idxs in blocks.items():
+        region_name = f"1000G_{population}_{threshold_label}_{block_name}"
+        for order, idx in enumerate(idxs, start=1):
+            snp = matched_meta.iloc[idx]
+            rows.append(
+                {
+                    "Population": population,
+                    "Threshold_Label": threshold_label,
+                    "Reference_Block_Region": region_name,
+                    "Block": block_name,
+                    "SNP_Order": order,
+                    "rsID": snp["rsID_clean"],
+                    "POS": int(snp["POS_int"]),
+                    "Gene": snp.get("Gene", "Unknown"),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def compare_block_sets(local_blocks: pd.DataFrame, ref_blocks: pd.DataFrame, population: str) -> pd.DataFrame:
+    """Quantify SNP-set overlap between study LD blocks and 1000 Genomes LD blocks."""
+    if local_blocks.empty or ref_blocks.empty:
+        return pd.DataFrame()
+    rows = []
+    for threshold_label in TARGET_THRESHOLD_LABELS:
+        local_subset = local_blocks[local_blocks["Threshold_Label"] == threshold_label]
+        ref_subset = ref_blocks[ref_blocks["Threshold_Label"] == threshold_label]
+        if local_subset.empty or ref_subset.empty:
+            continue
+        local_groups = local_subset.groupby("Region")["rsID"].agg(lambda x: tuple(sorted(set(x))))
+        ref_groups = ref_subset.groupby("Reference_Block_Region")["rsID"].agg(lambda x: tuple(sorted(set(x))))
+        for local_region, local_rsids in local_groups.items():
+            local_set = set(local_rsids)
+            for ref_region, ref_rsids in ref_groups.items():
+                ref_set = set(ref_rsids)
+                union = local_set | ref_set
+                intersect = local_set & ref_set
+                jaccard = len(intersect) / len(union) if union else np.nan
+                rows.append(
+                    {
+                        "Population": population,
+                        "Threshold_Label": threshold_label,
+                        "Local_Region": local_region,
+                        "Reference_Block_Region": ref_region,
+                        "Overlap_SNPs": "; ".join(sorted(intersect)),
+                        "N_Local_SNPs": len(local_set),
+                        "N_Reference_SNPs": len(ref_set),
+                        "N_Overlap_SNPs": len(intersect),
+                        "Jaccard": jaccard,
+                        "Exact_Match": local_set == ref_set,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def plot_block_overlap_heatmap(overlap_df: pd.DataFrame, out_dir: Path) -> None:
+    """Save threshold-specific heatmaps of LD-block overlap."""
+    if overlap_df.empty:
+        return
+
+    def save_heatmap(matrix: pd.DataFrame, population: str, threshold_label: str, suffix: str = "") -> None:
+        if matrix.empty:
+            return
+        width = max(10, matrix.shape[1] * 1.45)
+        height = max(8, matrix.shape[0] * 0.7)
+        fig, ax = plt.subplots(figsize=(width, height))
+        sns.heatmap(
+            matrix,
+            cmap="cividis",
+            vmin=0,
+            vmax=1,
+            linewidths=0.4,
+            linecolor="white",
+            cbar_kws={"label": "Jaccard overlap"},
+            ax=ax,
+        )
+        ax.set_title(f"LD Block Overlap: {population} ({threshold_label})", loc="left", weight="bold")
+        ax.set_xlabel("1000 Genomes block")
+        ax.set_ylabel("Study block")
+        ax.set_xticklabels(
+            [short_block_label(value) for value in matrix.columns],
+            rotation=0,
+            ha="center",
+            fontsize=10,
+        )
+        ax.set_yticklabels(
+            [short_block_label(value) for value in matrix.index],
+            rotation=0,
+            ha="right",
+            fontsize=10,
+        )
+        ax.tick_params(axis="x", pad=8)
+        fig.tight_layout()
+        fig.savefig(out_dir / f"19_1000G_BlockOverlap_{population}_{threshold_label}{suffix}.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+    for (population, threshold_label), subset in overlap_df.groupby(["Population", "Threshold_Label"]):
+        matrix = subset.pivot(index="Local_Region", columns="Reference_Block_Region", values="Jaccard")
+        if matrix.empty:
+            continue
+        matrix = matrix.reindex(
+            index=sorted(matrix.index, key=extract_block_number),
+            columns=sorted(matrix.columns, key=extract_block_number),
+        )
+        save_heatmap(matrix, population, threshold_label)
+
+        max_columns_per_slide = 8
+        if matrix.shape[1] > max_columns_per_slide:
+            for slide_idx, start in enumerate(range(0, matrix.shape[1], max_columns_per_slide), start=1):
+                split_matrix = matrix.iloc[:, start : start + max_columns_per_slide]
+                save_heatmap(split_matrix, population, threshold_label, suffix=f"_slide{slide_idx}")
+
+
+def plot_concordance_summary(summary_df: pd.DataFrame, out_dir: Path) -> None:
+    """Save a compact concordance summary plot for each reference population."""
+    if summary_df.empty:
+        return
+    palette = {"r2_080": QUALITATIVE_COLORBLIND_SEQUENCE[0]}
+    for population, subset in summary_df.groupby("Population"):
+        fig, ax = plt.subplots(figsize=(9, 6))
+        sns.scatterplot(
+            data=subset,
+            x="Shared_Frequency_Mass",
+            y="Jensen_Shannon_Distance",
+            hue="Threshold_Label",
+            palette=palette,
+            s=100,
+            ax=ax,
+        )
+        left_points = []
+        right_points = []
+        for row in subset.itertuples(index=False):
+            label = str(row.Region).replace("LD_Block_", "")
+            point = (float(row.Shared_Frequency_Mass), float(row.Jensen_Shannon_Distance), label)
+            right_points.append(point)
+        ax.set_title(f"Haplotype Concordance: {population}", loc="left", weight="bold")
+        ax.set_xlabel("Shared haplotype-frequency mass")
+        ax.set_ylabel("Jensen-Shannon distance")
+        ax.set_xlim(-0.02, 1.02)
+        ax.set_ylim(-0.02, 1.02)
+        add_margin_labels(ax, left_points, side="left", max_labels=6)
+        add_margin_labels(ax, right_points, side="right", max_labels=6)
+        fig.tight_layout(rect=[0.06, 0, 0.94, 1])
+        fig.savefig(out_dir / f"19_1000G_HaplotypeConcordance_{population}.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+
+def main() -> None:
+    """Run the 1000 Genomes haplotype comparison workflow."""
+    args = parse_args()
+    vcf_path = Path(args.vcf)
+    panel_path = Path(args.panel)
+    haplo_results_path = Path(args.haplo_results)
+    out_dir = ensure_directory(args.out_dir)
+
+    panel_df = read_population_panel(panel_path)
+    snp_meta, region_summary, local_freqs, local_blocks = load_local_haplotype_data(haplo_results_path)
+
+    population_rows = []
+    reference_filter_rows = []
+    variant_qc_tables = []
+    ref_block_tables = []
+    block_overlap_tables = []
+    ref_freq_tables = []
+    frequency_comparisons = []
+    concordance_rows = []
+
+    with pysam.VariantFile(vcf_path) as vcf:
+        vcf_samples = list(vcf.header.samples)
+
+    for population in args.populations:
+        population_label = str(population).upper()
+        selected_samples, filter_meta = get_population_samples(panel_df, vcf_samples, population_label, sex_filter=args.sex_filter)
+        reference_filter_rows.append(filter_meta)
+        a1, a2, matched_meta, variant_qc = load_reference_backbone(vcf_path, snp_meta, selected_samples, args.contig)
+        variant_qc["Population"] = population_label
+        variant_qc_tables.append(variant_qc)
+
+        full_ld = compute_ld_matrix(a1, a2)
+        population_rows.append(
+            {
+                "Population": population_label,
+                "Requested_Sex_Filter": filter_meta["Requested_Sex_Filter"],
+                "Sex_Filter_Applied": filter_meta["Sex_Filter_Applied"],
+                "Sex_Filter_Status": filter_meta["Sex_Filter_Status"],
+                "Population_Matched_Before_Sex_Filter": filter_meta["Population_Matched_Before_Sex_Filter"],
+                "VCF_Samples_Used": len(selected_samples),
+                "Matched_SNPs": matched_meta.shape[0],
+                "Missing_SNPs": int((variant_qc["Status"] != "Matched").sum()),
+            }
+        )
+
+        ref_block_defs_by_threshold: dict[str, pd.DataFrame] = {}
+        for threshold_label in TARGET_THRESHOLD_LABELS:
+            threshold_value = int(threshold_label.split("_")[1]) / 100.0
+            blocks = define_ld_blocks(full_ld, threshold=threshold_value)
+            block_table = block_definition_table(blocks, matched_meta, threshold_label, population_label)
+            ref_block_tables.append(block_table)
+            ref_block_defs_by_threshold[threshold_label] = block_table
+
+        ref_blocks_for_population = pd.concat(ref_block_defs_by_threshold.values(), ignore_index=True)
+        overlap_df = compare_block_sets(local_blocks, ref_blocks_for_population, population_label)
+        if not overlap_df.empty:
+            block_overlap_tables.append(overlap_df)
+
+        matched_index = {rsid: idx for idx, rsid in enumerate(matched_meta["rsID_clean"])}
+        for row in region_summary.itertuples(index=False):
+            region_name = str(row.Region)
+            threshold_label = normalise_threshold_label(getattr(row, "Threshold_Label", None))
+            if threshold_label not in TARGET_THRESHOLD_LABELS or region_name not in local_freqs:
+                continue
+            region_rsids = [token.strip() for token in str(row.SNPs).split(",") if token.strip()]
+            region_indices = [matched_index[rsid] for rsid in region_rsids if rsid in matched_index]
+            if len(region_indices) != len(region_rsids):
+                concordance_rows.append(
+                    {
+                        "Region": region_name,
+                        "Threshold_Label": threshold_label,
+                        "Population": population_label,
+                        "Callable_1000G_Samples": 0,
+                        "Matched_SNPs": len(region_indices),
+                        "Total_Study_SNPs": len(region_rsids),
+                        "Study_Haplotype_Count": int((local_freqs[region_name]["Frequency"] > 0).sum()),
+                        "Reference_Haplotype_Count": 0,
+                        "Shared_Haplotype_Count": 0,
+                        "Shared_Frequency_Mass": np.nan,
+                        "Jensen_Shannon_Distance": np.nan,
+                        "Max_Absolute_Frequency_Difference": np.nan,
+                        "Best_1000G_Block": None,
+                        "Best_Block_Jaccard": np.nan,
+                        "Exact_Block_Match": False,
+                        "Status": "Skipped: one or more SNPs missing in 1000G VCF",
+                    }
+                )
+                continue
+
+            region_meta = matched_meta.iloc[region_indices].reset_index(drop=True)
+            ref_freq_df, callable_samples = haplotype_frequency_table(
+                a1[:, region_indices],
+                a2[:, region_indices],
+                region_meta,
+                population_label,
+                region_name,
+            )
+            if ref_freq_df.empty:
+                concordance_rows.append(
+                    {
+                        "Region": region_name,
+                        "Threshold_Label": threshold_label,
+                        "Population": population_label,
+                        "Callable_1000G_Samples": 0,
+                        "Matched_SNPs": len(region_indices),
+                        "Total_Study_SNPs": len(region_rsids),
+                        "Study_Haplotype_Count": int((local_freqs[region_name]["Frequency"] > 0).sum()),
+                        "Reference_Haplotype_Count": 0,
+                        "Shared_Haplotype_Count": 0,
+                        "Shared_Frequency_Mass": np.nan,
+                        "Jensen_Shannon_Distance": np.nan,
+                        "Max_Absolute_Frequency_Difference": np.nan,
+                        "Best_1000G_Block": None,
+                        "Best_Block_Jaccard": np.nan,
+                        "Exact_Block_Match": False,
+                        "Status": "Skipped: no callable 1000G samples for region",
+                    }
+                )
+                continue
+
+            ref_freq_tables.append(ref_freq_df)
+            comparison_df = compare_frequency_tables(
+                local_freqs[region_name],
+                ref_freq_df,
+                region_name=region_name,
+                threshold_label=threshold_label,
+                population=population_label,
+                callable_samples=callable_samples,
+                matched_snps=len(region_indices),
+                total_snps=len(region_rsids),
+            )
+            frequency_comparisons.append(comparison_df)
+
+            best_overlap = None
+            if not overlap_df.empty:
+                region_overlap = overlap_df[
+                    (overlap_df["Local_Region"] == region_name)
+                    & (overlap_df["Threshold_Label"] == threshold_label)
+                ]
+                if not region_overlap.empty:
+                    best_overlap = region_overlap.sort_values(["Jaccard", "N_Overlap_SNPs"], ascending=[False, False]).iloc[0]
+
+            summary_row = summarise_concordance(comparison_df, best_overlap)
+            summary_row["Status"] = "Compared"
+            concordance_rows.append(summary_row)
+
+    population_summary = pd.DataFrame(population_rows)
+    reference_filter_df = pd.DataFrame(reference_filter_rows)
+    variant_qc_df = pd.concat(variant_qc_tables, ignore_index=True) if variant_qc_tables else pd.DataFrame()
+    ref_block_df = pd.concat(ref_block_tables, ignore_index=True) if ref_block_tables else pd.DataFrame()
+    overlap_df = pd.concat(block_overlap_tables, ignore_index=True) if block_overlap_tables else pd.DataFrame()
+    ref_freq_df_all = pd.concat(ref_freq_tables, ignore_index=True) if ref_freq_tables else pd.DataFrame()
+    freq_compare_df = pd.concat(frequency_comparisons, ignore_index=True) if frequency_comparisons else pd.DataFrame()
+    concordance_df = pd.DataFrame(concordance_rows)
+
+    with pd.ExcelWriter(out_dir / "19_1000G_Haplotype_Comparison.xlsx", engine="openpyxl") as writer:
+        population_summary.to_excel(writer, sheet_name="Population_Summary", index=False)
+        if not reference_filter_df.empty:
+            reference_filter_df.to_excel(writer, sheet_name="Reference_Filtering", index=False)
+        region_summary.to_excel(writer, sheet_name="Study_LD_Regions", index=False)
+        if not local_blocks.empty:
+            local_blocks.to_excel(writer, sheet_name="Study_LD_Blocks", index=False)
+        if not ref_block_df.empty:
+            ref_block_df.to_excel(writer, sheet_name="1000G_LD_Blocks", index=False)
+        if not overlap_df.empty:
+            overlap_df.to_excel(writer, sheet_name="Block_Overlap", index=False)
+        if not variant_qc_df.empty:
+            variant_qc_df.to_excel(writer, sheet_name="Variant_Match_QC", index=False)
+        if not ref_freq_df_all.empty:
+            ref_freq_df_all.to_excel(writer, sheet_name="1000G_Haplotypes", index=False)
+        if not freq_compare_df.empty:
+            freq_compare_df.to_excel(writer, sheet_name="Fixed_Region_Compare", index=False)
+        if not concordance_df.empty:
+            concordance_df.to_excel(writer, sheet_name="Concordance_Summary", index=False)
+
+    plot_block_overlap_heatmap(overlap_df, out_dir)
+    compared_df = concordance_df[concordance_df["Status"] == "Compared"] if (not concordance_df.empty and "Status" in concordance_df.columns) else pd.DataFrame()
+    plot_concordance_summary(compared_df, out_dir)
+
+    print("1000 Genomes haplotype comparison complete")
+    print(f"Reference sex filter requested: {args.sex_filter.upper()}")
+    if not reference_filter_df.empty:
+        for row in reference_filter_df.itertuples(index=False):
+            print(
+                f"  {row.Population}: {row.Sex_Filter_Status} | "
+                f"matched before sex filter={row.Population_Matched_Before_Sex_Filter} | "
+                f"VCF samples used={row.VCF_Samples_Selected}"
+            )
+    print(f"Output directory: {out_dir}")
+    print(f"Workbook: {out_dir / '19_1000G_Haplotype_Comparison.xlsx'}")
+
+
+if __name__ == "__main__":
+    main()

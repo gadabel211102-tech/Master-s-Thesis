@@ -1,0 +1,50 @@
+# Local Python environments
+venv/
+.venv/
+tfm_env/
+
+# Repo-local conda / VEP runtimes
+miniconda3/
+.vep/
+ensembl-vep/
+beagle.jar
+
+# Generated outputs and archives
+analysis_results/
+archive/
+
+# Cohort data and local manifests
+breast/
+endometrium/
+manifests/
+MASTER_SNP_plus_clinical_HARMONISED.xlsx
+
+# Large/local reference resources
+ref/
+ref_alt/
+contigs/
+qc_results/
+gsdmb_final_results/
+setup/installers/
+setup/reference_helpers/
+
+# Session and cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Rhistory
+.RData
+
+# OS / Windows metadata artifacts
+*.Zone.Identifier
+
+# Private or machine-specific documentation inputs
+docs/source_workbooks/
+docs/derived_workbooks/
+docs/presentations/*.pptx
+docs/presentations/~$*.pptx
+pipeline_config.local.toml
+
+# Temporary local check files
+tmp_*.xlsx

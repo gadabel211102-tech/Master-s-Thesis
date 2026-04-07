@@ -1,0 +1,91 @@
+# Public, shareable configuration template for the GSDMB thesis workflow.
+#
+# Copy this file to `pipeline_config.toml` and edit the paths for your local
+# machine before running the pipeline. Repo-local paths are intentionally kept
+# relative so the template can be uploaded to GitHub without exposing personal
+# directories.
+
+[paths]
+project_root = "."
+results_dir = "analysis_results"
+zero_coverage_report_dir = "analysis_results/02c_zero_coverage_report"
+qc_visualisation_dir = "analysis_results/03_qc_visualisation"
+technical_audit_dir = "analysis_results/04_technical_audit"
+annotated_variants_dir = "analysis_results/07_annotated_variants"
+variant_qc_dir = "analysis_results/07b_variant_qc"
+variant_landscape_dir = "analysis_results/08_variant_landscape"
+gsdmb_landscape_dir = "analysis_results/09_gsdmb_landscape"
+landscape_comparison_dir = "analysis_results/09b_landscape_comparison"
+variant_statistics_dir = "analysis_results/10_variant_statistics"
+common_snps_dir = "analysis_results/11_common_snps"
+snp_enrichment_dir = "analysis_results/12_snp_enrichment"
+permutation_testing_dir = "analysis_results/13_permutation_testing"
+interactive_dashboard_dir = "analysis_results/14_interactive_dashboard"
+haplotype_phased_dir = "analysis_results/15_haplotype_phasing"
+haplotype_statistics_dir = "analysis_results/15_haplotype_statistics"
+snp_clinical_dir = "analysis_results/17_snp_clinical_associations"
+haplotype_clinical_dir = "analysis_results/18_haplotype_clinical_associations"
+thousand_genomes_results = "analysis_results/19_1000g_haplotype_comparison"
+isoform_expression_dir = "analysis_results/20_isoform_expression_associations"
+objective2_rna_qc_dir = "analysis_results/19b_objective2_rna_qc"
+objective2_rna_qc_manifest = "analysis_results/19b_objective2_rna_qc/RNA_QC_Manifest.tsv"
+snp_functional_interpretation_dir = "analysis_results/26_snp_functional_interpretation"
+annotated_report = "analysis_results/07_annotated_variants/GSDMB_Annotated_Variants.xlsx"
+harmonised_master = "data/clinical/MASTER_SNP_plus_clinical_HARMONISED.xlsx"
+haplotype_phased = "analysis_results/15_haplotype_phasing/phased_genotypes.tsv"
+haplotype_results = "analysis_results/15_haplotype_statistics/GSDMB_Haplotype_Results.xlsx"
+manifests_dir = "manifests"
+curated_snp_functional_evidence = "docs/curated_snp_functional_evidence.tsv"
+objective2_expression_workbook = "data/source_workbooks/objective2_expression_workbook.xlsx"
+objective2_rna_machine_qc_workbook = "data/source_workbooks/objective2_rna_machine_qc_workbook.xlsx"
+objective2_rna_bed = "rna_bed/IAD258499_4_Designed.bed"
+
+[thresholds]
+min_nfe_af = 0.01
+fdr_threshold = 0.10
+min_carriers = 5
+min_hap_freq = 0.02
+min_events_logistic = 10
+n_permutations = 10000
+random_seed = 42
+rna_panel_depth_target = 20
+rna_panel_exploratory_target_pct = 0.50
+rna_panel_strict_target_pct = 0.70
+rna_gene_exploratory_min_reads = 75
+rna_gene_strict_min_reads = 100
+rna_gene_exploratory_target_pct = 0.60
+rna_gene_strict_target_pct = 0.70
+rna_gene_threshold_scope = "all_panel"
+rna_machine_hard_fail_reads = 10000
+rna_machine_warn_reads = 50000
+rna_machine_warn_q20_pct = 92.0
+rna_machine_hard_fail_q20_pct = 85.0
+
+[grouping]
+pool_normals_as_control = true
+internal_control_tissue = "Healthy"
+output_control_label = "Control"
+
+[[warning_amplicons]]
+label = "rs921650"
+chrom = "chr17"
+start = 39912700
+end = 39912813
+
+[[warning_amplicons]]
+label = "chr17:39908600-39908800"
+chrom = "chr17"
+start = 39908600
+end = 39908800
+
+[[warning_amplicons]]
+label = "rs117097909"
+chrom = "chr17"
+start = 39908610
+end = 39908804
+
+[[warning_amplicons]]
+label = "chr17:39907450-39907625"
+chrom = "chr17"
+start = 39907450
+end = 39907625

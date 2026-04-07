@@ -1,0 +1,13 @@
+pandas
+numpy
+scipy
+statsmodels
+seaborn
+matplotlib
+lifelines
+openpyxl
+plotly
+biopython
+tqdm
+scikit-learn
+pysam
