@@ -174,12 +174,6 @@ Core outputs are written under `analysis_results/`, especially:
 - `analysis_results/20b_panel_gene_expression`
 - `analysis_results/23_rna_integration`
 
-## Important interpretation guardrails
-
-- Do not describe the breast analysis as matched tumour-normal unless you are explicitly referring to an old prototype script that is no longer part of the active pipeline.
-- Do not describe stage `12` and stage `17` as the same thing. Stage `12` is the main common-SNP tumour-versus-healthy enrichment layer; stage `17` is the broader follow-up association suite.
-- Do not present permutation testing, dashboard outputs, technical audits, or rare-variant follow-up as if they were part of the primary discovery chain.
-- Use association language, not causal language.
 
 ## Key documentation
 
