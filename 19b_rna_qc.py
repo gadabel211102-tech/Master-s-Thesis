@@ -75,7 +75,9 @@ def sx(v):
         (r"^DNA_SNP_(EN|MN|AT)_(\d+)", lambda m: f"SNP_{m.group(1).upper()}_{m.group(2)}"),
         (r"^DNA_(AT|EN|MN)_(\d+)", lambda m: f"SNP_{m.group(1).upper()}_{m.group(2)}"),
         (r"^DNA_(?:SNP_)?MT[-_]T_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
+        (r"^MAMAH2_MT[-_]T_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
         (r"^DNA_(?:SNP_)?MT[-_]N_(\d+)", lambda m: f"SNP_MN_{m.group(1)}"),
+        (r"^MAMAH2_MT[-_]N_(\d+)", lambda m: f"SNP_MN_{m.group(1)}"),
         (r"^RNA_SNP_(AT|EN|MN|MT-T|MT-N)[-_]?(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
         (r"^SNP_RNA_(AT|EN|MN|MT-T|MT-N)_(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
         (r"^SNP_(AT|EN|MN|MT-T|MT-N)_RNA_(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
@@ -288,7 +290,7 @@ def match_expr(df: pd.DataFrame, master: pd.DataFrame) -> tuple[pd.DataFrame, pd
     return merged, pd.DataFrame(audit)
 
 
-def rebuild_cached_bam_validation(out_dir: Path, rna_bed: str | Path | None):
+def rebuild_cached_bam_validation(out_dir: Path, rna_bed: str | Path | None, expr: pd.DataFrame, sx_func):
     inventory_path = out_dir / "RNA_BAM_Inventory.tsv"
     target_cov_path = out_dir / "RNA_Target_Coverage.tsv.gz"
     if not inventory_path.exists() or not target_cov_path.exists() or not rna_bed or not Path(rna_bed).exists():
@@ -298,6 +300,19 @@ def rebuild_cached_bam_validation(out_dir: Path, rna_bed: str | Path | None):
     panel_design = load_rna_panel_design(rna_bed)
     if inventory.empty:
         return None
+
+    # Refresh parser-dependent identity fields from the current code so cache
+    # reuse does not preserve stale snp_code assignments after naming fixes.
+    expr_codes = set(expr["snp_code"].dropna())
+    primary_codes = set(expr.loc[expr["analysis_include_primary"], "snp_code"].dropna())
+    if "RNA_BAM_Name" in inventory.columns:
+        bam_stems = inventory["RNA_BAM_Name"].astype(str).map(lambda x: Path(x).stem)
+    else:
+        bam_stems = inventory["RNA_BAM_Path"].astype(str).map(lambda x: Path(x).stem)
+    inventory["snp_code"] = bam_stems.map(sx_func)
+    inventory["matched_expression_sample"] = inventory["snp_code"].isin(expr_codes)
+    inventory["matched_primary_sample"] = inventory["snp_code"].isin(primary_codes)
+
     metrics_rows = []
     if not target_cov.empty and "RNA_BAM_Path" in target_cov.columns:
         for bam_path, cov_df in target_cov.groupby("RNA_BAM_Path", dropna=False):
@@ -335,7 +350,7 @@ def rebuild_cached_bam_validation(out_dir: Path, rna_bed: str | Path | None):
         mean_gsdmb_depth=("RNA_GSDMB_Mean_Depth", "mean"),
     ).reset_index()
     bam_summary["rna_bed"] = str(rna_bed)
-    bam_summary["validation_note"] = "RNA BAM metrics were rebuilt from cached target coverage instead of rerunning bedcov."
+    bam_summary["validation_note"] = "RNA BAM metrics were rebuilt from cached target coverage and refreshed with the current sample parser."
     return inventory, target_cov, bam_summary, sample_qc, panel_design
 
 
@@ -428,7 +443,7 @@ def main() -> None:
     machine_qc = load_machine_qc(machine_qc_path)
     merged, audit = match_expr(expr, master)
     dna_inventory, dna_summary = build_dna_baseline_inventory(Path(__file__).resolve().parent, master)
-    cached = None if args.recompute_coverage else rebuild_cached_bam_validation(out_dir, bed_path)
+    cached = None if args.recompute_coverage else rebuild_cached_bam_validation(out_dir, bed_path, merged, sx)
     if cached is None:
         inventory, target_cov, bam_summary, sample_qc, panel_design = bam_validation(Path(__file__).resolve().parent, merged, bed_path, sx)
         cache_mode = "recomputed"

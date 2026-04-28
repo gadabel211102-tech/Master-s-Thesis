@@ -16,6 +16,7 @@ from pipeline_utils import (
     build_amplicon_warning_lookup,
     combine_gnomad_nfe,
     ensure_directory,
+    extract_rsid,
 )
 
 
@@ -25,16 +26,25 @@ HER2_LABELS = {"HER2 subtype", "HER2 copies"}
 OUTPUT_WORKBOOK = "26_SNP_Functional_Interpretation.xlsx"
 OUTPUT_TABLE_TSV = "26_SNP_Interpretation_Table.tsv"
 OUTPUT_SUMMARY_TXT = "26_Thesis_Interpretation_Summary.txt"
+OUTPUT_INTRONIC_ALAMUT_XLSX = "26_Intronic_Variant_Alamut_Shortlist.xlsx"
+OUTPUT_INTRONIC_ALAMUT_TSV = "26_Intronic_Variant_Alamut_Shortlist.tsv"
+OUTPUT_SUPERVISOR_SUMMARY_XLSX = "26_Supervisor_Shareable_Summary.xlsx"
 
 
 DEFAULTS = script26_defaults()
 OUT_DIR = ensure_directory(DEFAULTS["out_dir"])
 FDR_THRESHOLD = float(DEFAULTS["fdr_threshold"])
+RESULTS_ROOT = OUT_DIR.parent
 PATHS = {
     key: Path(value) if not isinstance(value, Path) else value
     for key, value in DEFAULTS.items()
     if key not in {"fdr_threshold", "grouping"}
 }
+PATHS.update({
+    "stage17b": RESULTS_ROOT / "17b_rare_variant_associations" / "GSDMB_Rare_Variant_Association_Results.xlsx",
+    "stage23": RESULTS_ROOT / "23_rna_integration" / "23_RNA_Genetic_Integration.xlsx",
+    "stage25": RESULTS_ROOT / "25_rs11078928_rs869402_haplotype_focus" / "25_Supervisor_Summary.tsv",
+})
 
 
 def s(value: object) -> str:
@@ -66,6 +76,20 @@ def join_unique(values, sep: str = "; ", limit: int | None = None) -> str:
     if limit is not None and len(items) > limit:
         return sep.join(items[:limit]) + f"{sep}..."
     return sep.join(items)
+
+
+def _first_nonempty_text(series) -> str:
+    for value in series:
+        text = s(value)
+        if text:
+            return text
+    return ""
+
+
+def _min_numeric_across(row: pd.Series, columns: list[str]) -> float:
+    values = [pd.to_numeric(row.get(col), errors="coerce") for col in columns if col in row.index]
+    values = [float(value) for value in values if pd.notna(value)]
+    return min(values) if values else math.nan
 
 
 def split_pubmed_ids(value: object) -> list[str]:
@@ -102,6 +126,25 @@ def fmt_num(value: object, digits: int = 3) -> str:
 
 def genes_from_text(text: str) -> set[str]:
     return {item.strip().upper() for item in re.split(r"[;,]", text) if item.strip()}
+
+
+def _split_gene_tokens(value: object) -> list[str]:
+    return [item.strip() for item in re.split(r"[;,]", s(value)) if item.strip()]
+
+
+def _looks_like_ensembl_gene_text(value: object) -> bool:
+    tokens = _split_gene_tokens(value)
+    return bool(tokens) and all(re.fullmatch(r"ENSG\d+(?:\.\d+)?", token, flags=re.IGNORECASE) for token in tokens)
+
+
+def _display_gene_name(primary_gene: object, annotation_gene: object) -> str:
+    primary = s(primary_gene)
+    annotation = s(annotation_gene)
+    if primary and not _looks_like_ensembl_gene_text(primary):
+        return primary
+    if annotation and not _looks_like_ensembl_gene_text(annotation):
+        return annotation
+    return primary or annotation
 
 
 def representative_annotation_row(sub: pd.DataFrame) -> pd.Series:
@@ -195,9 +238,13 @@ def load_annotation_backbone(path: Path) -> pd.DataFrame:
 
         rows.append({
             "SNP_ID": snp_id,
+            "rsID": extract_rsid(rep.get("Existing_variation")) or (snp_id if re.fullmatch(r"rs\d+", str(snp_id), flags=re.IGNORECASE) else ""),
             "Position": f"{s(rep.get('CHROM'))}:{int(rep.get('POS'))}" if pd.notna(rep.get("POS")) else s(rep.get("CHROM")),
             "Chromosome": s(rep.get("CHROM")),
             "POS": int(rep.get("POS")) if pd.notna(rep.get("POS")) else pd.NA,
+            "REF": s(rep.get("REF")).upper(),
+            "ALT": s(rep.get("ALT")).upper(),
+            "HGVSc": s(rep.get("HGVSc")),
             "Gene": gene_text,
             "Consequence": s(rep.get("Consequence")) or cons_text,
             "Consequence_All": cons_text,
@@ -255,26 +302,48 @@ def load_stage20b(path: Path) -> pd.DataFrame:
     return df[df.get("FDR_Sig", pd.Series(index=df.index)).eq(True)].copy()
 
 
+def _row_get(row: pd.Series, *candidates: str, default: str = "") -> str:
+    """Return the first non-null value found among candidate column names."""
+    for col in candidates:
+        val = row.get(col)
+        if val is not None and not (isinstance(val, float) and math.isnan(val)):
+            text = str(val).strip()
+            if text and text.lower() not in {"nan", "none", "na"}:
+                return text
+    return default
+
+
 def load_mapping_labels(path08: Path, path09: Path) -> pd.DataFrame:
+    # Uses iterrows() + dict-style access so the function is robust to column
+    # renames across pipeline versions (Variant_ID vs Variant_Key,
+    # Consequence vs Consequence_Raw, etc.) without hard-coded attribute names.
     rows: list[dict[str, object]] = []
     stage08 = load_excel_sheet(path08, "labelled_variants")
     if not stage08.empty:
-        for row in stage08.itertuples(index=False):
+        for _, row in stage08.iterrows():
+            snp_id = _row_get(row, "Variant_ID", "Variant_Key")
+            cohort  = _row_get(row, "Cohort")
+            tissue  = _row_get(row, "Tissue")
+            cons    = _row_get(row, "Consequence", "Consequence_Raw")
             rows.append({
-                "SNP_ID": str(row.Variant_ID).strip(),
+                "SNP_ID": snp_id,
                 "Mapping_Source": "Stage08_Global_Labelled",
-                "Mapping_Context": f"{row.Cohort}/{row.Tissue} {row.Consequence}",
+                "Mapping_Context": f"{cohort}/{tissue} {cons}",
             })
     for sheet in ["common_snp_points", "lower_freq_points"]:
         stage09 = load_excel_sheet(path09, sheet)
         if stage09.empty or "Labelled_On_Figure" not in stage09.columns:
             continue
         stage09 = stage09[stage09["Labelled_On_Figure"].eq(True)].copy()
-        for row in stage09.itertuples(index=False):
+        for _, row in stage09.iterrows():
+            snp_id = _row_get(row, "Variant_ID", "Variant_Key")
+            cohort  = _row_get(row, "Cohort")
+            tissue  = _row_get(row, "Tissue")
+            cons    = _row_get(row, "Consequence", "Consequence_Raw")
             rows.append({
-                "SNP_ID": str(row.Variant_ID).strip(),
+                "SNP_ID": snp_id,
                 "Mapping_Source": f"Stage09_{sheet}",
-                "Mapping_Context": f"{row.Cohort}/{row.Tissue} {row.Consequence}",
+                "Mapping_Context": f"{cohort}/{tissue} {cons}",
             })
     return pd.DataFrame(rows).drop_duplicates() if rows else pd.DataFrame(columns=["SNP_ID", "Mapping_Source", "Mapping_Context"])
 
@@ -609,13 +678,368 @@ def build_thesis_summary(final_df: pd.DataFrame, source_audit: pd.DataFrame) -> 
             lines.append(f"- {row.SNP_ID}: {row.Overall_biological_interpretation}")
     return lines
 
+def load_stage17b(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    summary = load_excel_sheet(path, "summary_significant")
+    catalogue = load_excel_sheet(path, "rare_variant_catalogue")
+    if not summary.empty and "Exposure_ID" in summary.columns:
+        summary = summary.copy()
+        summary["Exposure_ID"] = summary["Exposure_ID"].astype(str).str.strip()
+    if not catalogue.empty and "Variant_Key" in catalogue.columns:
+        catalogue = catalogue.copy()
+        catalogue["Variant_Key"] = catalogue["Variant_Key"].astype(str).str.strip()
+    return summary, catalogue
+
+
+def load_stage23_isoform_summary(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    workbook = pd.ExcelFile(path)
+    if "GSDMB Isoform Summary" in workbook.sheet_names:
+        return pd.read_excel(path, sheet_name="GSDMB Isoform Summary")
+    if "gsdmb_isoform_answer" in workbook.sheet_names:
+        return pd.read_excel(path, sheet_name="gsdmb_isoform_answer")
+    return pd.DataFrame()
+
+
+def load_stage25_supervisor_summary(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path, sep="	")
+
+
+def _preferred_variant_label(rsid: str, gene: str, hgvsc: str, chrom: str, pos: object, ref: str, alt: str, fallback: str = "") -> str:
+    if rsid:
+        return rsid
+    short_hgvsc = hgvsc.split(":")[-1] if hgvsc and ":" in hgvsc else hgvsc
+    if gene and short_hgvsc:
+        return f"{gene} {short_hgvsc}"
+    genomic = ""
+    if chrom and pd.notna(pos) and ref and alt:
+        genomic = f"{chrom}:{int(pos)}:{ref}>{alt}"
+    elif chrom and pd.notna(pos):
+        genomic = f"{chrom}:{int(pos)}"
+    if gene and genomic:
+        return f"{gene} {genomic}"
+    return genomic or fallback or rsid or gene or "Unknown variant"
+
+
+def _lookup_annotation_row(annotation_df: pd.DataFrame, variant_id: str = "", rsid: str = "", chrom: str = "", pos: object = pd.NA, ref: str = "", alt: str = "") -> pd.Series:
+    if annotation_df.empty:
+        return pd.Series(dtype=object)
+    if rsid:
+        match = annotation_df[annotation_df.get("rsID", pd.Series(index=annotation_df.index, dtype=object)).astype(str).str.lower().eq(str(rsid).lower())]
+        if not match.empty:
+            return match.iloc[0]
+    if variant_id:
+        match = annotation_df[annotation_df["SNP_ID"].astype(str).str.lower().eq(str(variant_id).lower())]
+        if not match.empty:
+            return match.iloc[0]
+    if chrom and pd.notna(pos):
+        match = annotation_df[(annotation_df.get("Chromosome", pd.Series(index=annotation_df.index, dtype=object)).astype(str) == str(chrom)) & (pd.to_numeric(annotation_df.get("POS", pd.Series(index=annotation_df.index, dtype=float)), errors="coerce") == pd.to_numeric(pos, errors="coerce"))]
+        if ref:
+            match = match[match.get("REF", pd.Series(index=match.index, dtype=object)).astype(str).str.upper().eq(str(ref).upper())]
+        if alt:
+            match = match[match.get("ALT", pd.Series(index=match.index, dtype=object)).astype(str).str.upper().eq(str(alt).upper())]
+        if not match.empty:
+            return match.iloc[0]
+    return pd.Series(dtype=object)
+
+
+def _is_modifier_impact(value: object) -> bool:
+    return bool(re.search(r"\bmodifier\b", s(value), flags=re.IGNORECASE))
+
+
+def _is_alamut_shortlist_candidate(consequence: object, impact: object) -> bool:
+    consequence_text = s(consequence).lower()
+    return "intron" in consequence_text or "splice" in consequence_text or _is_modifier_impact(impact)
+
+
+def _best_support_label(fdr_value: object) -> str:
+    fdr_num = pd.to_numeric(fdr_value, errors="coerce")
+    if pd.notna(fdr_num) and float(fdr_num) < FDR_THRESHOLD:
+        return "FDR-supported"
+    return "Nominal only"
+
+
+def _stage17_best_p_fdr(row: pd.Series) -> tuple[float, float]:
+    if s(row.get("Analysis_Type")) == "Tumour_vs_Control":
+        return pd.to_numeric(row.get("P_Value"), errors="coerce"), pd.to_numeric(row.get("FDR_P_Value"), errors="coerce")
+    if s(row.get("Analysis_Type")) == "Cancer_Risk":
+        return (
+            _min_numeric_across(row, ["P_Adj_Age", "P_Unadj", "P_Hom_vs_WT", "P_Het_vs_WT"]),
+            _min_numeric_across(row, ["FDR_Adj_Age", "FDR_Unadj", "FDR_Hom_vs_WT", "FDR_Het_vs_WT"]),
+        )
+    return (
+        _min_numeric_across(row, ["P_Unadj", "P_Adj_Age", "P_Adj_BMI", "P_Adj_AgeBMI"]),
+        _min_numeric_across(row, ["FDR_Unadj", "FDR_Adj_Age", "FDR_Adj_BMI", "FDR_Adj_AgeBMI"]),
+    )
+
+
+def _stage17_context(row: pd.Series) -> str:
+    analysis_type = s(row.get("Analysis_Type"))
+    if analysis_type == "Tumour_vs_Control":
+        return f"Stage 17 tumour vs control ({s(row.get('Analysis_Group'))})"
+    if analysis_type == "Cancer_Risk":
+        return f"Stage 17 cancer risk ({s(row.get('Cohort'))})"
+    cohort = s(row.get("Cohort")) or s(row.get("Analysis_Group"))
+    clin_label = s(row.get("Clin_Label")) or "clinical association"
+    return f"Stage 17 clinical association ({cohort}: {clin_label})"
+
+
+def build_intronic_alamut_tables(stage12_all: pd.DataFrame, stage17: pd.DataFrame, stage17b_summary: pd.DataFrame, stage17b_catalogue: pd.DataFrame, annotation_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    rows: list[dict[str, object]] = []
+
+    if not stage12_all.empty:
+        stage12_intronic = stage12_all[stage12_all.get("Raw_Significant", pd.Series(index=stage12_all.index)).fillna(False)].copy()
+        for _, row in stage12_intronic.iterrows():
+            ann = _lookup_annotation_row(annotation_df, variant_id=s(row.get("SNP_ID")), rsid=s(row.get("rsID")))
+            rsid = s(row.get("rsID")) or s(ann.get("rsID"))
+            chrom = s(ann.get("Chromosome"))
+            pos = ann.get("POS")
+            ref = s(ann.get("REF")).upper()
+            alt = s(ann.get("ALT")).upper()
+            gene = _display_gene_name(row.get("Symbol"), ann.get("Gene"))
+            consequence = s(row.get("Consequence")) or s(ann.get("Consequence"))
+            impact = s(row.get("Impact")) or s(ann.get("Impact"))
+            if not _is_alamut_shortlist_candidate(consequence, impact):
+                continue
+            hgvsc = s(ann.get("HGVSc"))
+            splice_note = s(ann.get("Splicing_Annotation")) or hgvsc
+            preferred = _preferred_variant_label(rsid, gene, hgvsc, chrom, pos, ref, alt, fallback=s(row.get("Display_Label")) or s(row.get("SNP_ID")))
+            stable_key = f"{chrom}:{int(pos)}:{ref}>{alt}" if chrom and pd.notna(pos) and ref and alt else preferred
+            rows.append({
+                "Stable Variant Key": stable_key,
+                "Variant Type": "Common SNP",
+                "Preferred Label": preferred,
+                "rsID": rsid,
+                "Gene": gene,
+                "Chromosome": chrom,
+                "Position": int(pos) if pd.notna(pos) else pd.NA,
+                "REF": ref,
+                "ALT": alt,
+                "Consequence": consequence,
+                "Impact": impact,
+                "Analysis Source": "Stage 12",
+                "Cohort / Analysis Context": s(row.get("Analysis_Group")),
+                "Analysis Context": f"Stage 12 tumour vs pooled healthy controls ({s(row.get('Analysis_Group'))})",
+                "P-Value": pd.to_numeric(row.get("P_Value"), errors="coerce"),
+                "FDR": pd.to_numeric(row.get("FDR_P_Value"), errors="coerce"),
+                "Significance Support": _best_support_label(row.get("FDR_P_Value")),
+                "Splice / HGVSc Annotation": splice_note,
+                "Coverage Risk Flag": bool(row.get("Coverage_Risk_Flag", False)),
+                "Coverage Risk Note": s(row.get("Coverage_Risk_Note")),
+            })
+
+    if not stage17.empty:
+        stage17_intronic = stage17.copy()
+        for _, row in stage17_intronic.iterrows():
+            ann = _lookup_annotation_row(annotation_df, variant_id=s(row.get("Variant_ID")), rsid=s(row.get("Variant_ID")))
+            rsid = s(ann.get("rsID")) or (s(row.get("Variant_ID")) if re.fullmatch(r"rs\d+", s(row.get("Variant_ID")), flags=re.IGNORECASE) else "")
+            chrom = s(ann.get("Chromosome"))
+            pos = ann.get("POS")
+            ref = s(ann.get("REF")).upper()
+            alt = s(ann.get("ALT")).upper()
+            gene = _display_gene_name(row.get("Gene"), ann.get("Gene"))
+            consequence = s(row.get("Consequence")) or s(ann.get("Consequence"))
+            impact = s(row.get("IMPACT")) or s(ann.get("Impact"))
+            if not _is_alamut_shortlist_candidate(consequence, impact):
+                continue
+            hgvsc = s(ann.get("HGVSc"))
+            splice_note = s(ann.get("Splicing_Annotation")) or hgvsc
+            best_p, best_fdr = _stage17_best_p_fdr(row)
+            preferred = _preferred_variant_label(rsid, gene, hgvsc, chrom, pos, ref, alt, fallback=s(row.get("Variant_ID")))
+            stable_key = f"{chrom}:{int(pos)}:{ref}>{alt}" if chrom and pd.notna(pos) and ref and alt else preferred
+            rows.append({
+                "Stable Variant Key": stable_key,
+                "Variant Type": "Common SNP",
+                "Preferred Label": preferred,
+                "rsID": rsid,
+                "Gene": gene,
+                "Chromosome": chrom,
+                "Position": int(pos) if pd.notna(pos) else pd.NA,
+                "REF": ref,
+                "ALT": alt,
+                "Consequence": consequence,
+                "Impact": impact,
+                "Analysis Source": "Stage 17",
+                "Cohort / Analysis Context": s(row.get("Cohort")) or s(row.get("Analysis_Group")),
+                "Analysis Context": _stage17_context(row),
+                "P-Value": best_p,
+                "FDR": best_fdr,
+                "Significance Support": _best_support_label(best_fdr),
+                "Splice / HGVSc Annotation": splice_note,
+                "Coverage Risk Flag": bool(row.get("Coverage_Risk_Flag", False)),
+                "Coverage Risk Note": s(row.get("Coverage_Risk_Note")),
+            })
+
+    if not stage17b_summary.empty and not stage17b_catalogue.empty:
+        rare_summary = stage17b_summary[stage17b_summary.get("Exposure_Type", pd.Series(index=stage17b_summary.index, dtype=object)).astype(str).eq("Rare_Variant")].copy()
+        rare_catalogue = stage17b_catalogue[[c for c in ["Variant_Key", "Variant_Label", "Variant_ID", "Gene", "CHROM", "POS", "REF", "ALT", "Consequence", "IMPACT"] if c in stage17b_catalogue.columns]].drop_duplicates("Variant_Key")
+        rare_summary = rare_summary.merge(rare_catalogue, left_on="Exposure_ID", right_on="Variant_Key", how="left", suffixes=("", "_catalogue"))
+        for _, row in rare_summary.iterrows():
+            rsid = s(row.get("Variant_ID")) if re.fullmatch(r"rs\d+", s(row.get("Variant_ID")), flags=re.IGNORECASE) else ""
+            chrom = s(row.get("CHROM"))
+            pos = pd.to_numeric(row.get("POS"), errors="coerce")
+            ref = s(row.get("REF")).upper()
+            alt = s(row.get("ALT")).upper()
+            ann = _lookup_annotation_row(annotation_df, variant_id=rsid or s(row.get("Variant_Label")), rsid=rsid, chrom=chrom, pos=pos, ref=ref, alt=alt)
+            gene = _display_gene_name(row.get("Gene"), ann.get("Gene"))
+            consequence = s(row.get("Consequence")) or s(ann.get("Consequence"))
+            impact = s(row.get("IMPACT")) or s(ann.get("Impact"))
+            if not _is_alamut_shortlist_candidate(consequence, impact):
+                continue
+            hgvsc = s(ann.get("HGVSc"))
+            splice_note = s(ann.get("Splicing_Annotation")) or hgvsc
+            preferred = _preferred_variant_label(rsid, gene, hgvsc, chrom, pos, ref, alt, fallback=s(row.get("Variant_Label")) or s(row.get("Exposure_ID")))
+            stable_key = f"{chrom}:{int(pos)}:{ref}>{alt}" if chrom and pd.notna(pos) and ref and alt else preferred
+            rows.append({
+                "Stable Variant Key": stable_key,
+                "Variant Type": "Rare variant / mutation",
+                "Preferred Label": preferred,
+                "rsID": rsid,
+                "Gene": gene,
+                "Chromosome": chrom,
+                "Position": int(pos) if pd.notna(pos) else pd.NA,
+                "REF": ref,
+                "ALT": alt,
+                "Consequence": consequence,
+                "Impact": impact,
+                "Analysis Source": "Stage 17b",
+                "Cohort / Analysis Context": s(row.get("Cohort")) or s(row.get("Analysis_Group")),
+                "Analysis Context": f"Stage 17b {s(row.get('Analysis')).replace('_', ' ').strip()} ({s(row.get('Cohort')) or s(row.get('Analysis_Group'))})",
+                "P-Value": pd.to_numeric(row.get("P_Primary"), errors="coerce"),
+                "FDR": pd.to_numeric(row.get("FDR_Primary"), errors="coerce"),
+                "Significance Support": _best_support_label(row.get("FDR_Primary")),
+                "Splice / HGVSc Annotation": splice_note,
+                "Coverage Risk Flag": bool(ann.get("Coverage_Risk_Flag", False)),
+                "Coverage Risk Note": s(ann.get("Coverage_Risk_Note")),
+            })
+
+    if not rows:
+        note = pd.DataFrame({"Notes": ["No significant intronic, splice-related, or other modifier-impact SNPs / mutations were available for Alamut shortlisting."]})
+        return note.copy(), note.copy(), note
+
+    analysis_context = pd.DataFrame(rows)
+    support_rank = {"FDR-supported": 0, "Nominal only": 1}
+    analysis_context["Support Rank"] = analysis_context["Significance Support"].map(support_rank).fillna(9)
+    analysis_context = analysis_context.sort_values(["Support Rank", "P-Value", "Variant Type", "Preferred Label", "Analysis Context"], kind="stable").reset_index(drop=True)
+
+    summary_rows = []
+    for stable_key, sub in analysis_context.groupby("Stable Variant Key", sort=False):
+        summary_rows.append({
+            "Preferred Label": _first_nonempty_text(sub["Preferred Label"]),
+            "rsID": _first_nonempty_text(sub["rsID"]),
+            "Gene": join_unique(sub["Gene"]),
+            "Chromosome": _first_nonempty_text(sub["Chromosome"]),
+            "Position": pd.to_numeric(sub["Position"], errors="coerce").dropna().astype(int).iloc[0] if pd.to_numeric(sub["Position"], errors="coerce").notna().any() else pd.NA,
+            "REF": _first_nonempty_text(sub["REF"]),
+            "ALT": _first_nonempty_text(sub["ALT"]),
+            "Consequence": join_unique(sub["Consequence"]),
+            "Impact": join_unique(sub["Impact"]),
+            "Variant Type": join_unique(sub["Variant Type"]),
+            "Significant Contexts": " | ".join(dict.fromkeys(sub["Analysis Context"].astype(str).tolist())),
+            "Best P-Value": pd.to_numeric(sub["P-Value"], errors="coerce").min(),
+            "Best FDR": pd.to_numeric(sub["FDR"], errors="coerce").min(),
+            "Best Support": "FDR-supported" if (sub["Significance Support"] == "FDR-supported").any() else "Nominal only",
+            "Splice / HGVSc Annotation": join_unique(sub["Splice / HGVSc Annotation"]),
+            "Coverage Risk Flag": bool(sub["Coverage Risk Flag"].fillna(False).any()),
+            "Coverage Risk Note": join_unique(sub["Coverage Risk Note"]),
+        })
+    variant_summary = pd.DataFrame(summary_rows).sort_values(["Best FDR", "Best P-Value", "Preferred Label"], kind="stable").reset_index(drop=True)
+
+    notes = pd.DataFrame({
+        "Notes": [
+            "The Variant Shortlist sheet collapses repeated analysis rows to one row per unique intronic, splice-related, or other modifier-impact variant.",
+            "The Analysis Context sheet preserves the cohort / analysis source, P-value, FDR, and support level for each significant context.",
+            "FDR-supported rows should be prioritised first for manual Alamut follow-up; nominal-only rows remain useful but need more caution.",
+            "Where no rsID is available, the preferred label falls back to gene + HGVSc when available, otherwise gene + genomic position.",
+        ]
+    })
+    return variant_summary, analysis_context.drop(columns=["Stable Variant Key", "Support Rank"]), notes
+
+
+def build_corrected_outputs_table() -> pd.DataFrame:
+    return pd.DataFrame([
+        {"Output": "GSDMB_SNP_Enrichment_Results.xlsx", "Where To Look": "analysis_results/12_snp_enrichment", "What It Shows": "Common-SNP enrichment results with rsID-aware display labels and a concise significant-overview sheet.", "Main Update": "Volcano labels and shareable tables now prefer rsIDs, with a consistent fallback label when no rsID exists."},
+        {"Output": "GSDMB_SNP_Enrichment_Volcano_RAW.png / GSDMB_SNP_Enrichment_Volcano_FDR.png", "Where To Look": "analysis_results/12_snp_enrichment", "What It Shows": "Stage-12 enrichment volcano plots for Breast, Endometrium, and pooled Global comparisons.", "Main Update": "Titles, axis labels, and legends now use consistent title case and rsID-aware labels."},
+        {"Output": "GSDMB_SNP_Clinical_Association_Results.xlsx", "Where To Look": "analysis_results/17_snp_clinical_associations", "What It Shows": "Clinical, cancer-risk, genotype-dose, and tumour-vs-control SNP associations.", "Main Update": "A new Significant Overview sheet collapses the wide mixed-analysis summary into a supervisor-facing variant overview."},
+        {"Output": "22_Haplotype_First_Interpretation.xlsx / 22_Haplotype_First_Genomic_Map.png", "Where To Look": "analysis_results/22_haplotype_first_interpretation", "What It Shows": "Primary haplotypes, linked significant SNPs, and the explicit LD-block map audit.", "Main Update": "Figure titles and wording were standardised, and all valid study LD blocks remain visible on the shared map track."},
+        {"Output": "23_RNA_Genetic_Integration.xlsx", "Where To Look": "analysis_results/23_rna_integration", "What It Shows": "Integrated RNA associations for significant SNPs, mutations, and haplotypes, including the direct GSDMB isoform answer.", "Main Update": "A new GSDMB Isoform Summary sheet collapses repeated LD-equivalent exposure rows for easier supervisor review."},
+        {"Output": "25_rs11078928_rs869402_haplotype_focus.xlsx / 25_Supervisor_Summary.tsv", "Where To Look": "analysis_results/25_rs11078928_rs869402_haplotype_focus", "What It Shows": "Focused rs11078928 / rs869402 genotype and mini-haplotype comparisons.", "Main Update": "A clean Supervisor Summary now replaces the previously stale manual TSV and keeps the pooled tumour-vs-pooled normal wording explicit."},
+        {"Output": OUTPUT_INTRONIC_ALAMUT_XLSX + " / " + OUTPUT_INTRONIC_ALAMUT_TSV, "Where To Look": "analysis_results/26_snp_functional_interpretation", "What It Shows": "Shortlisted significant intronic, splice-related, and other modifier-impact common SNPs and rare variants for manual Alamut follow-up.", "Main Update": "Brings together stage-12, stage-17, and stage-17b significance with the best available splice / HGVSc annotation, while retaining modifier-impact variants even when they are not explicitly labelled intronic."},
+    ])
+
+
+def build_supervisor_summary_tables(intronic_variant_summary: pd.DataFrame, stage23_isoform_summary: pd.DataFrame, stage25_supervisor: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    corrected_outputs = build_corrected_outputs_table()
+
+    finding_rows = []
+    if not intronic_variant_summary.empty and "Preferred Label" in intronic_variant_summary.columns:
+        top_intronic = intronic_variant_summary.head(6)
+        for _, row in top_intronic.iterrows():
+            finding_rows.append({
+                "Theme": "Alamut shortlist",
+                "Finding": f"{row['Preferred Label']} ({row['Gene']}) - {row['Best Support']}; best P={fmt_num(row['Best P-Value'])}; best FDR={fmt_num(row['Best FDR'])}; contexts: {row['Significant Contexts']}",
+            })
+
+    if not stage23_isoform_summary.empty:
+        if "Summary Status" in stage23_isoform_summary.columns:
+            work = stage23_isoform_summary.copy()
+            subset = work[work["Summary Status"].astype(str).eq("FDR_significant")].copy()
+            if subset.empty:
+                subset = work.head(4)
+            for _, row in subset.head(4).iterrows():
+                finding_rows.append({
+                    "Theme": "Isoform-expression integration",
+                    "Finding": f"{row.get('Representative Exposure', row.get('Exposure_Label_Final', 'Exposure'))} in {row.get('Context', 'study')} - {row.get('RNA Label', row.get('RNA_Label', 'RNA readout'))}; P={fmt_num(row.get('P-Value', row.get('P_Value')))}; FDR={fmt_num(row.get('FDR'))}; {row.get('Interpretation', '')}",
+                })
+        else:
+            subset = stage23_isoform_summary[stage23_isoform_summary.get("Summary_Status", pd.Series(index=stage23_isoform_summary.index, dtype=object)).astype(str).eq("FDR_significant")].copy()
+            if subset.empty:
+                subset = stage23_isoform_summary.head(4)
+            for _, row in subset.head(4).iterrows():
+                finding_rows.append({
+                    "Theme": "Isoform-expression integration",
+                    "Finding": f"{row.get('Exposure_Label_Final', 'Exposure')} in {row.get('Context', 'study')} - {row.get('RNA_Label', 'RNA readout')}; P={fmt_num(row.get('P_Value'))}; FDR={fmt_num(row.get('FDR'))}; {row.get('Interpretation', '')}",
+                })
+
+    if not stage25_supervisor.empty:
+        pooled = stage25_supervisor[stage25_supervisor.get("Comparison", pd.Series(index=stage25_supervisor.index, dtype=object)).astype(str).eq("Pooled tumour vs pooled normal")].copy()
+        if not pooled.empty:
+            row = pooled.iloc[0]
+            finding_rows.append({
+                "Theme": "Focused rs11078928 / rs869402 comparison",
+                "Finding": f"Pooled tumour vs pooled normal: {row.get('rs11078928 Summary', row.get('rs11078928 summary', ''))} {row.get('rs869402 Summary', row.get('rs869402 summary', ''))}",
+            })
+            finding_rows.append({
+                "Theme": "Mini-haplotype comparison",
+                "Finding": f"Pooled mini-haplotype result: {row.get('Mini-Haplotype Readout', row.get('Mini-haplotype readout', ''))}. {row.get('Mini-Haplotype Support', row.get('Mini-haplotype support', ''))}",
+            })
+
+    if not finding_rows:
+        finding_rows.append({"Theme": "Summary", "Finding": "No refreshed finding rows were available when the supervisor summary workbook was built."})
+
+    caveat_rows = [
+        {"Caveat": "FDR-supported results should be prioritised over nominal-only rows in the Alamut shortlist."},
+        {"Caveat": "Variants without rsIDs still need fallback labels based on gene + HGVSc or gene + genomic position."},
+        {"Caveat": "Splice / nearest-exon style annotation depends on what is already present in the current VEP-derived annotation workbook; some variants still only have broad non-coding or intronic labels."},
+    ]
+    if not intronic_variant_summary.empty and "Coverage Risk Flag" in intronic_variant_summary.columns and intronic_variant_summary["Coverage Risk Flag"].fillna(False).any():
+        caveat_rows.append({"Caveat": "At least one shortlisted Alamut variant overlaps a flagged technical-risk amplicon; review the coverage-risk note before manual interpretation."})
+
+    return corrected_outputs, pd.DataFrame(finding_rows), pd.DataFrame(caveat_rows)
+
+
 def main() -> None:
     annot = load_annotation_backbone(PATHS["annot"])
     curated = load_curated_evidence(PATHS["curated_evidence"])
-    _, stage12_sig = load_stage12(PATHS["stage12"])
+    stage12_all, stage12_sig = load_stage12(PATHS["stage12"])
     stage17 = load_stage17(PATHS["stage17"])
     stage20 = load_stage20(PATHS["stage20"])
     stage20b = load_stage20b(PATHS["stage20b"])
+    stage17b_summary, stage17b_catalogue = load_stage17b(PATHS["stage17b"])
+    stage23_isoform_summary = load_stage23_isoform_summary(PATHS["stage23"])
+    stage25_supervisor = load_stage25_supervisor_summary(PATHS["stage25"])
     mapping = load_mapping_labels(PATHS["stage08"], PATHS["stage09"])
     _, stage22_links = load_stage22(PATHS["stage22"])
     stage24_snp, stage24_hap = load_stage24(PATHS["stage24"])
@@ -800,9 +1224,31 @@ def main() -> None:
     final_df.to_csv(OUT_DIR / OUTPUT_TABLE_TSV, sep="\t", index=False)
     (OUT_DIR / OUTPUT_SUMMARY_TXT).write_text("\n".join(thesis_summary_lines) + "\n", encoding="utf-8")
 
-    print(f"Wrote workbook: {out_workbook}")
-    print(f"Wrote table:    {OUT_DIR / OUTPUT_TABLE_TSV}")
-    print(f"Wrote summary:  {OUT_DIR / OUTPUT_SUMMARY_TXT}")
+    intronic_variant_summary, intronic_analysis_context, intronic_notes = build_intronic_alamut_tables(
+        stage12_all, stage17, stage17b_summary, stage17b_catalogue, annot
+    )
+    alamut_workbook = OUT_DIR / OUTPUT_INTRONIC_ALAMUT_XLSX
+    with pd.ExcelWriter(alamut_workbook, engine="openpyxl") as writer:
+        intronic_notes.to_excel(writer, sheet_name="README", index=False)
+        intronic_variant_summary.to_excel(writer, sheet_name="Variant Shortlist", index=False)
+        intronic_analysis_context.to_excel(writer, sheet_name="Analysis Context", index=False)
+    intronic_analysis_context.to_csv(OUT_DIR / OUTPUT_INTRONIC_ALAMUT_TSV, sep="	", index=False)
+
+    corrected_outputs, main_findings, caveats = build_supervisor_summary_tables(
+        intronic_variant_summary, stage23_isoform_summary, stage25_supervisor
+    )
+    supervisor_summary_workbook = OUT_DIR / OUTPUT_SUPERVISOR_SUMMARY_XLSX
+    with pd.ExcelWriter(supervisor_summary_workbook, engine="openpyxl") as writer:
+        corrected_outputs.to_excel(writer, sheet_name="Corrected Outputs", index=False)
+        main_findings.to_excel(writer, sheet_name="Main Findings", index=False)
+        caveats.to_excel(writer, sheet_name="Caveats", index=False)
+
+    print(f"Wrote workbook:           {out_workbook}")
+    print(f"Wrote table:              {OUT_DIR / OUTPUT_TABLE_TSV}")
+    print(f"Wrote summary:            {OUT_DIR / OUTPUT_SUMMARY_TXT}")
+    print(f"Wrote Alamut workbook:    {alamut_workbook}")
+    print(f"Wrote Alamut TSV:         {OUT_DIR / OUTPUT_INTRONIC_ALAMUT_TSV}")
+    print(f"Wrote supervisor summary: {supervisor_summary_workbook}")
 
 
 if __name__ == "__main__":

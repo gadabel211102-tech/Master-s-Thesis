@@ -6,6 +6,7 @@ This script is the final synthesis layer for thesis objective 2. It collects:
 - the cleaned Excel-based isoform measurements from stage 20
 - BAM-derived panel-gene ratios from stage 20b
 - the significant SNP backbone from stage 12
+- the significant rare-variant / mutation exposures from stage 17b
 - the significant haplotype signals from stage 22, or stage 15 as a fallback
 
 The output is an integration workbook that shows which RNA variables can be
@@ -24,6 +25,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy import stats
+from sample_identity_utils import build_analysis_sample_map
+from pipeline_utils import extract_rsid, find_col
 
 try:
     import seaborn as sns
@@ -42,6 +45,9 @@ PATHS = {
     "stage20": RES / "20_isoform_expression_associations" / "GSDMB_Objective2_Isoform_Results.xlsx",
     "stage20b": RES / "20b_panel_gene_expression" / "20b_Panel_Gene_Expression.xlsx",
     "stage12": RES / "12_snp_enrichment" / "GSDMB_SNP_Enrichment_Results.xlsx",
+    "stage17b_breast": RES / "17b_rare_variant_associations" / "17b_breast_mutation_assoc.tsv",
+    "stage17b_endo": RES / "17b_rare_variant_associations" / "17b_endo_mutation_assoc.tsv",
+    "stage17b_exposure_catalogue": RES / "17b_rare_variant_associations" / "17b_exposure_catalogue.tsv",
     "stage15": RES / "15_haplotype_statistics" / "GSDMB_Haplotype_Results.xlsx",
     "phased": RES / "15_haplotype_phasing" / "phased_genotypes.tsv",
     "stage22": RES / "22_haplotype_first_interpretation" / "22_Haplotype_First_Interpretation.xlsx",
@@ -56,6 +62,7 @@ QC_COLS = [
     "RNA_QC_Analysis_Ready", "RNA_QC_Exploratory_Ready", "RNA_QC_Final_Status",
     "RNA_QC_Exclusion_Reason", "RNA_QC_Eligibility_Note",
 ]
+IMMUNE_SIGNATURE_GENES = ("PTPRC", "CD14", "CD68", "PDCD1", "CD274", "CD8A", "CD8B", "GZMB", "CXCL9", "CXCL10", "LAG3", "CTLA4", "TIGIT", "IFNG")
 META_PREFIXES = ("canon__", "BREAST_", "ENDO_", "clin_")
 META_COLS = {
     "snp_code", "sample_id", "case_id", "sheet", "analysis_group", "analysis_role",
@@ -99,6 +106,8 @@ def sx(v):
         (r"^DNA_SNP_(EN|MN|AT)_(\d+)", lambda m: f"SNP_{m.group(1).upper()}_{m.group(2)}"),
         (r"^DNA_(AT|EN|MN)_(\d+)", lambda m: f"SNP_{m.group(1).upper()}_{m.group(2)}"),
         (r"^DNA_(?:SNP_)?MT[-_]T_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
+        (r"^MAMAH2_MT[-_]T_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
+        (r"^MAMAH2_MT[-_]N_(\d+)", lambda m: f"SNP_MN_{m.group(1)}"),
         (r"^RNA_SNP_(AT|EN|MN|MT-T|MT-N)[-_]?(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
         (r"^SNP_RNA_(AT|EN|MN|MT-T|MT-N)_(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
         (r"^SNP_(AT|EN|MN|MT-T|MT-N)_RNA_(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
@@ -110,6 +119,14 @@ def sx(v):
         m = re.match(pat, t, re.I)
         if m:
             return fmt(m)
+    return None
+
+
+def first_available_column(df, candidates):
+    for candidate in candidates:
+        col = find_col(df, candidate)
+        if col is not None:
+            return col
     return None
 
 
@@ -133,6 +150,27 @@ def gt_haps(gt):
     if "/" in t:
         return tuple(t.split("/", 1))
     return "N", "N"
+
+
+def genomic_snp_id(chrom, pos, ref, alt):
+    chrom_s = s(chrom)
+    if chrom_s and not chrom_s.lower().startswith("chr"):
+        chrom_s = f"chr{chrom_s}"
+    pos_s = s(pos)
+    ref_s = s(ref).upper()
+    alt_s = s(alt).upper()
+    if not chrom_s or not pos_s or not ref_s or not alt_s:
+        return np.nan
+    return f"{chrom_s}:{pos_s}:{ref_s}:{alt_s}"
+
+
+def analysis_id_to_snp_code(value):
+    sample = s(value)
+    if not sample:
+        return None
+    sample = re.sub(r"__RUN\d+$", "", sample)
+    code = sx(sample)
+    return code or sample
 
 
 def first_valid(series):
@@ -210,6 +248,8 @@ def load_excel_na(stage20_path):
         if re.match(r"^rs\d+(_[A-Za-z]+)?$", str(col), re.I):
             continue
         if re.match(r"^\d+_[ACGT]+>[ACGT]+$", str(col), re.I):
+            continue
+        if re.match(r"^chr[\w.]+:\d+:[^:]+:[^:]+$", str(col), re.I):
             continue
         vals = pd.to_numeric(raw[col], errors="coerce")
         if vals.notna().sum() > 0:
@@ -317,15 +357,56 @@ def load_significant_snps(stage12_path):
     parts = []
     for sheet in ["Global", "Breast", "Endometrium"]:
         df = pd.read_excel(stage12_path, sheet_name=sheet)
+        column_map = {
+            "FDR_P_Value": ["FDR_P_Value", "Carrier_FDR_P_Value", "Primary_Genotype_FDR_P_Value", "Best_Genotype_FDR"],
+            "P_Value": ["P_Value", "Carrier_P_Value", "Primary_Genotype_P_Value", "Best_Genotype_P"],
+            "LD_Block_ID": ["LD_Block_ID", "LD_Block_Assignment"],
+            "Odds_Ratio": ["Odds_Ratio", "Carrier_Odds_Ratio", "Het_vs_WT_Odds_Ratio", "Hom_vs_WT_Odds_Ratio"],
+        }
+        for target, candidates in column_map.items():
+            source = first_available_column(df, candidates)
+            if source is not None and source != target:
+                df[target] = df[source]
+        missing = [name for name in ["FDR_P_Value", "P_Value"] if name not in df.columns]
+        if missing or first_available_column(df, ["rsID", "SNP_rsID", "SNP_ID"]) is None:
+            raise ValueError(
+                f"Stage-12 {sheet} sheet is missing required columns after schema normalisation: {', '.join(missing or ['SNP_ID/rsID'])}"
+            )
+        if "LD_Block_ID" not in df.columns:
+            df["LD_Block_ID"] = pd.NA
+        if "Odds_Ratio" not in df.columns:
+            df["Odds_Ratio"] = np.nan
+        rsid_col = first_available_column(df, ["rsID", "SNP_rsID"])
+        snp_id_col = first_available_column(df, ["SNP_ID"])
+        if rsid_col is not None:
+            df["SNP_rsID"] = df[rsid_col].map(extract_rsid).fillna(df[rsid_col])
+        else:
+            df["SNP_rsID"] = pd.NA
+        if snp_id_col is not None:
+            df["SNP_Technical_ID"] = df[snp_id_col]
+        else:
+            df["SNP_Technical_ID"] = pd.NA
+        df["SNP_ID"] = df["SNP_rsID"].fillna(df["SNP_Technical_ID"])
+        df["SNP_Match_Key"] = df["SNP_ID"]
+        df["FDR_P_Value"] = pd.to_numeric(df["FDR_P_Value"], errors="coerce")
+        df["P_Value"] = pd.to_numeric(df["P_Value"], errors="coerce")
+        df["Odds_Ratio"] = pd.to_numeric(df["Odds_Ratio"], errors="coerce")
+        if df.empty:
+            continue
         df = df[df["FDR_P_Value"].fillna(1) < FDR_THRESHOLD].copy()
         if df.empty:
             continue
         df["Significant_In"] = sheet
         parts.append(df)
+    if not parts:
+        return pd.DataFrame(columns=["SNP_ID", "SNP_rsID", "SNP_Technical_ID", "SNP_Match_Key", "Source_Groups", "Min_FDR", "Min_P", "LD_Block_ID", "Min_OR"])
     all_sig = pd.concat(parts, ignore_index=True)
     return (
         all_sig.groupby("SNP_ID", dropna=False)
         .agg(
+            SNP_rsID=("SNP_rsID", first_valid),
+            SNP_Technical_ID=("SNP_Technical_ID", lambda x: "; ".join(sorted({s(v) for v in x if s(v)}))),
+            SNP_Match_Key=("SNP_Match_Key", first_valid),
             Source_Groups=("Significant_In", lambda x: "; ".join(sorted(set(map(str, x))))),
             Min_FDR=("FDR_P_Value", "min"),
             Min_P=("P_Value", "min"),
@@ -335,6 +416,18 @@ def load_significant_snps(stage12_path):
         .reset_index()
         .sort_values(["Min_FDR", "SNP_ID"])
         .reset_index(drop=True)
+    )
+
+
+def empty_significant_mutation_table():
+    return pd.DataFrame(
+        columns=[
+            "Exposure_ID", "Base_Exposure_ID", "Comparison", "Exposure_Label",
+            "Exposure_Type", "Gene", "Consequence", "IMPACT",
+            "Significant_Clinical_Vars", "Significant_Models", "Min_FDR",
+            "N_Carriers_Cohort", "Carrier_Samples", "RNA_Testable",
+            "RNA_Test_Note",
+        ]
     )
 
 
@@ -383,48 +476,140 @@ def load_significant_haplotypes(stage22_path, stage15_path):
     return load_significant_haplotypes_from_stage15(stage15_path)
 
 
+def simplify_comparison(value):
+    text = s(value).lower()
+    if "breast" in text:
+        return "Breast"
+    if "endo" in text:
+        return "Endometrial"
+    return "All_Primary"
+
+
+def load_significant_mutations(breast_path, endo_path, exposure_catalogue_path):
+    if not (breast_path.exists() and endo_path.exists() and exposure_catalogue_path.exists()):
+        return empty_significant_mutation_table()
+
+    frames = []
+    for path in [breast_path, endo_path]:
+        df = pd.read_csv(path, sep="	")
+        sig_cols = [c for c in df.columns if c.startswith("FDR_Sig_")]
+        if not sig_cols:
+            continue
+        df = df[df[sig_cols].fillna(False).any(axis=1)].copy()
+        if df.empty:
+            continue
+        df["Comparison"] = df["Cohort"].map(simplify_comparison)
+        model_labels = [c.replace("FDR_Sig_", "") for c in sig_cols]
+        df["Significant_Models"] = df.apply(
+            lambda row: "; ".join(
+                label for label, sig_col in zip(model_labels, sig_cols) if bool(row.get(sig_col, False))
+            ),
+            axis=1,
+        )
+
+        def _min_sig_fdr(row):
+            vals = []
+            for label, sig_col in zip(model_labels, sig_cols):
+                if not bool(row.get(sig_col, False)):
+                    continue
+                val = pd.to_numeric(row.get(f"FDR_{label}"), errors="coerce")
+                if pd.notna(val):
+                    vals.append(float(val))
+            return min(vals) if vals else np.nan
+
+        df["Min_FDR"] = df.apply(_min_sig_fdr, axis=1)
+        frames.append(df)
+
+    if not frames:
+        return empty_significant_mutation_table()
+
+    assoc = pd.concat(frames, ignore_index=True)
+    expo = pd.read_csv(exposure_catalogue_path, sep="	")
+    expo_cols = [c for c in [
+        "Exposure_ID", "Exposure_Label", "Exposure_Type", "Gene", "Consequence",
+        "IMPACT", "Carrier_Samples",
+    ] if c in expo.columns]
+    assoc = assoc.merge(expo[expo_cols].drop_duplicates("Exposure_ID"), on="Exposure_ID", how="left", suffixes=("", "_catalogue"))
+    for col in ["Exposure_Label", "Exposure_Type", "Gene", "Consequence", "IMPACT", "Carrier_Samples"]:
+        cat_col = f"{col}_catalogue"
+        if cat_col in assoc.columns:
+            assoc[col] = assoc[col].fillna(assoc[cat_col])
+
+    assoc["Base_Exposure_ID"] = assoc["Exposure_ID"].astype(str)
+    assoc["Exposure_ID"] = assoc["Comparison"].astype(str) + "::" + assoc["Base_Exposure_ID"].astype(str)
+    grouped = (
+        assoc.groupby(["Exposure_ID", "Comparison", "Base_Exposure_ID"], dropna=False)
+        .agg(
+            Exposure_Label=("Exposure_Label", first_valid),
+            Exposure_Type=("Exposure_Type", first_valid),
+            Gene=("Gene", first_valid),
+            Consequence=("Consequence", first_valid),
+            IMPACT=("IMPACT", first_valid),
+            Significant_Clinical_Vars=("Clinical_Var", lambda x: "; ".join(sorted({s(v) for v in x if s(v)}))),
+            Significant_Models=("Significant_Models", lambda x: "; ".join(sorted({part.strip() for v in x for part in s(v).split(";") if part.strip()}))),
+            Min_FDR=("Min_FDR", "min"),
+            N_Carriers_Cohort=("N_Carriers_Cohort", "max"),
+            Carrier_Samples=("Carrier_Samples", first_valid),
+        )
+        .reset_index()
+        .sort_values(["Comparison", "Min_FDR", "Base_Exposure_ID"], na_position="last")
+        .reset_index(drop=True)
+    )
+    return grouped
+
+
 def load_phased_matrix(phased_path, stage15_path):
     # The phased matrix lets us calculate SNP dosage and haplotype exposure for
     # the same samples represented in the RNA workbook.
-    phased = pd.read_csv(phased_path, sep="\t", dtype=str)
+    phased = pd.read_csv(phased_path, sep="	", dtype=str)
     phased["POS"] = pd.to_numeric(phased["POS"], errors="coerce")
     phased["REF"] = phased["REF"].astype(str).str.upper()
     phased["ALT"] = phased["ALT"].astype(str).str.upper()
-    snps_used = pd.read_excel(stage15_path, sheet_name="SNPs_Used").rename(columns={"POS_int": "POS", "rsID_clean": "SNP_ID"})
+    phased["SNP_ID"] = phased.apply(lambda row: genomic_snp_id(row.get("CHROM"), row.get("POS"), row.get("REF"), row.get("ALT")), axis=1)
+    snps_used = pd.read_excel(stage15_path, sheet_name="SNPs_Used").rename(columns={"POS_int": "POS", "rsID_clean": "Backbone_rsID"})
     snps_used["POS"] = pd.to_numeric(snps_used["POS"], errors="coerce")
     snps_used["REF"] = snps_used["REF"].astype(str).str.upper()
     snps_used["ALT"] = snps_used["ALT"].astype(str).str.upper()
-    phased = phased.merge(snps_used[["POS", "REF", "ALT", "SNP_ID", "Gene"]], on=["POS", "REF", "ALT"], how="left")
-    sample_cols = [c for c in phased.columns if c not in {"CHROM", "POS", "ID", "REF", "ALT", "SNP_ID", "Gene"}]
+    snps_used["SNP_ID"] = snps_used.apply(lambda row: genomic_snp_id("chr17", row.get("POS"), row.get("REF"), row.get("ALT")), axis=1)
+    phased = phased.merge(snps_used[["POS", "REF", "ALT", "Backbone_rsID", "Gene"]], on=["POS", "REF", "ALT"], how="left")
+    phased["SNP_rsID"] = phased["Backbone_rsID"].astype(str).str.strip()
+    phased.loc[phased["SNP_rsID"].isin({"", "nan", "None"}), "SNP_rsID"] = pd.NA
+    phased["SNP_Match_Key"] = phased["SNP_rsID"].fillna(phased["SNP_ID"])
+    sample_cols = [c for c in phased.columns if c not in {"CHROM", "POS", "ID", "REF", "ALT", "SNP_ID", "SNP_rsID", "SNP_Match_Key", "Backbone_rsID", "Gene"}]
     return phased, sample_cols, snps_used
 
 
 def build_significant_snp_dosage(phased, sample_cols, sig_snp_df):
-    targets = set(sig_snp_df["SNP_ID"].dropna().astype(str))
-    available = phased[phased["SNP_ID"].isin(targets)].copy()
+    targets = set(sig_snp_df["SNP_Match_Key"].dropna().astype(str))
+    available = phased[phased["SNP_Match_Key"].isin(targets)].copy()
+    identity = build_analysis_sample_map(sample_cols, PATHS["phased"], sx)
+    rep = identity.sort_values(["analysis_sample_id", "raw_sample_name"]).drop_duplicates("analysis_sample_id")
     rows = []
     for _, row in available.iterrows():
-        for col in sample_cols:
-            code = sx(col)
-            if not code:
-                continue
+        display_id = s(row.get("SNP_rsID")) or s(row.get("SNP_Match_Key")) or s(row.get("SNP_ID"))
+        for _, id_row in rep.iterrows():
+            col = id_row["raw_sample_name"]
             rows.append({
-                "snp_code": code,
-                "SNP_ID": row["SNP_ID"],
+                "analysis_sample_id": id_row["analysis_sample_id"],
+                "snp_code": id_row["snp_code"],
+                "SNP_ID": display_id,
+                "SNP_Technical_ID": row.get("SNP_ID", np.nan),
+                "SNP_rsID": row.get("SNP_rsID", np.nan),
+                "SNP_Match_Key": row.get("SNP_Match_Key", np.nan),
                 "Gene": row.get("Gene", np.nan),
                 "Dosage": gt_dose(row[col]),
                 "GT": row[col],
             })
     dosage = pd.DataFrame(rows)
-    tested = set(dosage["SNP_ID"].dropna().astype(str)) if not dosage.empty else set()
+    tested = set(dosage["SNP_Match_Key"].dropna().astype(str)) if not dosage.empty else set()
     summary = sig_snp_df.copy()
-    summary["RNA_Testable"] = summary["SNP_ID"].astype(str).isin(tested)
+    summary["RNA_Testable"] = summary["SNP_Match_Key"].astype(str).isin(tested)
     summary["RNA_Test_Note"] = np.where(summary["RNA_Testable"], "Phased/common backbone dosage available", "Significant in stage 12 but absent from phased/common backbone")
     return dosage, summary
 
 
 def region_membership(stage15_path, snps_used):
-    members = {"Full_Region": list(snps_used["SNP_ID"].dropna().astype(str))}
+    members = {"Full_Region": list(snps_used["Backbone_rsID"].dropna().astype(str))}
     blocks = pd.read_excel(stage15_path, sheet_name="LD_Blocks")
     for (thr, block), sub in blocks.groupby(["Threshold_Label", "Block"], dropna=False):
         members[f"LD_Block_{thr}_{block}"] = sub.sort_values("SNP_Order")["rsID"].dropna().astype(str).tolist()
@@ -433,7 +618,9 @@ def region_membership(stage15_path, snps_used):
 
 def build_significant_haplotype_dosage(phased, sample_cols, stage15_path, hap_df, snps_used):
     members = region_membership(stage15_path, snps_used)
-    row_lookup = {str(r["SNP_ID"]): r for _, r in phased.dropna(subset=["SNP_ID"]).iterrows()}
+    row_lookup = {str(r["Backbone_rsID"]): r for _, r in phased.dropna(subset=["Backbone_rsID"]).iterrows()}
+    identity = build_analysis_sample_map(sample_cols, PATHS["phased"], sx)
+    rep = identity.sort_values(["analysis_sample_id", "raw_sample_name"]).drop_duplicates("analysis_sample_id")
     rows = []
     checks = []
     for _, hap in hap_df.iterrows():
@@ -443,10 +630,10 @@ def build_significant_haplotype_dosage(phased, sample_cols, stage15_path, hap_df
         snp_ids = members.get(region, [])
         callable_n = 0
         alt_count = 0
-        for col in sample_cols:
-            code = sx(col)
-            if not code:
-                continue
+        for _, id_row in rep.iterrows():
+            col = id_row["raw_sample_name"]
+            code = id_row["snp_code"]
+            analysis_sample_id = id_row["analysis_sample_id"]
             hap1, hap2 = [], []
             for snp_id in snp_ids:
                 src = row_lookup.get(snp_id)
@@ -469,6 +656,7 @@ def build_significant_haplotype_dosage(phased, sample_cols, stage15_path, hap_df
                 callable_n += 1
                 alt_count += dose
             rows.append({
+                "analysis_sample_id": analysis_sample_id,
                 "snp_code": code,
                 "Exposure_ID": exposure,
                 "Region": region,
@@ -515,6 +703,42 @@ def primary_subset(na_df):
 def subset_for_context(df, context):
     return df.copy() if context == "All_Primary" else df[df["cohort"] == context].copy()
 
+
+def build_significant_mutation_dosage(sig_mut_df, sample_codes):
+    if sig_mut_df.empty:
+        return pd.DataFrame(), empty_significant_mutation_table()
+
+    sample_codes = sorted({s(code) for code in sample_codes if s(code)})
+    rows = []
+    summary_rows = []
+    for _, mut in sig_mut_df.iterrows():
+        carrier_ids = [part.strip() for part in s(mut.get("Carrier_Samples")).split(";") if part.strip()]
+        carrier_codes = {analysis_id_to_snp_code(part) for part in carrier_ids}
+        carrier_codes = {code for code in carrier_codes if code}
+        matched_carriers = sorted(code for code in sample_codes if code in carrier_codes)
+        matched_noncarriers = [code for code in sample_codes if code not in carrier_codes]
+        for code in sample_codes:
+            rows.append({
+                "analysis_sample_id": code,
+                "snp_code": code,
+                "Exposure_ID": mut["Exposure_ID"],
+                "Base_Exposure_ID": mut.get("Base_Exposure_ID", np.nan),
+                "Comparison": mut.get("Comparison", np.nan),
+                "Exposure_Type": mut.get("Exposure_Type", np.nan),
+                "Gene": mut.get("Gene", np.nan),
+                "Dosage": 1.0 if code in carrier_codes else 0.0,
+            })
+        note = (
+            f"{len(matched_carriers)} RNA-matched carrier snp_code(s); "
+            f"{len(matched_noncarriers)} RNA-matched non-carrier snp_code(s)"
+        )
+        summary_row = mut.to_dict()
+        summary_row["RNA_Testable"] = bool(matched_carriers and matched_noncarriers)
+        summary_row["RNA_Test_Note"] = note
+        summary_rows.append(summary_row)
+    return pd.DataFrame(rows), pd.DataFrame(summary_rows)
+
+
 def regression_rows(na_df, dosage_df, exposures_df, exposure_type, var_catalog):
     value_cols = var_catalog["Integrated_Var"].tolist()
     var_level_map = var_catalog.set_index("Integrated_Var")["RNA_Level"].to_dict()
@@ -522,10 +746,14 @@ def regression_rows(na_df, dosage_df, exposures_df, exposure_type, var_catalog):
     exposure_meta = exposures_df.copy()
     if exposure_type == "SNP":
         id_col = "SNP_ID"
+        if exposure_meta.empty or id_col not in exposure_meta.columns or id_col not in dosage_df.columns:
+            return pd.DataFrame()
         cohort_map = exposure_meta.set_index(id_col)["Source_Groups"].to_dict()
         meta_map = exposure_meta.set_index(id_col).to_dict(orient="index")
     else:
         id_col = "Exposure_ID"
+        if exposure_meta.empty or id_col not in exposure_meta.columns or id_col not in dosage_df.columns:
+            return pd.DataFrame()
         cohort_map = {r["Exposure_ID"]: r["Comparison"] for _, r in exposure_meta.iterrows()}
         meta_map = exposure_meta.set_index(id_col).to_dict(orient="index")
 
@@ -533,11 +761,13 @@ def regression_rows(na_df, dosage_df, exposures_df, exposure_type, var_catalog):
         if exposure_type == "SNP":
             contexts = context_for_sources(cohort_map.get(exposure_id, ""))
         else:
-            comp = s(cohort_map.get(exposure_id, "Breast"))
-            contexts = ["Breast"] if comp == "Breast" else ["All_Primary"]
+            comp = simplify_comparison(cohort_map.get(exposure_id, "All_Primary"))
+            contexts = [comp]
         for context in contexts:
             base = subset_for_context(na_df, context)
-            merged = base.merge(g[["snp_code", "Dosage"]].drop_duplicates(), on="snp_code", how="inner")
+            merge_cols = [c for c in ["analysis_sample_id", "snp_code", "Dosage"] if c in g.columns]
+            dedup_keys = [c for c in ["analysis_sample_id"] if c in merge_cols]
+            merged = base.merge(g[merge_cols].drop_duplicates(dedup_keys if dedup_keys else None), on="snp_code", how="inner")
             if merged.empty:
                 continue
             for var in value_cols:
@@ -585,7 +815,7 @@ def regression_rows(na_df, dosage_df, exposures_df, exposure_type, var_catalog):
                     "Median_Carrier_Minus_Noncarrier": carrier.median() - noncarrier.median() if len(carrier) and len(noncarrier) else np.nan,
                     "Effect_Direction": "Higher_with_dosage" if slope > 0 else "Lower_with_dosage",
                 }
-                for key in ["Source_Groups", "LD_Block_ID", "Min_FDR", "Min_P", "Region", "Haplotype_ID", "Comparison", "Global_Freq", "Overlapping_Significant_SNPs", "Consistency_Summary"]:
+                for key in ["Source_Groups", "LD_Block_ID", "Min_FDR", "Min_P", "Region", "Haplotype_ID", "Comparison", "Global_Freq", "Overlapping_Significant_SNPs", "Consistency_Summary", "Base_Exposure_ID", "Exposure_Label", "Gene", "Consequence", "IMPACT", "Significant_Clinical_Vars", "Significant_Models"]:
                     if key in meta:
                         row[key] = meta[key]
                 rows.append(row)
@@ -626,9 +856,9 @@ def plot_heatmap(df, row_col, out_path, title):
     plt.close(fig)
 
 
-def summarise_hits(snp_assoc, hap_assoc):
+def summarise_hits(snp_assoc, mutation_assoc, hap_assoc):
     rows = []
-    for _, df, id_col in [("SNP", snp_assoc, "SNP_ID"), ("Haplotype", hap_assoc, "Exposure_ID")]:
+    for _, df, id_col in [("SNP", snp_assoc, "SNP_ID"), ("Mutation", mutation_assoc, "Exposure_ID"), ("Haplotype", hap_assoc, "Exposure_ID")]:
         if df.empty:
             continue
         sig = df[df["FDR_Sig"].fillna(False)].copy()
@@ -645,9 +875,104 @@ def summarise_hits(snp_assoc, hap_assoc):
     keep = [c for c in [
         "Summary_Status", "Exposure_Type", "SNP_ID", "Exposure_ID", "Context", "RNA_Var", "RNA_Source", "RNA_Level",
         "P_Value", "FDR", "Slope", "R", "N", "Carrier_Count", "Effect_Direction",
-        "Source_Groups", "Region", "Haplotype_ID", "Comparison", "Overlapping_Significant_SNPs",
+        "Source_Groups", "Base_Exposure_ID", "Exposure_Label", "Gene", "Significant_Clinical_Vars", "Significant_Models",
+        "Region", "Haplotype_ID", "Comparison", "Overlapping_Significant_SNPs",
     ] if c in out.columns]
     return out[keep].sort_values(["Summary_Status", "P_Value", "N"], ascending=[True, True, False]).reset_index(drop=True)
+
+
+def build_gsdmb_isoform_answer(snp_assoc, mutation_assoc, hap_assoc):
+    rows = []
+    for exposure_type, df, id_col in [("SNP", snp_assoc, "SNP_ID"), ("Mutation", mutation_assoc, "Exposure_ID"), ("Haplotype", hap_assoc, "Exposure_ID")]:
+        if df.empty:
+            continue
+        work = df[df["RNA_Level"].astype(str).eq("isoform_expression")].copy()
+        if work.empty:
+            continue
+        work["Exposure_Label_Final"] = work[id_col].astype(str)
+        work["RNA_Label"] = work["RNA_Var"].astype(str).str.replace(r"^[^_]+__", "", regex=True)
+        work["Summary_Status"] = np.where(
+            work["FDR_Sig"].fillna(False),
+            "FDR_significant",
+            np.where(pd.to_numeric(work["P_Value"], errors="coerce") < 0.05, "Nominal_only", "Top_ranked_context"),
+        )
+        work["Interpretation"] = work.apply(
+            lambda row: f"{row['RNA_Label']} is {'higher' if float(row['Slope']) > 0 else 'lower'} with higher {exposure_type.lower()} dosage in {row['Context']}",
+            axis=1,
+        )
+        keep = [c for c in [
+            "Summary_Status", "Exposure_Type", id_col, "Exposure_Label_Final", "Context", "RNA_Label",
+            "P_Value", "FDR", "Slope", "R", "N", "Carrier_Count", "N_Dose0", "N_Dose1", "N_Dose2",
+            "Effect_Direction", "Interpretation", "Region", "Haplotype_ID", "Comparison",
+            "Base_Exposure_ID", "Exposure_Label", "Gene", "Significant_Clinical_Vars", "Significant_Models",
+        ] if c in work.columns]
+        rows.append(work[keep])
+    if not rows:
+        return pd.DataFrame({"Note": ["No SNP, mutation, or haplotype associations reached the GSDMB isoform-expression reporting threshold."]})
+    out = pd.concat(rows, ignore_index=True)
+    out = out.sort_values(["Summary_Status", "P_Value", "N"], ascending=[True, True, False]).reset_index(drop=True)
+    return out
+
+
+def build_gsdmb_isoform_summary(gsdmb_isoform_answer):
+    """Collapse repeated LD-equivalent exposure rows into a supervisor-facing summary."""
+    if gsdmb_isoform_answer.empty or "Note" in gsdmb_isoform_answer.columns:
+        return gsdmb_isoform_answer.copy()
+
+    work = gsdmb_isoform_answer.copy()
+    work["Exposure_Label_Final"] = work["Exposure_Label_Final"].astype(str)
+    group_cols = [
+        "Summary_Status",
+        "Exposure_Type",
+        "Context",
+        "RNA_Label",
+        "Effect_Direction",
+        "P_Value",
+        "FDR",
+        "Slope",
+        "R",
+        "N",
+        "Carrier_Count",
+        "N_Dose0",
+        "N_Dose1",
+        "N_Dose2",
+        "Interpretation",
+    ]
+    rows = []
+    for keys, sub in work.groupby(group_cols, dropna=False, sort=False):
+        exposure_list = list(dict.fromkeys(sub["Exposure_Label_Final"].astype(str).tolist()))
+        representative = exposure_list[0] if exposure_list else ""
+        note = ""
+        if str(keys[1]) == "SNP" and len(exposure_list) > 1:
+            note = f"{len(exposure_list)} linked SNPs share this isoform-association pattern."
+        elif len(exposure_list) > 1:
+            note = f"{len(exposure_list)} exposures share this isoform-association pattern."
+        rows.append({
+            "Summary Status": keys[0],
+            "Exposure Type": keys[1],
+            "Context": keys[2],
+            "RNA Label": keys[3],
+            "Effect Direction": keys[4],
+            "P-Value": keys[5],
+            "FDR": keys[6],
+            "Slope": keys[7],
+            "R": keys[8],
+            "N": keys[9],
+            "Carrier Count": keys[10],
+            "N Dose 0": keys[11],
+            "N Dose 1": keys[12],
+            "N Dose 2": keys[13],
+            "Representative Exposure": representative,
+            "Exposure Count": len(exposure_list),
+            "Exposure List": "; ".join(exposure_list),
+            "Interpretation": keys[14],
+            "Summary Note": note,
+        })
+    order = {"FDR_significant": 0, "Nominal_only": 1, "Top_ranked_context": 2}
+    out = pd.DataFrame(rows)
+    out["__order"] = out["Summary Status"].map(order).fillna(9)
+    out = out.sort_values(["__order", "P-Value", "Exposure Type", "Context", "RNA Label"], kind="stable").drop(columns="__order")
+    return out.reset_index(drop=True)
 
 
 def source_inventory(manifest, na_catalog):
@@ -745,13 +1070,287 @@ def build_excel_bam_concordance(na_df):
     return pd.DataFrame(rows).sort_values(["Gene", "Context"]).reset_index(drop=True)
 
 
+def load_optional_workbook_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        xl = pd.ExcelFile(path)
+    except Exception:
+        return pd.DataFrame()
+    if sheet_name not in xl.sheet_names:
+        return pd.DataFrame()
+    return pd.read_excel(path, sheet_name=sheet_name)
+
+
+def compute_immune_response_score(df: pd.DataFrame) -> tuple[pd.Series, list[str]]:
+    genes = []
+    score_cols = {}
+    for gene in IMMUNE_SIGNATURE_GENES:
+        candidates = [
+            gene,
+            f"bam_ratio__{gene}",
+            f"excel_panel__{gene}",
+            f"excel_total__{gene}",
+            f"excel_iso__{gene}",
+        ]
+        source = next((col for col in candidates if col in df.columns), None)
+        if source is not None:
+            genes.append(gene)
+            score_cols[gene] = source
+    score = pd.Series(np.nan, index=df.index, dtype=float)
+    if len(genes) < 2:
+        return score, genes
+    zscores = pd.DataFrame({gene: pd.to_numeric(df[source], errors="coerce") for gene, source in score_cols.items()})
+    zscores = pd.DataFrame({
+        gene: (
+            (col - col.mean()) / col.std(ddof=0)
+            if pd.notna(col.std(ddof=0)) and col.std(ddof=0) != 0
+            else pd.Series(np.nan, index=df.index)
+        )
+        for gene, col in zscores.items()
+    })
+    score = zscores.mean(axis=1, skipna=True)
+    score[zscores.notna().sum(axis=1) < 2] = np.nan
+    return score, genes
+
+
+def _analysis_frame_for_exposure(base_df: pd.DataFrame, dosage_df: pd.DataFrame, id_col: str, exposure_id: object) -> pd.DataFrame:
+    if dosage_df.empty or id_col not in dosage_df.columns:
+        return pd.DataFrame()
+    g = dosage_df[dosage_df[id_col].astype(str) == str(exposure_id)].copy()
+    if g.empty:
+        return pd.DataFrame()
+    merge_cols = [c for c in ["analysis_sample_id", "snp_code", "Dosage"] if c in g.columns]
+    if not merge_cols:
+        return pd.DataFrame()
+    dedup_keys = [c for c in ["analysis_sample_id"] if c in merge_cols]
+    g = g[merge_cols].drop_duplicates(dedup_keys if dedup_keys else None)
+    merged = base_df.merge(g, on="snp_code", how="inner")
+    if "analysis_sample_id_x" in merged.columns and "analysis_sample_id_y" in merged.columns:
+        merged["analysis_sample_id"] = merged["analysis_sample_id_x"].fillna(merged["analysis_sample_id_y"])
+    elif "analysis_sample_id_x" in merged.columns:
+        merged["analysis_sample_id"] = merged["analysis_sample_id_x"]
+    elif "analysis_sample_id_y" in merged.columns:
+        merged["analysis_sample_id"] = merged["analysis_sample_id_y"]
+    return merged
+
+
+def _fit_ols(data: pd.DataFrame, y_col: str, x_cols: list[str]) -> tuple[dict[str, float] | None, pd.DataFrame]:
+    cols = [y_col] + x_cols
+    work = data[cols].copy()
+    for col in cols:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    work = work.dropna()
+    if work.empty or len(work) < 8 or work[y_col].nunique() < 2:
+        return None, work
+    design = np.column_stack([np.ones(len(work))] + [work[col].to_numpy(dtype=float) for col in x_cols])
+    response = work[y_col].to_numpy(dtype=float)
+    try:
+        beta, _, _, _ = np.linalg.lstsq(design, response, rcond=None)
+    except Exception:
+        return None, work
+    keys = ["Intercept"] + x_cols
+    return dict(zip(keys, map(float, beta))), work
+
+
+def build_immune_response_summary(na_df: pd.DataFrame) -> pd.DataFrame:
+    if na_df.empty or "Immune_Response_Score" not in na_df.columns:
+        return pd.DataFrame({"Note": ["No immune-response score could be derived from the RNA expression matrix."]})
+    rows = []
+    for scope, sub in [
+        ("All_Primary", na_df),
+        ("Breast", na_df[na_df["cohort"] == "Breast"].copy()),
+        ("Endometrial", na_df[na_df["cohort"] == "Endometrial"].copy()),
+    ]:
+        work = sub[pd.to_numeric(sub["Immune_Response_Score"], errors="coerce").notna()].copy()
+        if work.empty:
+            continue
+        rows.append({
+            "Scope": scope,
+            "N": len(work),
+            "Median_Score": work["Immune_Response_Score"].median(),
+            "IQR_Lo": work["Immune_Response_Score"].quantile(0.25),
+            "IQR_Hi": work["Immune_Response_Score"].quantile(0.75),
+            "Available_Genes": "; ".join([
+                gene for gene in IMMUNE_SIGNATURE_GENES
+                if any(col in work.columns for col in [gene, f"bam_ratio__{gene}", f"excel_panel__{gene}", f"excel_total__{gene}", f"excel_iso__{gene}"])
+            ]),
+        })
+        for label, var in [("GSDMB", "GSDMB"), ("Pyroptotic_Fraction", "pyroptotic_isoform_fraction"), ("Non_Pyroptotic_Fraction", "non_pyroptotic_isoform_fraction")]:
+            if var not in work.columns:
+                continue
+            x = pd.to_numeric(work["Immune_Response_Score"], errors="coerce")
+            y = pd.to_numeric(work[var], errors="coerce")
+            t = pd.concat([x, y], axis=1).dropna()
+            if len(t) < 5 or t.iloc[:, 0].nunique() < 2 or t.iloc[:, 1].nunique() < 2:
+                continue
+            rho, p = stats.spearmanr(t.iloc[:, 0], t.iloc[:, 1], nan_policy="omit")
+            rows.append({
+                "Scope": scope,
+                "N": len(t),
+                "Median_Score": np.nan,
+                "IQR_Lo": np.nan,
+                "IQR_Hi": np.nan,
+                "Available_Genes": f"Correlation_vs_{label}",
+                "Spearman_Rho": rho,
+                "Spearman_P": p,
+            })
+    return pd.DataFrame(rows)
+
+
+def build_bootstrap_stability_summary(na_df: pd.DataFrame, dosage_df: pd.DataFrame, assoc_df: pd.DataFrame, id_col: str, exposure_type: str, top_n: int = 20, n_boot: int = 200, random_state: int = 42) -> pd.DataFrame:
+    if assoc_df.empty or "P_Value" not in assoc_df.columns or "RNA_Var" not in assoc_df.columns:
+        return pd.DataFrame({"Note": [f"No {exposure_type} association rows were available for bootstrap stability checks."]})
+    candidates = assoc_df.copy()
+    if "FDR_Sig" in candidates.columns and candidates["FDR_Sig"].fillna(False).any():
+        candidates = candidates[candidates["FDR_Sig"].fillna(False)].copy()
+    else:
+        candidates = candidates[candidates["Nominal_Sig"].fillna(False)].copy() if "Nominal_Sig" in candidates.columns else candidates.copy()
+    if candidates.empty:
+        return pd.DataFrame({"Note": [f"No {exposure_type} associations met the nominal/FDR filter for bootstrap stability."]})
+    candidates = candidates.sort_values(["P_Value", "N"], ascending=[True, False]).head(top_n).copy()
+    rng = np.random.default_rng(random_state)
+    rows = []
+    for _, row in candidates.iterrows():
+        base = subset_for_context(na_df, row.get("Context", "All_Primary"))
+        frame = _analysis_frame_for_exposure(base, dosage_df, id_col, row[id_col] if id_col in row.index else row.get("SNP_ID", row.get("Exposure_ID")))
+        if frame.empty or row["RNA_Var"] not in frame.columns:
+            continue
+        t = frame[[row["RNA_Var"], "Dosage"]].copy()
+        t[row["RNA_Var"]] = pd.to_numeric(t[row["RNA_Var"]], errors="coerce")
+        t["Dosage"] = pd.to_numeric(t["Dosage"], errors="coerce")
+        t = t.dropna()
+        if len(t) < 8 or t["Dosage"].nunique() < 2 or t[row["RNA_Var"]].nunique() < 2:
+            continue
+        orig_slope = stats.linregress(t["Dosage"], t[row["RNA_Var"]]).slope
+        boot_slopes = []
+        for _ in range(n_boot):
+            sample = t.iloc[rng.integers(0, len(t), len(t))].copy()
+            if sample["Dosage"].nunique() < 2 or sample[row["RNA_Var"]].nunique() < 2:
+                continue
+            try:
+                boot_slopes.append(stats.linregress(sample["Dosage"], sample[row["RNA_Var"]]).slope)
+            except Exception:
+                continue
+        if not boot_slopes:
+            continue
+        boot_arr = np.asarray(boot_slopes, dtype=float)
+        rows.append({
+            "Exposure_Type": exposure_type,
+            id_col: row[id_col] if id_col in row.index else row.get("SNP_ID", row.get("Exposure_ID")),
+            "Context": row.get("Context", np.nan),
+            "RNA_Var": row["RNA_Var"],
+            "N": len(t),
+            "Original_Slope": orig_slope,
+            "Bootstrap_Median_Slope": float(np.nanmedian(boot_arr)),
+            "Bootstrap_Lo": float(np.nanpercentile(boot_arr, 2.5)),
+            "Bootstrap_Hi": float(np.nanpercentile(boot_arr, 97.5)),
+            "Bootstrap_Sign_Concordance": float(np.mean(np.sign(boot_arr) == np.sign(orig_slope))),
+            "Bootstrap_N": len(boot_arr),
+            "CI_Crosses_Zero": not (np.nanpercentile(boot_arr, 2.5) > 0 or np.nanpercentile(boot_arr, 97.5) < 0),
+            "Source_P_Value": row.get("P_Value", np.nan),
+            "Source_FDR": row.get("FDR", np.nan),
+        })
+    if not rows:
+        return pd.DataFrame({"Note": [f"No {exposure_type} association rows had enough data for bootstrap stability estimation."]})
+    return pd.DataFrame(rows).sort_values(["Source_FDR", "Source_P_Value", "Bootstrap_Sign_Concordance"], ascending=[True, True, False]).reset_index(drop=True)
+
+
+def build_mediation_summary(na_df: pd.DataFrame, dosage_df: pd.DataFrame, assoc_df: pd.DataFrame, id_col: str, exposure_type: str, top_n: int = 10, n_boot: int = 200, random_state: int = 42) -> pd.DataFrame:
+    if assoc_df.empty or "RNA_Var" not in assoc_df.columns:
+        return pd.DataFrame({"Note": [f"No {exposure_type} association rows were available for mediation analysis."]})
+    candidates = assoc_df.copy()
+    if "FDR_Sig" in candidates.columns and candidates["FDR_Sig"].fillna(False).any():
+        candidates = candidates[candidates["FDR_Sig"].fillna(False)].copy()
+    else:
+        candidates = candidates[candidates["Nominal_Sig"].fillna(False)].copy() if "Nominal_Sig" in candidates.columns else candidates.copy()
+    if candidates.empty:
+        return pd.DataFrame({"Note": [f"No {exposure_type} associations met the nominal/FDR filter for mediation analysis."]})
+    candidates = candidates.sort_values(["P_Value", "N"], ascending=[True, False]).head(top_n).copy()
+    mediator_map = {
+        "Breast": ["GSDMB", "pyroptotic_isoform_fraction", "non_pyroptotic_isoform_fraction", "Immune_Response_Score"],
+        "Endometrial": ["GSDMB", "pyroptotic_isoform_fraction", "non_pyroptotic_isoform_fraction", "Immune_Response_Score"],
+        "All_Primary": ["GSDMB", "pyroptotic_isoform_fraction", "non_pyroptotic_isoform_fraction", "Immune_Response_Score"],
+    }
+    outcome_map = {
+        "Breast": ["BREAST_RECURRENCE_DERIVED", "BREAST_METASTASIS_DERIVED", "BREAST_EXITUS_DERIVED", "BREAST_OS_MONTHS_DERIVED"],
+        "Endometrial": ["ENDO_PD_BIN", "ENDO_EXITUS_BIN", "ENDO_OS_MONTHS_DERIVED", "ENDO_PFS_MONTHS_DERIVED"],
+        "All_Primary": ["BREAST_RECURRENCE_DERIVED", "BREAST_METASTASIS_DERIVED", "BREAST_EXITUS_DERIVED", "BREAST_OS_MONTHS_DERIVED", "ENDO_PD_BIN", "ENDO_EXITUS_BIN", "ENDO_OS_MONTHS_DERIVED", "ENDO_PFS_MONTHS_DERIVED"],
+    }
+    rng = np.random.default_rng(random_state)
+    rows = []
+    for _, row in candidates.iterrows():
+        context = row.get("Context", "All_Primary")
+        base = subset_for_context(na_df, context)
+        frame = _analysis_frame_for_exposure(base, dosage_df, id_col, row[id_col] if id_col in row.index else row.get("SNP_ID", row.get("Exposure_ID")))
+        if frame.empty:
+            continue
+        covars = [c for c in ["canon__age", "canon__bmi"] if c in frame.columns]
+        if row["RNA_Var"] not in frame.columns:
+            continue
+        mediators = [m for m in mediator_map.get(context, mediator_map["All_Primary"]) if m in frame.columns]
+        outcomes = [o for o in outcome_map.get(context, outcome_map["All_Primary"]) if o in frame.columns]
+        for mediator in mediators:
+            for outcome in outcomes:
+                work = frame[[row["RNA_Var"], mediator, outcome, "Dosage"] + covars].copy()
+                for col in work.columns:
+                    work[col] = pd.to_numeric(work[col], errors="coerce")
+                work = work.dropna()
+                if len(work) < 8 or work["Dosage"].nunique() < 2 or work[mediator].nunique() < 2 or work[outcome].nunique() < 2:
+                    continue
+                a_fit, a_work = _fit_ols(work, mediator, ["Dosage"] + covars)
+                b_fit, b_work = _fit_ols(work, outcome, ["Dosage", mediator] + covars)
+                c_fit, _ = _fit_ols(work, outcome, ["Dosage"] + covars)
+                if a_fit is None or b_fit is None or c_fit is None:
+                    continue
+                indirect = a_fit["Dosage"] * b_fit[mediator]
+                boot_indirect = []
+                for _ in range(n_boot):
+                    sample = work.iloc[rng.integers(0, len(work), len(work))].copy()
+                    if sample["Dosage"].nunique() < 2 or sample[mediator].nunique() < 2 or sample[outcome].nunique() < 2:
+                        continue
+                    a_b, _ = _fit_ols(sample, mediator, ["Dosage"] + covars)
+                    b_b, _ = _fit_ols(sample, outcome, ["Dosage", mediator] + covars)
+                    if a_b is None or b_b is None:
+                        continue
+                    boot_indirect.append(a_b["Dosage"] * b_b[mediator])
+                if not boot_indirect:
+                    continue
+                boot_arr = np.asarray(boot_indirect, dtype=float)
+                rows.append({
+                    "Exposure_Type": exposure_type,
+                    id_col: row[id_col] if id_col in row.index else row.get("SNP_ID", row.get("Exposure_ID")),
+                    "Context": context,
+                    "RNA_Var": row["RNA_Var"],
+                    "Mediator": mediator,
+                    "Outcome": outcome,
+                    "N": len(work),
+                    "Direct_Effect": b_fit["Dosage"],
+                    "Mediator_a": a_fit["Dosage"],
+                    "Mediator_b": b_fit[mediator],
+                    "Total_Effect": c_fit["Dosage"],
+                    "Indirect_Effect": indirect,
+                    "Indirect_Lo": float(np.nanpercentile(boot_arr, 2.5)),
+                    "Indirect_Hi": float(np.nanpercentile(boot_arr, 97.5)),
+                    "Bootstrap_N": len(boot_arr),
+                    "Indirect_Sign_Concordance": float(np.mean(np.sign(boot_arr) == np.sign(indirect))),
+                    "Source_P_Value": row.get("P_Value", np.nan),
+                    "Source_FDR": row.get("FDR", np.nan),
+                    "Covariates": "age + bmi" if covars else "none",
+                })
+    if not rows:
+        return pd.DataFrame({"Note": [f"No {exposure_type} rows yielded a stable mediation fit."]})
+    return pd.DataFrame(rows).sort_values(["Source_FDR", "Source_P_Value", "Indirect_Sign_Concordance"], ascending=[True, True, False]).reset_index(drop=True)
+
+
 def main():
     # Stage 23 is a workbook-first integration step, so it fails early when an
     # expected upstream result is missing rather than silently producing a
     # partial workbook.
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    optional_inputs = {"stage22", "stage17b_breast", "stage17b_endo", "stage17b_exposure_catalogue"}
     for name, path in PATHS.items():
-        if name == "stage22":
+        if name in optional_inputs:
             continue
         if not path.exists():
             raise FileNotFoundError(f"Missing required input for stage 23: {name} -> {path}")
@@ -761,23 +1360,44 @@ def main():
     bam_na, bam_vars = load_bam_na(PATHS["stage20b"])
     manifest = build_na_manifest(excel_na, bam_na, qc_manifest)
     na = merge_na_layers(excel_na, bam_na)
+    if "Immune_Response_Score" not in na.columns:
+        na["Immune_Response_Score"], immune_genes = compute_immune_response_score(na)
+    else:
+        immune_genes = [gene for gene in IMMUNE_SIGNATURE_GENES if gene in na.columns]
     na_catalog = build_na_variable_catalog(excel_vars, bam_vars)
     sig_snps = load_significant_snps(PATHS["stage12"])
+    sig_mutations = load_significant_mutations(PATHS["stage17b_breast"], PATHS["stage17b_endo"], PATHS["stage17b_exposure_catalogue"])
     sig_haps = load_significant_haplotypes(PATHS["stage22"], PATHS["stage15"])
+    therapy_response_assoc = load_optional_workbook_sheet(PATHS["stage20"], "therapy_response_assoc")
     phased, sample_cols, snps_used = load_phased_matrix(PATHS["phased"], PATHS["stage15"])
     snp_dosage, sig_snps_summary = build_significant_snp_dosage(phased, sample_cols, sig_snps)
+    mutation_dosage, sig_mutations_summary = build_significant_mutation_dosage(sig_mutations, na.get("snp_code", pd.Series(dtype=object)).dropna().astype(str).tolist())
     hap_dosage, hap_freq_checks = build_significant_haplotype_dosage(phased, sample_cols, PATHS["stage15"], sig_haps, snps_used)
 
     tested_snp_codes = set(snp_dosage["snp_code"].dropna()) if not snp_dosage.empty else set()
+    tested_mutation_codes = set(mutation_dosage.loc[pd.to_numeric(mutation_dosage.get("Dosage"), errors="coerce") > 0, "snp_code"].dropna()) if not mutation_dosage.empty else set()
     tested_hap_codes = set(hap_dosage["snp_code"].dropna()) if not hap_dosage.empty else set()
     manifest["has_sig_snp_dosage"] = manifest["snp_code"].isin(tested_snp_codes)
+    manifest["has_sig_mutation_exposure"] = manifest["snp_code"].isin(tested_mutation_codes)
     manifest["has_sig_haplotype_dosage"] = manifest["snp_code"].isin(tested_hap_codes)
     manifest["sample_match_logic"] = "Exact canonical snp_code join after stage-20 RNA matching and BAM filename canonicalisation"
 
     primary_na = primary_subset(na)
     snp_assoc = regression_rows(primary_na, snp_dosage, sig_snps_summary, "SNP", na_catalog)
+    mutation_assoc = regression_rows(primary_na, mutation_dosage, sig_mutations_summary, "Mutation", na_catalog)
     hap_assoc = regression_rows(primary_na, hap_dosage, sig_haps, "Haplotype", na_catalog)
-    summary = summarise_hits(snp_assoc, hap_assoc)
+    immune_summary = build_immune_response_summary(na)
+    bootstrap_stability_summary = pd.concat([
+        build_bootstrap_stability_summary(primary_na, snp_dosage, snp_assoc, "SNP_ID", "SNP", top_n=15, n_boot=200),
+        build_bootstrap_stability_summary(primary_na, hap_dosage, hap_assoc, "Exposure_ID", "Haplotype", top_n=15, n_boot=200),
+    ], ignore_index=True)
+    mediation_summary = pd.concat([
+        build_mediation_summary(primary_na, snp_dosage, snp_assoc, "SNP_ID", "SNP", top_n=10, n_boot=200),
+        build_mediation_summary(primary_na, hap_dosage, hap_assoc, "Exposure_ID", "Haplotype", top_n=10, n_boot=200),
+    ], ignore_index=True)
+    summary = summarise_hits(snp_assoc, mutation_assoc, hap_assoc)
+    gsdmb_isoform_answer = build_gsdmb_isoform_answer(snp_assoc, mutation_assoc, hap_assoc)
+    gsdmb_isoform_summary = build_gsdmb_isoform_summary(gsdmb_isoform_answer)
     unmatched_excel = excel_raw[excel_raw.get("match_status", "") != "matched"].copy()
     inventory = source_inventory(manifest, na_catalog)
     gate_summary = gate_usage_summary(manifest)
@@ -786,11 +1406,14 @@ def main():
     with pd.ExcelWriter(OUT_DIR / "23_RNA_Genetic_Integration.xlsx", engine="openpyxl") as writer:
         pd.DataFrame({
             "Notes": [
-                "Stage 23 links cleaned RNA data to current significant SNP and haplotype signals.",
+                "Stage 23 links cleaned RNA data to current significant SNP, mutation, and haplotype signals.",
                 "Excel-derived variables preserve isoform and panel-expression provenance with explicit prefixes.",
                 "BAM-derived variables use stage-20b ratio-normalised panel expression with bam_ratio__ prefixes.",
                 "If stage 22 has not been run, significant haplotypes are recovered directly from the stage-15 association workbook so stage 23 remains part of the core pipeline.",
                 "Associations are restricted to primary tumour samples passing the exploratory RNA QC gate, while the manifest still preserves which rows were strict-ready versus exploratory-only.",
+                "Use the GSDMB Isoform Summary sheet for the collapsed supervisor-facing answer, and gsdmb_isoform_answer for the fully expanded row-level output.",
+                "Therapy-response associations are carried through from stage 20 so the final integration workbook keeps treatment-related RNA signals in one place.",
+                "Immune-response scoring is derived from the panel-gene layer using the available immune markers; mediation and bootstrap summaries use age and BMI as the only covariates.",
                 "Excel RNA values are treated as source-normalised assay outputs and preserved in their original workbook units; no extra repo-level rescaling is applied to those columns.",
                 "Excel-vs-BAM comparison sheets therefore report cross-platform concordance unless directly compatible units are explicitly known for the paired variables.",
                 "FDR is applied within each exposure x context x RNA source family.",
@@ -803,17 +1426,27 @@ def main():
         gate_summary.to_excel(writer, sheet_name="rna_gate_summary", index=False)
         excel_bam_concordance.to_excel(writer, sheet_name="excel_bam_concordance", index=False)
         sig_snps_summary.to_excel(writer, sheet_name="significant_snps", index=False)
+        sig_mutations_summary.to_excel(writer, sheet_name="significant_mutations", index=False)
         sig_haps.to_excel(writer, sheet_name="significant_haplotypes", index=False)
         hap_freq_checks.to_excel(writer, sheet_name="haplotype_freq_checks", index=False)
+        (therapy_response_assoc if not therapy_response_assoc.empty else pd.DataFrame({"Note": ["No therapy-response RNA associations were available in stage 20."]})).to_excel(writer, sheet_name="therapy_response_assoc", index=False)
         (snp_assoc if not snp_assoc.empty else pd.DataFrame({"Note": ["No significant-SNP RNA tests met the minimum thresholds."]})).to_excel(writer, sheet_name="snp_rna_assoc", index=False)
+        (mutation_assoc if not mutation_assoc.empty else pd.DataFrame({"Note": ["No significant-mutation RNA tests met the minimum thresholds."]})).to_excel(writer, sheet_name="mutation_rna_assoc", index=False)
         (hap_assoc if not hap_assoc.empty else pd.DataFrame({"Note": ["No significant-haplotype RNA tests met the minimum thresholds."]})).to_excel(writer, sheet_name="haplotype_rna_assoc", index=False)
+        immune_summary.to_excel(writer, sheet_name="immune_response_summary", index=False)
+        (bootstrap_stability_summary if not bootstrap_stability_summary.empty else pd.DataFrame({"Note": ["No bootstrap stability rows could be estimated."]})).to_excel(writer, sheet_name="bootstrap_stability_summary", index=False)
+        (mediation_summary if not mediation_summary.empty else pd.DataFrame({"Note": ["No mediation rows could be estimated."]})).to_excel(writer, sheet_name="mediation_summary", index=False)
+        gsdmb_isoform_summary.to_excel(writer, sheet_name="GSDMB Isoform Summary", index=False)
+        gsdmb_isoform_answer.to_excel(writer, sheet_name="gsdmb_isoform_answer", index=False)
         summary.to_excel(writer, sheet_name="expression_effect_summary", index=False)
         unmatched_excel.to_excel(writer, sheet_name="unmatched_excel_rows", index=False)
 
     if not snp_assoc.empty:
-        plot_heatmap(snp_assoc.sort_values("P_Value"), "SNP_ID", OUT_DIR / "23_SNP_RNA_Heatmap.png", "Significant SNP vs RNA associations")
+        plot_heatmap(snp_assoc.sort_values("P_Value"), "SNP_ID", OUT_DIR / "23_SNP_RNA_Heatmap.png", "Significant SNP vs RNA Associations")
+    if not mutation_assoc.empty:
+        plot_heatmap(mutation_assoc.sort_values("P_Value"), "Exposure_ID", OUT_DIR / "23_Mutation_RNA_Heatmap.png", "Significant Mutation vs RNA Associations")
     if not hap_assoc.empty:
-        plot_heatmap(hap_assoc.sort_values("P_Value"), "Exposure_ID", OUT_DIR / "23_Haplotype_RNA_Heatmap.png", "Significant haplotype vs RNA associations")
+        plot_heatmap(hap_assoc.sort_values("P_Value"), "Exposure_ID", OUT_DIR / "23_Haplotype_RNA_Heatmap.png", "Significant Haplotype vs RNA Associations")
 
     print("=== Stage 23 RNA integration summary ===")
     print(f"Collapsed Excel RNA samples      : {excel_na['snp_code'].nunique()}")
@@ -823,16 +1456,19 @@ def main():
     print(f"Primary exploratory-only rows   : {int((primary_na.get('RNA_QC_Exploratory_Ready', False).fillna(False) & ~primary_na.get('RNA_QC_Analysis_Ready', False).fillna(False)).sum())}")
     print(f"Significant SNPs retained       : {len(sig_snps_summary)}")
     print(f"Significant SNPs testable       : {int(sig_snps_summary['RNA_Testable'].sum())}")
+    print(f"Significant mutations retained  : {len(sig_mutations_summary)}")
+    print(f"Significant mutations testable  : {int(sig_mutations_summary.get('RNA_Testable', pd.Series(dtype=bool)).fillna(False).sum()) if not sig_mutations_summary.empty else 0}")
     print(f"Significant haplotypes retained : {len(sig_haps)}")
     print(f"SNP vs RNA tests                : {len(snp_assoc)}")
+    print(f"Mutation vs RNA tests           : {len(mutation_assoc)}")
     print(f"Haplotype vs RNA tests          : {len(hap_assoc)}")
+    print(f"Therapy-response rows           : {len(therapy_response_assoc)}")
+    print(f"Immune markers used             : {len(immune_genes)}")
+    print(f"Immune-score summary rows       : {len(immune_summary)}")
+    print(f"Bootstrap stability rows        : {len(bootstrap_stability_summary)}")
+    print(f"Mediation summary rows          : {len(mediation_summary)}")
     print(f"Results workbook                : {OUT_DIR / '23_RNA_Genetic_Integration.xlsx'}")
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-

@@ -35,7 +35,7 @@ import pysam
 import seaborn as sns
 
 from association_runtime import script24_defaults
-from pipeline_utils import ensure_directory
+from pipeline_utils import ensure_directory, find_col
 
 sns.set_theme(style="whitegrid", context="talk")
 
@@ -48,6 +48,14 @@ COHORT_CONFIG = {
     "Breast": {"study_dataset": "Study_Breast_Tumour", "study_manifest_file": "24_Study_Breast_Tumour_Manifest.tsv"},
     "Endometrium": {"study_dataset": "Study_Endometrium_Tumour", "study_manifest_file": "24_Study_Endometrium_Tumour_Manifest.tsv"},
 }
+
+
+def first_available_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    for candidate in candidates:
+        col = find_col(df, candidate)
+        if col is not None:
+            return col
+    return None
 
 
 def load_stage19_module():
@@ -128,14 +136,32 @@ def select_study_manifest(metadata: pd.DataFrame, cohort: str, female_filter_act
 
 def load_significant_snps(snp_results_path: Path, comparison: str) -> pd.DataFrame:
     df = pd.read_excel(snp_results_path, sheet_name=comparison)
-    if "FDR_Significant" not in df.columns:
-        raise ValueError(f"Stage-12 {comparison} sheet is missing the FDR_Significant column.")
+    column_map = {
+        "FDR_Significant": ["FDR_Significant", "Primary_Genotype_FDR_Significant"],
+        "SNP_ID": ["SNP_ID", "rsID"],
+        "Gene": ["Gene", "Symbol"],
+        "FDR_P_Value": ["FDR_P_Value", "Carrier_FDR_P_Value", "Primary_Genotype_FDR_P_Value", "Best_Genotype_FDR"],
+        "P_Value": ["P_Value", "Carrier_P_Value", "Primary_Genotype_P_Value", "Best_Genotype_P"],
+        "Study_Tumour_Frequency": ["Tumour_Freq_%", "Carrier_Tumour_Freq_pct"],
+        "Study_Pooled_Control_Frequency": ["Control_Freq_%", "Carrier_Control_Freq_pct"],
+    }
+    for target, candidates in column_map.items():
+        source = first_available_column(df, candidates)
+        if source is not None and source != target:
+            df[target] = df[source]
+    missing = [name for name in ["FDR_Significant", "SNP_ID", "FDR_P_Value", "P_Value", "Study_Tumour_Frequency", "Study_Pooled_Control_Frequency"] if name not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Stage-12 {comparison} sheet is missing required columns after schema normalisation: {', '.join(missing)}"
+        )
     df = df[df["FDR_Significant"].eq(True)].copy()
     df["SNP_ID"] = df["SNP_ID"].astype(str).str.strip()
     if "Gene" not in df.columns:
         df["Gene"] = df.get("Symbol", pd.Series(index=df.index)).astype(str).str.strip()
-    df["Study_Tumour_Frequency"] = pd.to_numeric(df["Tumour_Freq_%"], errors="coerce") / 100.0
-    df["Study_Pooled_Control_Frequency"] = pd.to_numeric(df["Control_Freq_%"], errors="coerce") / 100.0
+    df["FDR_P_Value"] = pd.to_numeric(df["FDR_P_Value"], errors="coerce")
+    df["P_Value"] = pd.to_numeric(df["P_Value"], errors="coerce")
+    df["Study_Tumour_Frequency"] = pd.to_numeric(df["Study_Tumour_Frequency"], errors="coerce") / 100.0
+    df["Study_Pooled_Control_Frequency"] = pd.to_numeric(df["Study_Pooled_Control_Frequency"], errors="coerce") / 100.0
     df["Comparison"] = comparison
     return df.sort_values(["FDR_P_Value", "P_Value", "SNP_ID"]).reset_index(drop=True)
 

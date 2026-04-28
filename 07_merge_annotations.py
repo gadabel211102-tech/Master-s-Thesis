@@ -10,26 +10,41 @@ all downstream descriptive and inferential analyses.
 
 Methodological note
 -------------------
-This script works directly from the VCF representation rather than a flattened
-text export. That choice preserves the integrity of the CSQ field and avoids
-parsing artefacts that can arise when pipe-delimited annotations are split with
-generic text-processing tools.
+The resulting workbook is intentionally annotation-focused. It preserves the
+transcript-expanded VEP rows plus prioritised annotation summaries, but it is
+not a complete sample-by-locus genotype matrix. Explicit WT / Het / Hom /
+callability logic lives in script 05b and must be sourced from the forced-
+genotype workbook rather than inferred here.
 
 Output
 ------
-- Biological_Annotations sheet in GSDMB_Annotated_Report.xlsx.
+- ``Biological_Annotations``: transcript-expanded raw annotation rows with
+  stable keys and derived annotation helper columns.
+- ``Sample_Variant_Annotations``: one prioritised annotation row per
+  sample/variant allele.
+- ``Variant_Annotations``: one prioritised annotation row per unique variant
+  allele across the cohort, suitable for downstream joins.
+- ``README``: scope and sheet guide for the workbook.
 """
 
-import pandas as pd
+from __future__ import annotations
+
 import glob
-import os
 import gzip
+import os
 import subprocess
+from pathlib import Path
 
-from pipeline_utils import get_paths
+import pandas as pd
+
+from pipeline_utils import find_col, get_paths
 from pipeline_validation import print_validation_summary, validate_required_columns
+from variant_annotation_utils import (
+    choose_representative_annotation_row,
+    derive_annotation_columns,
+    describe_annotation_basis,
+)
 
-# --- Configuration ---
 PATHS = get_paths()
 results_dir = str(PATHS["annotated_variants_dir"])
 os.makedirs(results_dir, exist_ok=True)
@@ -37,34 +52,22 @@ output_file = os.path.join(results_dir, "GSDMB_Annotated_Variants.xlsx")
 tfm_root = str(PATHS["project_root"])
 
 
-def get_vep_headers(vcf_path):
-    """Extracts the exact CSQ field names directly from the VCF header."""
+def get_vep_headers(vcf_path: str) -> list[str] | None:
+    """Extract the CSQ field names directly from one VCF header."""
     try:
         opener = gzip.open if vcf_path.endswith('.gz') else open
-        with opener(vcf_path, 'rt') as f:
-            for line in f:
+        with opener(vcf_path, 'rt') as handle:
+            for line in handle:
                 if line.startswith('##INFO=<ID=CSQ'):
                     header_part = line.split('Format: ')[1].split('"')[0]
                     return header_part.strip().split('|')
-    except Exception as e:
-        print(f"Debug: Header extraction failed for {vcf_path}: {e}")
+    except Exception as exc:  # pragma: no cover - defensive logging for malformed VCFs
+        print(f"Debug: header extraction failed for {vcf_path}: {exc}")
     return None
 
 
-def find_col(df, target_name):
-    """Finds a column name in a DataFrame case-insensitively."""
-    for col in df.columns:
-        if col.upper() == target_name.upper():
-            return col
-    return None
-
-
-def bcftools_query_vcf(vcf_path):
-    """
-    Extract per-variant data from a VEP-annotated VCF using bcftools query.
-    Returns a list of dicts, one per variant x transcript (CSQ split properly).
-    GT, DP, AF, REF, ALT extracted as dedicated fields - NOT via CSQ pipe-splitting.
-    """
+def bcftools_query_vcf(vcf_path: str) -> list[dict[str, object]]:
+    """Extract explicit VCF fields plus transcript-expanded CSQ records."""
     try:
         hdr = subprocess.check_output(
             ['bcftools', 'view', '-h', vcf_path], stderr=subprocess.DEVNULL
@@ -73,18 +76,15 @@ def bcftools_query_vcf(vcf_path):
         print(f"  WARNING: could not read header for {vcf_path}")
         return []
 
-    has_gt  = '##FORMAT=<ID=GT,'  in hdr
-    has_dp  = '##FORMAT=<ID=DP,'  in hdr
-    has_af  = '##FORMAT=<ID=AF,'  in hdr
-    has_ao  = '##FORMAT=<ID=AO,'  in hdr
-    has_ro  = '##FORMAT=<ID=RO,'  in hdr
-    has_iaf = '##INFO=<ID=AF,'    in hdr
-    has_idp = '##INFO=<ID=DP,'    in hdr
+    has_gt = '##FORMAT=<ID=GT,' in hdr
+    has_dp = '##FORMAT=<ID=DP,' in hdr
+    has_af = '##FORMAT=<ID=AF,' in hdr
+    has_ao = '##FORMAT=<ID=AO,' in hdr
+    has_ro = '##FORMAT=<ID=RO,' in hdr
+    has_iaf = '##INFO=<ID=AF,' in hdr
+    has_idp = '##INFO=<ID=DP,' in hdr
 
-    # Build format string: extract CSQ as single raw field, everything else explicit
     fmt_parts = ['%CHROM', '%POS', '%REF', '%ALT', '%QUAL', '%FILTER']
-
-    # Depth: prefer FORMAT/DP, fall back to INFO/DP
     if has_dp:
         fmt_parts.append('[%DP]')
     elif has_idp:
@@ -92,7 +92,6 @@ def bcftools_query_vcf(vcf_path):
     else:
         fmt_parts.append('.')
 
-    # Allele fraction: prefer FORMAT/AF, derive from AO/RO if needed, fall back to INFO/AF
     ao_ro_mode = has_ao and has_ro and not has_af
     if has_af:
         fmt_parts.append('[%AF]')
@@ -104,45 +103,32 @@ def bcftools_query_vcf(vcf_path):
     else:
         fmt_parts.append('.')
 
-    # Genotype
-    if has_gt:
-        fmt_parts.append('[%GT]')
-    else:
-        fmt_parts.append('.')
-
-    # CSQ last - keep intact so we split on | ourselves
+    fmt_parts.append('[%GT]' if has_gt else '.')
     fmt_parts.append('%INFO/CSQ')
-
     fmt_string = '\t'.join(fmt_parts) + '\n'
 
     try:
         raw = subprocess.check_output(
             ['bcftools', 'query', '-f', fmt_string, vcf_path],
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.DEVNULL,
         ).decode()
-    except subprocess.CalledProcessError as e:
-        print(f"  WARNING: bcftools query failed for {vcf_path}: {e}")
+    except subprocess.CalledProcessError as exc:
+        print(f"  WARNING: bcftools query failed for {vcf_path}: {exc}")
         return []
 
-    # Determine column layout
     base_cols = ['CHROM', 'POS', 'REF', 'ALT', 'QUAL', 'FILTER']
-    if ao_ro_mode:
-        meta_cols = base_cols + ['DP', 'AO', 'RO', 'GT', 'CSQ_RAW']
-    else:
-        meta_cols = base_cols + ['DP', 'AF', 'GT', 'CSQ_RAW']
-
+    meta_cols = base_cols + (['DP', 'AO', 'RO', 'GT', 'CSQ_RAW'] if ao_ro_mode else ['DP', 'AF', 'GT', 'CSQ_RAW'])
     vep_fields = get_vep_headers(vcf_path)
 
-    rows = []
+    rows: list[dict[str, object]] = []
     for line in raw.splitlines():
         if not line.strip():
             continue
-        parts = line.split('\t', len(meta_cols) - 1)
+        parts = line.split('	', len(meta_cols) - 1)
         if len(parts) < len(meta_cols):
             parts += ['.'] * (len(meta_cols) - len(parts))
         record = dict(zip(meta_cols, parts))
 
-        # Derive AF from AO/RO if needed
         if ao_ro_mode:
             try:
                 ao = float(record.get('AO', 0))
@@ -152,81 +138,164 @@ def bcftools_query_vcf(vcf_path):
                 record['AF'] = '.'
             del record['AO'], record['RO']
 
-        # Expand CSQ: each transcript is a comma-delimited entry
         csq_raw = record.pop('CSQ_RAW', '.')
         if csq_raw in ('.', ''):
             if vep_fields:
-                for f in vep_fields:
-                    record[f] = '.'
+                for field in vep_fields:
+                    record[field] = '.'
             rows.append(record)
             continue
 
-        csq_entries = csq_raw.split(',')
-        for entry in csq_entries:
+        for entry in csq_raw.split(','):
             row = record.copy()
             values = entry.split('|')
             if vep_fields:
                 for i, field in enumerate(vep_fields):
                     row[field] = values[i] if i < len(values) else '.'
             else:
-                for i, v in enumerate(values):
-                    row[f'CSQ_{i}'] = v
+                for i, value in enumerate(values):
+                    row[f'CSQ_{i}'] = value
             rows.append(row)
-
     return rows
 
 
-def merge_vep_to_excel():
-    """Merge all per-sample annotated VCFs into one analysis-ready workbook."""
-    print("--- Starting VEP consolidation (VCF-direct version) ---")
+def build_sample_variant_annotations(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse transcript rows to one representative annotation per sample/variant allele."""
+    rows: list[dict[str, object]] = []
+    group_cols = ['Sample', 'Cohort', 'Tissue', 'Variant_Key']
+    for _, group in raw_df.groupby(group_cols, sort=False):
+        rep = choose_representative_annotation_row(group)
+        rows.append({
+            'Sample': rep.get('Sample', ''),
+            'Cohort': rep.get('Cohort', ''),
+            'Tissue': rep.get('Tissue', ''),
+            'Variant_Key': rep.get('Variant_Key', ''),
+            'Locus_Key': rep.get('Locus_Key', ''),
+            'rsID': rep.get('rsID', ''),
+            'CHROM': rep.get('CHROM', ''),
+            'POS': rep.get('POS', None),
+            'REF': rep.get('REF', ''),
+            'ALT': rep.get('ALT', ''),
+            'Existing_variation': rep.get('Existing_variation', ''),
+            'Gene_Symbol': rep.get('SYMBOL', ''),
+            'Gene_ID': rep.get('Gene', ''),
+            'Detailed_Consequence': rep.get('Detailed_Consequence', ''),
+            'Consequence_Raw': rep.get('Consequence_Raw', ''),
+            'Location_Class': rep.get('Location_Class', ''),
+            'Functional_Class': rep.get('Functional_Class', ''),
+            'Impact_Severity': rep.get('Impact_Severity', ''),
+            'gnomAD_NFE_AF_combined': rep.get('gnomAD_NFE_AF_combined', None),
+            'gnomAD_NFE_Source': rep.get('gnomAD_NFE_Source', ''),
+            'SIFT_Raw': rep.get('SIFT_Raw', ''),
+            'SIFT_Prediction': rep.get('SIFT_Prediction', ''),
+            'PolyPhen_Raw': rep.get('PolyPhen_Raw', ''),
+            'PolyPhen_Prediction': rep.get('PolyPhen_Prediction', ''),
+            'HGVSc': rep.get('HGVSc', ''),
+            'HGVSp': rep.get('HGVSp', ''),
+            'Feature': rep.get('Feature', ''),
+            'Feature_type': rep.get('Feature_type', ''),
+            'CANONICAL': rep.get('CANONICAL', ''),
+            'MANE_SELECT': rep.get('MANE_SELECT', ''),
+            'PICK': rep.get('PICK', ''),
+            'Source_GT': rep.get('Source_GT', ''),
+            'Source_GT_Class': rep.get('Source_GT_Class', ''),
+            'Transcript_Rows_For_Sample_Variant': int(len(group)),
+            'Representative_Annotation_Basis': describe_annotation_basis(rep),
+            'Workbook_Scope': 'annotation_summary_per_sample_variant',
+            'Genotype_Interpretation_Note': 'Source_GT / Source_GT_Class come from the originating VCF row only and do not form a complete genotype matrix.',
+        })
+    out = pd.DataFrame(rows)
+    return out.sort_values(['Cohort', 'Tissue', 'Sample', 'CHROM', 'POS', 'ALT'], kind='stable').reset_index(drop=True)
 
-    # Find all VEP-annotated VCFs written by script 06
-    vcf_files = glob.glob(os.path.join(tfm_root, "**/*.vep.vcf.gz"), recursive=True)
 
-    # BUG FIX: old version returned immediately after the fallback search even
-    # if it found files. Now we only bail if truly nothing is found.
+def build_variant_annotations(raw_df: pd.DataFrame, sample_variant_df: pd.DataFrame) -> pd.DataFrame:
+    """Build one representative annotation row per unique variant allele."""
+    rows: list[dict[str, object]] = []
+    for _, group in raw_df.groupby(['Variant_Key'], sort=False):
+        rep = choose_representative_annotation_row(group)
+        sample_variants = sample_variant_df[sample_variant_df['Variant_Key'] == rep.get('Variant_Key', '')]
+        rows.append({
+            'Variant_Key': rep.get('Variant_Key', ''),
+            'Locus_Key': rep.get('Locus_Key', ''),
+            'rsID': rep.get('rsID', ''),
+            'CHROM': rep.get('CHROM', ''),
+            'POS': rep.get('POS', None),
+            'REF': rep.get('REF', ''),
+            'ALT': rep.get('ALT', ''),
+            'Existing_variation': rep.get('Existing_variation', ''),
+            'Gene_Symbol': rep.get('SYMBOL', ''),
+            'Gene_ID': rep.get('Gene', ''),
+            'Detailed_Consequence': rep.get('Detailed_Consequence', ''),
+            'Consequence_Raw': rep.get('Consequence_Raw', ''),
+            'Location_Class': rep.get('Location_Class', ''),
+            'Functional_Class': rep.get('Functional_Class', ''),
+            'Impact_Severity': rep.get('Impact_Severity', ''),
+            'gnomAD_NFE_AF_combined': rep.get('gnomAD_NFE_AF_combined', None),
+            'gnomAD_NFE_Source': rep.get('gnomAD_NFE_Source', ''),
+            'SIFT_Raw': rep.get('SIFT_Raw', ''),
+            'SIFT_Prediction': rep.get('SIFT_Prediction', ''),
+            'PolyPhen_Raw': rep.get('PolyPhen_Raw', ''),
+            'PolyPhen_Prediction': rep.get('PolyPhen_Prediction', ''),
+            'HGVSc': rep.get('HGVSc', ''),
+            'HGVSp': rep.get('HGVSp', ''),
+            'Feature': rep.get('Feature', ''),
+            'Feature_type': rep.get('Feature_type', ''),
+            'Representative_Transcript': rep.get('Feature', ''),
+            'Representative_Annotation_Basis': describe_annotation_basis(rep),
+            'Transcript_Rows_For_Variant': int(len(group)),
+            'Samples_Annotated': int(sample_variants['Sample'].nunique()),
+            'Cohorts_Observed': '; '.join(sorted(sample_variants['Cohort'].dropna().astype(str).unique())),
+            'Tissues_Observed': '; '.join(sorted(sample_variants['Tissue'].dropna().astype(str).unique())),
+            'Workbook_Scope': 'annotation_summary_per_variant_allele',
+            'Join_Use': 'Join to stage 05b genotype summaries by Variant_Key; use Locus_Key only when working at locus level.',
+        })
+    out = pd.DataFrame(rows)
+    return out.sort_values(['CHROM', 'POS', 'REF', 'ALT'], kind='stable').reset_index(drop=True)
+
+
+def build_readme() -> pd.DataFrame:
+    return pd.DataFrame([
+        ['Workbook purpose', 'Annotation-focused workbook built from VEP-annotated VCF rows. It is useful for gene, transcript, consequence, impact, and predictor labels.'],
+        ['Critical scope note', 'This workbook is not a complete sample-by-locus genotype matrix. WT / Het / Hom / callable denominator logic must come from stage 05b forced genotypes.'],
+        ['Sheet: Biological_Annotations', 'Transcript-expanded VEP rows with stable join keys plus derived annotation helper columns.'],
+        ['Sheet: Sample_Variant_Annotations', 'One representative annotation row per sample and variant allele. Keeps source GT as a raw VCF field only.'],
+        ['Sheet: Variant_Annotations', 'One representative annotation row per unique variant allele, suitable for downstream joining and figure labels.'],
+        ['Stable join keys', 'Variant_Key = CHROM:POS:REF:ALT and Locus_Key = CHROM:POS:REF. Variant_Key is the preferred bridge to allele-specific genotype summaries.'],
+        ['Transcript prioritisation', 'Representative annotations prefer PICK, then CANONICAL, then MANE_SELECT, then worst IMPACT / worst consequence.'],
+        ['Functional summaries', 'Detailed_Consequence, Functional_Class, Location_Class, Impact_Severity, SIFT_Prediction, and PolyPhen_Prediction are derived helper fields layered onto the VEP output.'],
+    ], columns=['Field', 'Description'])
+
+
+def merge_vep_to_excel() -> None:
+    print('--- Starting VEP consolidation (annotation-focused workbook) ---')
+    vcf_files = glob.glob(os.path.join(tfm_root, '**/*.vep.vcf.gz'), recursive=True)
     if not vcf_files:
-        print("ERROR: No *.vep.vcf.gz files found under", tfm_root)
+        print('ERROR: No *.vep.vcf.gz files found under', tfm_root)
         return
 
-    print(f"Found {len(vcf_files)} VEP-annotated VCF(s)")
-
-    # Each input VCF contributes transcript-level rows that remain linked to
-    # the sample, cohort and tissue of origin.
-    all_variants = []
+    print(f'Found {len(vcf_files)} VEP-annotated VCF(s)')
+    all_variants: list[pd.DataFrame] = []
 
     for vcf_path in sorted(vcf_files):
         parts = vcf_path.split(os.sep)
-
-        # Expected layout: .../tfm/<cohort>/<tissue>/dna_calls/<sample>/<sample>.vep.vcf.gz
-        # or: .../tfm/<cohort>/<tissue>/<sample>/<sample>.vep.vcf.gz
         sample_name = os.path.basename(vcf_path).replace('.vep.vcf.gz', '')
         cohort_type = 'Unknown'
         tissue_type = 'Unknown'
-
         try:
-            sample_dir_idx = next(
-                i for i, p in enumerate(parts) if p == sample_name
-            )
-            # Expected: .../cohort/tissue/dna_calls/sample/sample.vep.vcf.gz
-            # so parts[sample_dir_idx - 1] == 'dna_calls'
-            #    parts[sample_dir_idx - 2] == tissue  (e.g. 'normal', 'tumour')
-            #    parts[sample_dir_idx - 3] == cohort  (e.g. 'breast', 'endometrium')
+            sample_dir_idx = next(i for i, part in enumerate(parts) if part == sample_name)
             if parts[sample_dir_idx - 1].lower() == 'dna_calls':
                 tissue_type = parts[sample_dir_idx - 2].capitalize()
                 cohort_type = parts[sample_dir_idx - 3].capitalize()
             else:
-                # Fallback for flatter layouts without dna_calls folder
                 tissue_type = parts[sample_dir_idx - 1].capitalize()
                 cohort_type = parts[sample_dir_idx - 2].capitalize()
         except (StopIteration, IndexError):
             pass
 
-        print(f"  Processing: {cohort_type}/{tissue_type}/{sample_name}")
+        print(f'  Processing: {cohort_type}/{tissue_type}/{sample_name}')
         rows = bcftools_query_vcf(vcf_path)
-
         if not rows:
-            print(f"    WARNING: no variants extracted from {vcf_path}")
+            print(f'    WARNING: no variants extracted from {vcf_path}')
             continue
 
         df = pd.DataFrame(rows)
@@ -236,58 +305,46 @@ def merge_vep_to_excel():
         all_variants.append(df)
 
     if not all_variants:
-        print("No variants found in any VCF.")
+        print('No variants found in any VCF.')
         return
 
-    # Concatenate all per-sample tables into the canonical annotation frame
-    # used by the rest of the pipeline.
     final_df = pd.concat(all_variants, ignore_index=True)
+    final_df = derive_annotation_columns(final_df)
 
-    # --- Column ordering ---
-    impact_col      = find_col(final_df, 'IMPACT')
-    symbol_col      = find_col(final_df, 'SYMBOL')
-    consequence_col = find_col(final_df, 'CONSEQUENCE')
-    hgvsp_col       = find_col(final_df, 'HGVSp')
-    variant_id_col  = find_col(final_df, 'Existing_variation')
-
-    # Sort by impact
+    impact_col = find_col(final_df, 'IMPACT')
     if impact_col:
         impact_order = {'HIGH': 0, 'MODERATE': 1, 'LOW': 2, 'MODIFIER': 3}
-        final_df['_impact_rank'] = final_df[impact_col].map(impact_order).fillna(4)
-        final_df = final_df.sort_values('_impact_rank').drop('_impact_rank', axis=1)
+        final_df['_impact_rank'] = final_df[impact_col].astype(str).str.upper().map(impact_order).fillna(4)
+        final_df = final_df.sort_values(['_impact_rank', 'CHROM', 'POS', 'REF', 'ALT', 'Sample'], kind='stable').drop(columns=['_impact_rank'])
 
-    # Most useful columns first, then everything else
-    priority = ['Cohort', 'Tissue', 'Sample', 'CHROM', 'POS', 'REF', 'ALT',
-                'QUAL', 'FILTER', 'DP', 'AF', 'GT']
-    for col in [symbol_col, hgvsp_col, consequence_col, impact_col, variant_id_col]:
-        if col and col not in priority:
-            priority.append(col)
+    priority = [
+        'Cohort', 'Tissue', 'Sample', 'Variant_Key', 'Locus_Key', 'rsID',
+        'CHROM', 'POS', 'REF', 'ALT', 'GT', 'Source_GT_Class',
+        'SYMBOL', 'Gene', 'Feature', 'Feature_type',
+        'Consequence', 'Consequence_Raw', 'Detailed_Consequence', 'Location_Class', 'Functional_Class',
+        'IMPACT', 'Impact_Severity', 'gnomAD_NFE_AF_combined', 'gnomAD_NFE_Source', 'SIFT_Raw', 'SIFT_Prediction', 'PolyPhen_Raw', 'PolyPhen_Prediction',
+        'HGVSc', 'HGVSp', 'Existing_variation', 'Annotation_Row_Scope',
+    ]
+    priority = [col for col in priority if col in final_df.columns]
+    final_df = final_df[priority + [col for col in final_df.columns if col not in priority]]
 
-    other_cols = [c for c in final_df.columns if c not in priority]
-    final_df = final_df[priority + other_cols]
+    validate_required_columns(final_df, ['Cohort', 'Tissue', 'Sample', 'CHROM', 'POS', 'REF', 'ALT', 'Variant_Key', 'Locus_Key'], 'Script 07 merged annotation output')
+    print_validation_summary(final_df, 'Sample', 'Script 07 merged annotations', ['Cohort', 'Tissue'])
 
-    validate_required_columns(final_df, ["Cohort", "Tissue", "Sample", "CHROM", "POS"], "Script 07 merged annotation output")
-    print_validation_summary(final_df, "Sample", "Script 07 merged annotations", ["Cohort", "Tissue"])
+    sample_variant_df = build_sample_variant_annotations(final_df)
+    variant_annotations_df = build_variant_annotations(final_df, sample_variant_df)
+    readme_df = build_readme()
 
-    # --- Write Excel ---
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+        readme_df.to_excel(writer, sheet_name='README', index=False)
+        final_df.to_excel(writer, sheet_name='Biological_Annotations', index=False)
+        sample_variant_df.to_excel(writer, sheet_name='Sample_Variant_Annotations', index=False)
+        variant_annotations_df.to_excel(writer, sheet_name='Variant_Annotations', index=False)
 
-    if not os.path.exists(output_file):
-        final_df.to_excel(output_file, sheet_name='Biological_Annotations', index=False)
-        print(f"--- Created new report: {output_file} ---")
-    else:
-        with pd.ExcelWriter(output_file, engine='openpyxl', mode='a',
-                            if_sheet_exists='replace') as writer:
-            final_df.to_excel(writer, sheet_name='Biological_Annotations', index=False)
-        print(f"--- Updated existing report: {output_file} ---")
-
-    print(f"SUCCESS: Consolidated {len(final_df)} variant-transcript rows into "
-          f"'Biological_Annotations'.")
-    print(f"Columns available for QC: "
-          f"REF={'REF' in final_df.columns}, ALT={'ALT' in final_df.columns}, "
-          f"GT={'GT' in final_df.columns}, DP={'DP' in final_df.columns}, "
-          f"AF={'AF' in final_df.columns}")
+    print(f"SUCCESS: Consolidated {len(final_df)} transcript-expanded rows into {output_file}")
+    print(f"         Sample-level prioritised rows: {len(sample_variant_df)}")
+    print(f"         Unique variant-level annotation rows: {len(variant_annotations_df)}")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     merge_vep_to_excel()

@@ -438,7 +438,7 @@ def classify_rna_analysis_row(row: pd.Series) -> tuple[bool, bool, str, str, str
     if pd.isna(targets_with_read_counts) or targets_with_read_counts < panel_target_count:
         return False, False, "Excluded", "Missing/invalid panel-gene read-count context", risk_note or "Per-gene read counts were not available across the full RNA panel target set."
     if risk_level == "High":
-        return False, False, "Excluded", "Low panel-gene read uniformity", risk_note or "RNA panel coverage or per-gene read uniformity was too weak for QC-gated analysis."
+        return False, True, "Exploratory", "", risk_note or "RNA panel-wide read uniformity was low; retain as exploratory because across-panel non-uniformity may reflect biology or panel bias as well as technical weakness."
     if risk_level == "Moderate":
         return False, True, "Exploratory", "", risk_note or "RNA panel coverage was usable but below the strict analysis-ready uniformity threshold; treat as exploratory."
     if risk_level == "Unavailable":

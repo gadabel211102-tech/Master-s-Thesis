@@ -70,6 +70,7 @@ RESULTS="${BASE}/analysis_results"
 HAPLO_DIR="${RESULTS}/15_haplotype_phasing"
 BEAGLE="${BASE}/beagle.jar"
 THREADS="${THREADS:-4}"
+JAVA_BIN="${JAVA_BIN:-}"
 
 # 1000G Phase 3 reference panel (chr17:39800000-39950000 subset)
 # See header comments for how to prepare this file
@@ -111,6 +112,24 @@ if [ ! -f "${BEAGLE}" ]; then
 fi
 echo "  ✓ BEAGLE jar found"
 
+if [ -z "${JAVA_BIN}" ]; then
+    if command -v java >/dev/null 2>&1; then
+        JAVA_BIN="$(command -v java)"
+    elif command -v micromamba >/dev/null 2>&1; then
+        JAVA_FROM_MAMBA="$(micromamba run -n bam-steps which java 2>/dev/null | tail -n 1 || true)"
+        if [ -n "${JAVA_FROM_MAMBA}" ]; then
+            JAVA_BIN="${JAVA_FROM_MAMBA}"
+        fi
+    fi
+fi
+
+if [ -z "${JAVA_BIN}" ]; then
+    echo "ERROR: Java runtime not found on PATH and not found via 'micromamba run -n bam-steps which java'."
+    echo "       Install Java >= 11 or export JAVA_BIN=/path/to/java before rerunning script 15."
+    exit 1
+fi
+echo "  ✓ Java found: ${JAVA_BIN}"
+
 # Reference panel is optional but strongly recommended
 # Script will continue without it but phasing accuracy will be reduced
 if [ ! -f "${REF_PANEL}" ]; then
@@ -141,8 +160,12 @@ echo ""
 # Each single-sample VCF from script 05 has its sample column named
 # generically (often "SAMPLE" or the IonCode barcode). When bcftools merge
 # combines them, every sample column must be uniquely named or the merge
-# will fail. We rename each sample to its folder name (which is guaranteed
-# unique) using bcftools reheader before merging.
+# will fail. Most folder basenames are unique, but a small subset of the
+# endometrial CK_ECLAI labels legitimately appears in both healthy and tumour
+# directories. We therefore pre-scan all available VCFs and append a
+# cohort/tissue suffix only when a basename would otherwise collide. The raw
+# sample label remains at the start of the phased sample name so downstream
+# ``SNP_*`` code extraction still works.
 #
 # dna_calls/ directories contain only QC-passed samples because script 02
 # copies BAMs to pass_bams/ only, and script 05 processes pass_bams/.
@@ -157,6 +180,44 @@ RENAMED_DIR="${HAPLO_DIR}/renamed_vcfs"
 mkdir -p "${RENAMED_DIR}"
 > "${SAMPLE_LIST}"   # Truncate or create the sample list file
 echo -e "Sample\tCohort\tTissue\tGroup" > "${SAMPLE_INFO}"
+
+declare -A SAMPLE_NAME_COUNTS=()
+
+for cohort in breast endometrium; do
+    for tissue in normal tumour; do
+        CALLS_DIR="${BASE}/${cohort}/${tissue}/dna_calls"
+        if [ ! -d "${CALLS_DIR}" ]; then
+            continue
+        fi
+        for sample_dir in "${CALLS_DIR}"/*/; do
+            sample=$(basename "${sample_dir}")
+            case "${sample}" in
+                cohort|logs)
+                    continue
+                    ;;
+            esac
+            vcf="${sample_dir}/variants.filtered.vcf.gz"
+            if [ ! -f "${vcf}" ]; then
+                continue
+            fi
+            SAMPLE_NAME_COUNTS["${sample}"]=$(( ${SAMPLE_NAME_COUNTS["${sample}"]:-0} + 1 ))
+        done
+    done
+done
+
+DUPLICATE_SAMPLE_NAMES=0
+for sample in "${!SAMPLE_NAME_COUNTS[@]}"; do
+    if [ "${SAMPLE_NAME_COUNTS["${sample}"]}" -gt 1 ]; then
+        if [ "${DUPLICATE_SAMPLE_NAMES}" -eq 0 ]; then
+            echo "  ⚠ Duplicate folder basenames detected; cohort/tissue suffixes will be added for these entries:"
+        fi
+        DUPLICATE_SAMPLE_NAMES=$((DUPLICATE_SAMPLE_NAMES + 1))
+        echo "    - ${sample} (${SAMPLE_NAME_COUNTS["${sample}"]} occurrences)"
+    fi
+done
+if [ "${DUPLICATE_SAMPLE_NAMES}" -gt 0 ]; then
+    echo ""
+fi
 
 for cohort in breast endometrium; do
     for tissue in normal tumour; do
@@ -183,23 +244,32 @@ for cohort in breast endometrium; do
                 continue
             fi
 
-            out_vcf="${RENAMED_DIR}/${sample}.vcf.gz"
+            tissue_label=$([ "${tissue}" = "normal" ] && echo "Healthy" || echo "Tumour")
+            cohort_label="${cohort^}"
+            unique_sample="${sample}"
+            if [ "${SAMPLE_NAME_COUNTS["${sample}"]:-0}" -gt 1 ]; then
+                unique_sample="${sample}__${cohort_label}_${tissue_label}"
+            fi
+
+            out_vcf="${RENAMED_DIR}/${unique_sample}.vcf.gz"
 
             # Write new sample name list (one name per line — bcftools reheader -s format)
-            echo "${sample}" > "${HAPLO_DIR}/rename_${sample}.txt"
+            echo "${unique_sample}" > "${HAPLO_DIR}/rename_${unique_sample}.txt"
 
             # Rename sample column and recompress; -t creates a .tbi tabix index
             bcftools reheader \
-                -s "${HAPLO_DIR}/rename_${sample}.txt" \
+                -s "${HAPLO_DIR}/rename_${unique_sample}.txt" \
                 -o "${out_vcf}" \
                 "${vcf}"
             bcftools index -t "${out_vcf}"
 
             echo "${out_vcf}" >> "${SAMPLE_LIST}"
-            tissue_label=$([ "${tissue}" = "normal" ] && echo "Healthy" || echo "Tumour")
-            cohort_label="${cohort^}"
-            echo -e "${sample}\t${cohort_label}\t${tissue_label}\t${cohort_label}_${tissue_label}" >> "${SAMPLE_INFO}"
-            echo "  ✓ ${cohort}/${tissue}/${sample}"
+            echo -e "${unique_sample}\t${cohort_label}\t${tissue_label}\t${cohort_label}_${tissue_label}" >> "${SAMPLE_INFO}"
+            if [ "${unique_sample}" != "${sample}" ]; then
+                echo "  ✓ ${cohort}/${tissue}/${sample} -> ${unique_sample}"
+            else
+                echo "  ✓ ${cohort}/${tissue}/${sample}"
+            fi
         done
     done
 done
@@ -313,7 +383,7 @@ echo "----------------------------------------------------------------------"
 PHASED_PREFIX="${HAPLO_DIR}/cohort_phased"
 
 # Build BEAGLE command dynamically, adding ref and map only if files exist
-BEAGLE_CMD="java -Xmx4g -jar ${BEAGLE} \
+BEAGLE_CMD="\"${JAVA_BIN}\" -Xmx4g -jar ${BEAGLE} \
     gt=${SNP_VCF} \
     out=${PHASED_PREFIX} \
     nthreads=${THREADS} \

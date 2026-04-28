@@ -10,9 +10,11 @@ run_full_pipeline.sh	./run_full_pipeline.sh	UTILITY_REPORTING	Primary launcher. 
 04b_amplicon_failure_visualisation.py	./04b_amplicon_failure_visualisation.py	UTILITY_REPORTING	Creates per-locus failed-versus-passed amplicon visualisations for diagnostic follow-up.	no	no
 04b_amplicon_failure_panel.py	./04b_amplicon_failure_panel.py	UTILITY_REPORTING	Builds an overview panel of the worst flagged amplicon failures from the 04b visualisation outputs.	no	no
 05_variant_calling.sh	./05_variant_calling.sh	CORE	Runs targeted variant calling on QC-passed DNA BAMs and produces the filtered cohort VCFs used downstream.	yes	yes
+05b_force_genotype_union_sites.py	./05b_force_genotype_union_sites.py	CORE	Force-genotypes the union of observed loci across all sequenced samples so downstream scripts can distinguish wild-type, non-carrier, and missing calls explicitly.	yes	yes
 06_annotation.sh	./06_annotation.sh	CORE	Annotates filtered VCFs with VEP and external resources to create the canonical variant annotation layer.	yes	yes
 07_merge_annotations.py	./07_merge_annotations.py	CORE	Merges annotated VCFs into the canonical project workbook that underpins the SNP branch of the pipeline.	yes	yes
 07b_variant_qc.py	./07b_variant_qc.py	UTILITY_REPORTING	Performs variant-level QC checks on the merged annotation workbook for diagnostic assurance.	no	no
+08b_bed_vs_detected_excel.py	./08b_bed_vs_detected_excel.py	UTILITY_REPORTING	Compares the designed BED against the detected variants and summarises design-versus-observed coverage.	no	no
 08_mapping.py	./08_mapping.py	UTILITY_REPORTING	Creates global variant landscape figures and tables; descriptive and presentation-facing rather than core-generative.	no	no
 09_gsdmb_only.py	./09_gsdmb_only.py	UTILITY_REPORTING	Creates GSDMB-focused landscape figures and tables for descriptive reporting.	no	no
 09b_landscape_comparison.py	./09b_landscape_comparison.py	EXPLORATORY_VALIDATION	Compares normal and tumour landscape patterns as a follow-up sensitivity layer to the descriptive plots.	no	no
@@ -25,8 +27,9 @@ run_full_pipeline.sh	./run_full_pipeline.sh	UTILITY_REPORTING	Primary launcher. 
 15_haplotype_stats.R	./15_haplotype_stats.R	CORE	Produces the principal haplotype frequency and association results for the thesis haplotype branch.	yes	yes
 install_haplotype_r_dependencies.R	./install_haplotype_r_dependencies.R	UTILITY_REPORTING	Bootstraps missing R dependencies for the haplotype statistics runtime when needed.	yes	no
 16_excel_harmonisation.py	./16_excel_harmonisation.py	CORE	Builds the harmonised master workbook that anchors the clinical and RNA branches.	yes	yes
-17_snp_association.py	./17_snp_association.py	CORE	Runs the principal SNP-clinical association analyses for breast and endometrial cohorts.	yes	yes
-18_haplotype_association.py	./18_haplotype_association.py	CORE	Runs the principal haplotype-clinical association analyses for objective 1.	yes	yes
+17_snp_association.py	./17_snp_association.py	CORE	Runs the main SNP association suite: tumour-versus-control testing, tumour-cohort clinical models, genotype-dose summaries, and secondary survival or risk follow-up.	yes	yes
+17b_rare_variant_association.py	./17b_rare_variant_association.py	EXPLORATORY_VALIDATION	Rare-variant and burden follow-up on the locus-level DNA signal; useful secondary association analysis rather than core discovery.	no	no
+18_haplotype_association.py	./18_haplotype_association.py	CORE	Runs the main haplotype association suite: tumour-versus-control testing, tumour-cohort clinical models, haplotype-dose summaries, and secondary survival or risk follow-up.	yes	yes
 19_1000g_haplotype_comparison.py	./19_1000g_haplotype_comparison.py	EXPLORATORY_VALIDATION	Places study haplotypes in an external 1000 Genomes context; secondary validation rather than main discovery.	no	no
 19b_rna_qc.py	./19b_rna_qc.py	CORE	Builds the RNA QC manifest that gates the objective-2 RNA analyses.	yes	yes
 20_objective2_isoform_expression_association.py	./20_objective2_isoform_expression_association.py	CORE	Runs the workbook-first isoform and RNA association workflow for thesis objective 2.	yes	yes
@@ -39,9 +42,12 @@ install_haplotype_r_dependencies.R	./install_haplotype_r_dependencies.R	UTILITY_
 25_rs11078928_rs869402_haplotype_focus.py	./25_rs11078928_rs869402_haplotype_focus.py	EXPLORATORY_VALIDATION	Performs a focused follow-up analysis on the rs11078928 and rs869402 haplotypic context.	no	no
 26_snp_functional_interpretation.py	./26_snp_functional_interpretation.py	EXPLORATORY_VALIDATION	Adds a SNP biological interpretation layer combining annotations, RNA context, and optional external support.	no	no
 27_breast_paired_validation.py	./27_breast_paired_validation.py	UTILITY_REPORTING	Historical paired breast tumour-normal prototype retained only for reference; it is not part of the active pipeline because the breast BAM cohort is unpaired.	no	no
+28_sample_similarity_audit.py	./28_sample_similarity_audit.py	UTILITY_REPORTING	Audits sample concordance, aliasing, and identity separation across the study set.	no	no
+29_collect_significant_survival_curves.py	./29_collect_significant_survival_curves.py	UTILITY_REPORTING	Bundles significant survival-curve pages into thesis-friendly PDFs and an index.	no	no
 association_runtime.py	./association_runtime.py	UTILITY_REPORTING	Shared runtime defaults used by the association and RNA scripts to keep paths and thresholds aligned.	yes	no
 objective2_gene_report_exports.py	./objective2_gene_report_exports.py	UTILITY_REPORTING	Shared export helpers used by the core objective-2 RNA workflow.	yes	no
 objective2_rna_qc_utils.py	./objective2_rna_qc_utils.py	UTILITY_REPORTING	Shared RNA QC and matching helpers used by stages 19b and 20.	yes	no
 pipeline_utils.py	./pipeline_utils.py	UTILITY_REPORTING	Shared config and helper utilities used across the core and optional workflows.	yes	no
+pipeline_sample_summary.py	./pipeline_sample_summary.py	UTILITY_REPORTING	Builds a compact DNA/RNA sample-count report from the current QC outputs so thesis reruns always expose total-versus-passing counts.	no	yes
 pipeline_validation.py	./pipeline_validation.py	UTILITY_REPORTING	Shared validation helpers that keep analytical assumptions and input checks consistent.	yes	no
 figure_style.py	./figure_style.py	UTILITY_REPORTING	Shared plotting style helpers reused by multiple reporting and association scripts.	yes	no

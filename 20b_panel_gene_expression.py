@@ -117,7 +117,8 @@ import pandas as pd
 from scipy import stats
 
 from association_runtime import script20_defaults
-from pipeline_utils import get_paths
+from pipeline_utils import build_genomic_variant_id_series, combine_gnomad_nfe, common_nfe_variant_mask, get_paths
+from sample_identity_utils import attach_analysis_sample_ids, build_analysis_sample_map
 
 try:
     import seaborn as sns
@@ -272,6 +273,8 @@ def _sx(v) -> Optional[str]:
         (r"^DNA_SNP_(EN|MN|AT)_(\d+)",             lambda m: f"SNP_{m.group(1).upper()}_{m.group(2)}"),
         (r"^DNA_(AT|EN|MN)_(\d+)",                 lambda m: f"SNP_{m.group(1).upper()}_{m.group(2)}"),
         (r"^DNA_(?:SNP_)?MT[-_]T_(\d+)",           lambda m: f"SNP_MT-T_{m.group(1)}"),
+        (r"^MAMAH2_MT[-_]T_(\d+)",                lambda m: f"SNP_MT-T_{m.group(1)}"),
+        (r"^MAMAH2_MT[-_]N_(\d+)",                lambda m: f"SNP_MN_{m.group(1)}"),
         (r"^RNA_SNP_(AT|EN|MN|MT-T|MT-N)[-_]?(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
         (r"^SNP_RNA_(AT|EN|MN|MT-T|MT-N)_(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
         (r"^SNP_(AT|EN|MN|MT-T|MT-N)_RNA_(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
@@ -602,8 +605,13 @@ def quantify_all_bams(
     """
     cache_path = out_dir / "20b_raw_counts_cache.tsv"
     if cache_path.exists():
-        print(f"  Loading cached raw counts from {cache_path}")
-        return pd.read_csv(cache_path, sep="\t")
+        cached = pd.read_csv(cache_path, sep="\t")
+        cached_paths = set(cached.get("bam_path", pd.Series(dtype=object)).dropna().astype(str))
+        requested_paths = set(bam_df.get("bam_path", pd.Series(dtype=object)).dropna().astype(str))
+        if cached_paths == requested_paths and len(cached_paths) == len(bam_df):
+            print(f"  Loading cached raw counts from {cache_path}")
+            return cached
+        print("  Raw-count cache sample set is stale; recomputing to include the current BAM selection")
 
     if not shutil.which("samtools"):
         raise EnvironmentError(
@@ -842,22 +850,31 @@ def load_genetic_data(
         print(f"  [WARN] Could not load variant workbook: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    # Identify gnomAD NFE AF column
-    nfe_col = next(
-        (c for c in vdf.columns
-         if re.search(r"gnomad.*nfe.*af|nfe.*af", str(c), re.I)),
-        None
+    # Identify gnomAD NFE AF columns
+    if "gnomADe_NFE_AF" in vdf.columns or "gnomADg_NFE_AF" in vdf.columns:
+        vdf = combine_gnomad_nfe(vdf)
+    nfe_col = "gnomAD_NFE_AF_combined" if "gnomAD_NFE_AF_combined" in vdf.columns else next(
+        (c for c in vdf.columns if re.search(r"gnomad.*nfe.*af|nfe.*af", str(c), re.I)),
+        None,
     )
     if nfe_col is None:
         print("  [WARN] No gnomAD NFE AF column found; using all variants")
         vdf["_nfe"] = 1.0
         nfe_col = "_nfe"
+        common_mask = pd.Series(True, index=vdf.index)
+    else:
+        vdf[nfe_col] = pd.to_numeric(vdf[nfe_col], errors="coerce")
+        common_mask = common_nfe_variant_mask(vdf, min_nfe) if nfe_col == "gnomAD_NFE_AF_combined" else vdf[nfe_col].gt(min_nfe).fillna(False)
+    vdf = vdf[common_mask].copy()
 
-    vdf[nfe_col] = pd.to_numeric(vdf[nfe_col], errors="coerce")
-    vdf = vdf[vdf[nfe_col] > min_nfe].copy()
-
-    # Derive snp_code and Variant_ID
-    vdf["snp_code"] = vdf["Sample"].map(_sx)
+    # Derive formal snp_code plus analysis_sample_id. Raw runs are collapsed
+    # only when their phased genotype columns are exactly identical.
+    vdf = attach_analysis_sample_ids(
+        vdf,
+        raw_col="Sample",
+        phased_path=haplotype_path,
+        extract_snp_code=_sx,
+    )
     rsid_col = next(
         (c for c in vdf.columns if "existing_variation" in c.lower()), None)
     if rsid_col:
@@ -869,7 +886,13 @@ def load_genetic_data(
     vdf["ALT"] = vdf.get("ALT", pd.Series("N", index=vdf.index)).astype(str).str.upper()
     vdf["SNP_Label"] = (vdf["POS"].astype("Int64").astype(str)
                         + "_" + vdf["REF"] + ">" + vdf["ALT"])
-    vdf["Variant_ID"] = vdf["rsID"].fillna(vdf["SNP_Label"])
+    vdf["Variant_ID"] = build_genomic_variant_id_series(
+        vdf["Variant_Key"] if "Variant_Key" in vdf.columns else None,
+        vdf["CHROM"] if "CHROM" in vdf.columns else None,
+        vdf["POS"],
+        vdf["REF"],
+        vdf["ALT"],
+    )
 
     # Normalise GT
     def _dose(gt):
@@ -882,13 +905,14 @@ def load_genetic_data(
             return np.nan
 
     vdf["Dosage"] = vdf.get("GT", pd.Series(np.nan, index=vdf.index)).map(_dose)
-    snp_long = (vdf[["snp_code", "Variant_ID", "SNP_Label",
+    snp_long = (vdf[["analysis_sample_id", "snp_code", "Variant_ID", "SNP_Label",
                       "Dosage", nfe_col]]
-                .dropna(subset=["snp_code", "Variant_ID"])
+                .dropna(subset=["analysis_sample_id", "snp_code", "Variant_ID"])
+                .drop_duplicates(["analysis_sample_id", "Variant_ID"])
                 .rename(columns={nfe_col: "gnomAD_NFE_AF"})
                 .copy())
     print(f"  SNP backbone: {snp_long['Variant_ID'].nunique()} variants, "
-          f"{snp_long['snp_code'].nunique()} samples")
+          f"{snp_long['analysis_sample_id'].nunique()} analysis samples")
 
     # â”€â”€ Haplotype data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
@@ -907,13 +931,19 @@ def load_genetic_data(
 
     sample_cols = [c for c in phased.columns
                    if c not in {"CHROM", "POS", "ID", "REF", "ALT", "SNP_Label"}]
+    identity_map = build_analysis_sample_map(sample_cols, haplotype_path, _sx)
+    representative_cols = (
+        identity_map.sort_values(["analysis_sample_id", "raw_sample_name"])
+        .drop_duplicates("analysis_sample_id")[["raw_sample_name", "analysis_sample_id", "snp_code"]]
+    )
 
-    # Build haplotype strings
+    # Build haplotype strings from one representative raw column per retained
+    # analysis sample ID.
     hap_rows = []
-    for col in sample_cols:
-        code = _sx(col)
-        if not code:
-            continue
+    for _, id_row in representative_cols.iterrows():
+        col = id_row["raw_sample_name"]
+        code = id_row["snp_code"]
+        analysis_sample_id = id_row["analysis_sample_id"]
         h1_parts, h2_parts = [], []
         for _, row in phased.iterrows():
             gt = _s(row[col])
@@ -930,7 +960,9 @@ def load_genetic_data(
                 h1_parts.append("N")
                 h2_parts.append("N")
         hap_rows.append({
+            "analysis_sample_id": analysis_sample_id,
             "snp_code": code,
+            "Sample_phased": col,
             "hap1": "".join(h1_parts),
             "hap2": "".join(h2_parts),
         })
@@ -964,6 +996,7 @@ def load_genetic_data(
                     int(str(s_row["hap1"]) == hf_row["Haplotype"])
                     + int(str(s_row["hap2"]) == hf_row["Haplotype"]))
             hap_long_rows.append({
+                "analysis_sample_id": s_row["analysis_sample_id"],
                 "snp_code":     s_row["snp_code"],
                 "Haplotype_ID": hf_row["Haplotype_ID"],
                 "Haplotype":    hf_row["Haplotype"],
@@ -974,7 +1007,7 @@ def load_genetic_data(
     hap_long = pd.DataFrame(hap_long_rows)
     print(f"  Haplotypes: {len(hap_freqs)} retained "
           f"(freq â‰¥ {min_hap_freq:.0%}), "
-          f"{hap_long['snp_code'].nunique()} samples")
+          f"{hap_long['analysis_sample_id'].nunique()} analysis samples")
     return snp_long, hap_long, hap_freqs
 
 
@@ -1048,7 +1081,8 @@ def assoc_genetic_vs_genes(
         codes = set(cdf["snp_code"].dropna())
         sub = genetic_long[genetic_long["snp_code"].isin(codes)].copy()
         for key, gdf in sub.groupby(id_col, dropna=False):
-            m = cdf.merge(gdf[["snp_code", "Dosage"]].drop_duplicates(),
+            merge_cols = [c for c in ["analysis_sample_id", "snp_code", "Dosage"] if c in gdf.columns]
+            m = cdf.merge(gdf[merge_cols].drop_duplicates([c for c in ["analysis_sample_id"] if c in merge_cols]),
                           on="snp_code", how="inner")
             if m.empty:
                 continue

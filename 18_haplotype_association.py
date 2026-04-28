@@ -3,89 +3,30 @@
 """
 18_haplo_clinical_association.py
 =======================================================================
-Haplotype–Clinical Variable Association Analysis
+Haplotype-clinical variable association analysis.
 
-Mirrors script 17 (SNP–clinical associations) but uses BEAGLE-phased
+Mirrors script 17 (SNP-clinical associations) but uses BEAGLE-phased
 haplotype carrier status as the exposure variable instead of individual
 SNP genotypes.
 
-DATA SOURCES
-------------
-1. phased_genotypes.tsv  — BEAGLE output from script 17_haplotypes.sh
-   Rows = SNPs, Cols = CHROM, POS, REF, ALT, <sample1>, <sample2>, ...
-   GT format: "0|1", "1|0", "0|0", "1|1"
-
-2. MASTER_SNP_plus_clinical_HARMONISED.xlsx  — harmonised clinical master
-   (same file used by script 17; provides all clinical variables and the
-   snp_code → sample mapping)
-
-3. GSDMB_Annotated_Report.xlsx  — used only to identify the 14 established
-   SNP positions (gnomAD NFE AF > 1%) that define the haplotype backbone
-
-HAPLOTYPE CONSTRUCTION
-----------------------
-For each sample, a haplotype string is built from the phased alleles at the
-established SNP positions (e.g. "01011001" = alt allele present at positions
-2, 4, 5, 8).  Each sample has two haplotype strings (one per chromosome).
-A sample is a "carrier" of a given haplotype if it appears on at least one
-chromosome (dosage ≥ 1).
-
-ANALYSES (parallel to script 17)
----------------------------------
-1. Tumour vs Control       — Fisher's exact test per haplotype
-2. Haplotype × Clinical    — Mann–Whitney U (continuous) or Fisher exact
-                             (binary) or Chi-square (nominal), per tumour
-                             cohort.  Age- and BMI-adjusted logistic
-                             regression for binary outcomes.
-3. Haplotype-dose          — Trend test across dosage 0/1/2 (Kruskal-Wallis
-                             or chi-square) for nominally significant hits
-4. Survival (Cox PH)       — Age-adjusted Cox for OS/PFS, KM curves per
-                             haplotype carrier status
-5. Cancer Risk             — Case-control logistic regression (cases = tumour,
-                             controls = healthy)
-
-OUTPUTS
--------
-  18_Haplo_Clinical_Association_Results.xlsx
-    • haplotype_frequencies
-    • tumour_vs_control
-    • breast_clinical_assoc
-    • endo_clinical_assoc
-    • haplotype_dose
-    • survival_cox
-    • cancer_risk
-    • summary_significant
-    • sample_manifest
-
-  18_Haplo_Volcano_raw_p.png
-  18_Haplo_Heatmap_Breast.png
-  18_Haplo_Heatmap_Endometrial.png
-  18_Haplo_Forest_Breast.png
-  18_Haplo_Forest_Endometrial.png
-  18_Haplo_Forest_CancerRisk.png
-  18_KM_Curves_All_Cohorts.pdf
-
-RUN
----
-python3 18_haplo_clinical_association.py \\
-  --phased   /path/to/19_haplotype_phased/phased_genotypes.tsv \\
-  --master   /path/to/MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx \\
-  --annot    /path/to/GSDMB_Annotated_Report.xlsx \\
-  --out_dir  /path/to/output/
-
-NOTES
+Notes
 -----
-• Only haplotypes with global frequency ≥ MIN_HAP_FREQ are tested.
-• Sample names in the phased TSV must match snp_code values in the master.
-  The script normalises both (strip spaces, uppercase) before joining.
-• Replicates (is_replicate = True in the master) are excluded from all
-  analyses, consistent with script 17.
+- Only haplotypes with global frequency >= MIN_HAP_FREQ are tested.
+- Sample names in the phased TSV are normalised to formal ``snp_code`` values
+  for clinical joining.
+- Formal ``_REP`` / ``Repeticion`` samples are kept when present in the
+  phased/master overlap, because the source workbooks indicate they are
+  resequenced replacement samples rather than duplicate retained specimens.
+- Raw run labels that map to the same formal ``snp_code`` are only collapsed
+  when their phased genotype columns are exactly 100% identical. Non-identical
+  runs are retained as separate analysis samples.
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import warnings
 import textwrap
 from pathlib import Path
@@ -105,6 +46,7 @@ from scipy.stats import false_discovery_control, fisher_exact, mannwhitneyu
 from association_runtime import script18_defaults
 from figure_style import COMPARATIVE_TAG, COHORT_COLORS, HAPLOTYPE_STATUS_COLORS, arm_color, cohort_color, tagged_title
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_percentage_columns
+from sample_identity_utils import attach_analysis_sample_ids
 
 try:
     from lifelines import KaplanMeierFitter, CoxPHFitter
@@ -136,38 +78,43 @@ FDR_THRESHOLD       = 0.10
 # as the exposure, but the outcome variables and test types are unchanged.
 
 CLINICAL_VARS_BREAST: Dict[str, Dict] = {
-    # Restricted to supervisor-priority outcomes only.
-    # No reliable treatment-response variable is currently available in the source workbooks.
-    "BREAST_RECURRENCE_DERIVED": {"type": "binary",     "label": "Recurrence / progression", "note": "Derived from clinical recurrence/progression status", "bmi_adjust": False},
-    "BREAST_METASTASIS_DERIVED": {"type": "binary",     "label": "Distant metastasis", "note": "Derived from distant metastasis status", "bmi_adjust": False},
-    "BREAST_EXITUS_DERIVED":     {"type": "binary",     "label": "Death", "note": "Derived overall death status", "bmi_adjust": False},
-    "BREAST_OS_MONTHS_DERIVED":  {"type": "continuous", "label": "Overall survival (months)", "note": "Derived from diagnosis and last follow-up dates when needed", "bmi_adjust": False},
+    # Lean default set: prognosis-first breast variables only.
+    "canon__recurrence_flag":   {"type": "binary", "label": "Recurrence / progression", "note": "Harmonised recurrence/progression flag", "bmi_adjust": False},
+    "canon__distant_mets_flag": {"type": "binary", "label": "Distant metastasis", "note": "Harmonised distant-metastasis flag", "bmi_adjust": False},
+    "canon__exitus_flag":       {"type": "binary", "label": "Death", "note": "Harmonised overall death flag", "bmi_adjust": False},
+    "canon__os_months":         {"type": "continuous", "label": "Overall survival (months)", "note": "Harmonised OS months", "bmi_adjust": False},
 }
 CLINICAL_VARS_ENDO: Dict[str, Dict] = {
-    # Restricted to supervisor-priority outcomes only.
-    # No reliable treatment-response variable is currently available in the source workbooks.
-    "ENDO_PD_BIN":               {"type": "binary",     "label": "Progression", "note": "Progressive disease yes = 1 vs no = 0", "bmi_adjust": False},
-    "ENDO_M_STAGE_BIN":          {"type": "binary",     "label": "Metastatic stage (M1)", "note": "M1 = 1 vs M0 = 0; unresolved stages left missing", "bmi_adjust": False},
-    "ENDO_EXITUS_BIN":           {"type": "binary",     "label": "Death", "note": "Overall death status yes = 1 vs no = 0", "bmi_adjust": False},
-    "ENDO_EXITUS_DISEASE_BIN":   {"type": "binary",     "label": "Disease-specific death", "note": "Included because coverage in the matched cohort is sufficient for analysis", "bmi_adjust": False},
-    "canon__os_months":          {"type": "continuous", "label": "Overall survival (months)", "note": "Harmonised OS months", "bmi_adjust": False},
-    "canon__pfs_months":         {"type": "continuous", "label": "Progression-free survival (months)", "note": "Harmonised PFS months", "bmi_adjust": False},
-    "ENDO_RISK_ORDINAL":         {"type": "continuous", "label": "Risk of recurrence (ordinal)", "note": "Ordered clinical recurrence-risk grouping", "bmi_adjust": False},
+    # Lean default set: prognosis-first endometrial variables with clear labels.
+    "canon__pd_flag":     {"type": "binary",     "label": "Progression", "note": "Harmonised progressive-disease flag", "bmi_adjust": False},
+    "canon__exitus_flag": {"type": "binary",     "label": "Death", "note": "Harmonised overall death flag", "bmi_adjust": False},
+    "canon__os_months":   {"type": "continuous", "label": "Overall survival (months)", "note": "Harmonised OS months", "bmi_adjust": False},
+    "canon__distant_mets_flag": {"type": "binary", "label": "Distant metastasis", "note": "Harmonised distant-metastasis flag", "bmi_adjust": False},
+    "canon__pfs_months":  {"type": "continuous", "label": "Progression-free survival (months)", "note": "Harmonised PFS months", "bmi_adjust": False},
+    "canon__risk_group":  {"type": "nominal",    "label": "Risk of recurrence", "note": "Harmonised labelled risk-of-recurrence groups", "bmi_adjust": False},
 }
 
+BREAST_TREATMENT_EXPOSURES: Dict[str, Dict[str, str]] = {
+    "BREAST_TX_CHEMOTHERAPY_BIN": {"label": "Chemotherapy exposure", "canon": "canon__treatment_chemotherapy"},
+    "BREAST_TX_ANTI_HER2_BIN":    {"label": "Anti-HER2 exposure", "canon": "canon__treatment_anti_her2"},
+    "BREAST_TX_ENDOCRINE_BIN":    {"label": "Endocrine therapy exposure", "canon": "canon__treatment_endocrine"},
+    "BREAST_TX_RADIOTHERAPY_BIN": {"label": "Radiotherapy exposure", "canon": "canon__treatment_radiotherapy"},
+}
+MIN_TREATMENT_STRATUM_SAMPLES = 15
+
 SURVIVAL_COHORTS = {
-    "Endometrial": {
-        "cohort_filter": "Endometri",
-        "endpoints": {
-            "OS":  {"t_col": "canon__os_months",        "ev_col": "ENDO_EXITUS_DISEASE_BIN"},  # disease-specific is primary
-            "PFS": {"t_col": "canon__pfs_months",       "ev_col": "ENDO_PD_BIN"},
-        },
-        "age_col": "canon__age",
-    },
     "Breast": {
         "cohort_filter": "Breast",
         "endpoints": {
-            "OS":  {"t_col": "BREAST_OS_MONTHS_DERIVED", "ev_col": "BREAST_EXITUS_DERIVED"},
+            "OS": {"t_col": "canon__os_months", "ev_col": "canon__exitus_flag"},
+        },
+        "age_col": "canon__age",
+    },
+    "Endometrial": {
+        "cohort_filter": "Endometri",
+        "endpoints": {
+            "OS":  {"t_col": "canon__os_months",  "ev_col": "canon__exitus_flag"},
+            "PFS": {"t_col": "canon__pfs_months", "ev_col": "canon__pd_flag"},
         },
         "age_col": "canon__age",
     },
@@ -628,14 +575,20 @@ def enumerate_haplotypes(hap_df: pd.DataFrame,
 
 def _extract_snp_code(sample_name: str) -> Optional[str]:
     s = str(sample_name)
+    m = re.match(r"^(SNP_MT-T_\d+_REP)", s, re.IGNORECASE)
+    if m: return m.group(1).upper()
     m = re.match(r"^(SNP_(?:AT|EN|MN|MT-T)_\d+)", s, re.IGNORECASE)
-    if m: return m.group(1)
+    if m: return m.group(1).upper()
+    m = re.match(r"^DNA_MT[-_]T_(\d+)_Repeticion_", s, re.IGNORECASE)
+    if m: return f"SNP_MT-T_{m.group(1)}_REP"
     m = re.match(r"^DNA_SNP_(EN|MN)_(\d+)_", s, re.IGNORECASE)
     if m: return f"SNP_{m.group(1).upper()}_{m.group(2)}"
     m = re.match(r"^DNA_SNP_AT_(\d+)_", s, re.IGNORECASE)
-    if m: return f"SNP_AT_{m.group(1)}"
+    if m: return f"SNP_AT_{int(m.group(1))}"
     m = re.match(r"^DNA_AT_(\d+)_", s, re.IGNORECASE)
-    if m: return f"SNP_AT_{m.group(1)}"
+    if m: return f"SNP_AT_{int(m.group(1))}"
+    m = re.match(r"^DNA_SNP_(?:CK|RSB)_ECLAI_(\d+)_", s, re.IGNORECASE)
+    if m: return f"SNP_AT_{int(m.group(1))}"
     m = re.match(r"^DNA_MT[-_]T_(\d+)_", s, re.IGNORECASE)
     if m: return f"SNP_MT-T_{m.group(1)}"
     m = re.match(r"^SNP_DNA_AT_(\d+)_", s, re.IGNORECASE)
@@ -717,6 +670,55 @@ def _ki67_fraction_from_pct(val):
     return round(v / 100.0, 4) if 0.0 <= v <= 100.0 else None
 
 
+def _normalise_treatment_text(val) -> str:
+    if pd.isna(val):
+        return ""
+    text = str(val).strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _binary_yes_no(series: pd.Series) -> pd.Series:
+    mapped = series.astype(str).str.strip().str.upper().map({"YES": 1, "NO": 0})
+    return pd.to_numeric(mapped, errors="coerce")
+
+
+def _derive_breast_treatment_exposure_bins(treatment_series: pd.Series) -> pd.DataFrame:
+    cleaned = treatment_series.fillna("").astype(str).map(_normalise_treatment_text)
+    meaningful = ~cleaned.isin({"", "x", "na", "n/a", "none", "no consta"})
+    flags = {}
+    patterns = {
+        "BREAST_TX_CHEMOTHERAPY_BIN": r"\bac\b|\bfec\b|\bcmf\b|taxol|paclitaxel|docetaxel|cbdca|carbo|quimio|chemo|\bqt\b",
+        "BREAST_TX_ANTI_HER2_BIN": r"hercept|trastu|lapat|pertu|anti[\s-]?her[\s-]?2",
+        "BREAST_TX_ENDOCRINE_BIN": r"tamox|letroz|exemest|anastro|arimid|fulves|hormon|terapia hormonal|\bht\b",
+        "BREAST_TX_RADIOTHERAPY_BIN": r"\brt\b|radiot|radioter|rte|rdt",
+    }
+    for col, pattern in patterns.items():
+        out = pd.Series(np.nan, index=treatment_series.index, dtype=float)
+        out.loc[meaningful] = cleaned.loc[meaningful].str.contains(pattern, regex=True).astype(int)
+        flags[col] = out
+    return pd.DataFrame(flags)
+
+
+def _ensure_breast_treatment_exposure_columns(master: pd.DataFrame) -> pd.DataFrame:
+    master = master.copy()
+    canon_to_bin = {
+        "canon__treatment_chemotherapy": "BREAST_TX_CHEMOTHERAPY_BIN",
+        "canon__treatment_anti_her2": "BREAST_TX_ANTI_HER2_BIN",
+        "canon__treatment_endocrine": "BREAST_TX_ENDOCRINE_BIN",
+        "canon__treatment_radiotherapy": "BREAST_TX_RADIOTHERAPY_BIN",
+    }
+    for canon_col, bin_col in canon_to_bin.items():
+        if canon_col in master.columns:
+            master[bin_col] = _binary_yes_no(master[canon_col])
+    missing = [bin_col for bin_col in canon_to_bin.values() if bin_col not in master.columns]
+    if missing and "canon__treatment" in master.columns:
+        derived = _derive_breast_treatment_exposure_bins(master["canon__treatment"])
+        for bin_col in missing:
+            master[bin_col] = derived[bin_col]
+    return master
+
+
 def load_clinical_master(master_path: Path) -> pd.DataFrame:
     """
     Load 'harmonised_plus_canon' sheet, restrict to DNA rows, build Tissue,
@@ -724,10 +726,10 @@ def load_clinical_master(master_path: Path) -> pd.DataFrame:
     """
     print("  Loading harmonised clinical master …")
     try:
-        master = pd.read_excel(master_path, sheet_name="harmonised_plus_canon")
+        master = pd.read_excel(master_path, sheet_name="harmonised_plus_canon", engine="openpyxl")
     except Exception:
         print("  WARNING: 'harmonised_plus_canon' not found — trying sheet 0")
-        master = pd.read_excel(master_path, sheet_name=0)
+        master = pd.read_excel(master_path, sheet_name=0, engine="openpyxl")
 
     master.columns = [str(c).strip() for c in master.columns]
     if "nucleic_acid" in master.columns:
@@ -749,7 +751,7 @@ def load_clinical_master(master_path: Path) -> pd.DataFrame:
         master = master[~excl].copy()
 
     if "is_replicate" not in master.columns:
-        master["is_replicate"] = master["snp_code"].str.contains("Repeticion", case=False, na=False)
+        master["is_replicate"] = False
 
     # Derive Tissue and Cohort from sheet column (most reliable)
     sheet_to_tissue = {"MT-T_N": "Tumour", "AT=AUs": "Tumour", "MN": "Healthy", "EN": "Healthy"}
@@ -836,6 +838,7 @@ def load_clinical_master(master_path: Path) -> pd.DataFrame:
     if "canon__bmi" not in master.columns:
         master["canon__bmi"] = np.nan
 
+    master = _ensure_breast_treatment_exposure_columns(master)
     master = master.drop_duplicates("snp_code").copy()
     print(f"  Master: {len(master)} unique samples")
     return master
@@ -849,25 +852,31 @@ def merge_haplotypes_with_clinical(carrier_df: pd.DataFrame,
     """
     print("  Joining haplotype carrier data to clinical master …")
     carrier_df = carrier_df.copy()
-    carrier_df["snp_code"] = carrier_df["Sample_phased"].apply(_extract_snp_code)
+    carrier_df = attach_analysis_sample_ids(
+        carrier_df,
+        raw_col="Sample_phased",
+        phased_path=DEFAULT_PHASED,
+        extract_snp_code=_extract_snp_code,
+    )
 
     n_failed = carrier_df["snp_code"].isna().sum()
     if n_failed:
         examples = carrier_df.loc[carrier_df["snp_code"].isna(), "Sample_phased"].unique()[:5].tolist()
         print(f"  WARNING: could not extract snp_code for {n_failed} rows (e.g. {examples})")
-    carrier_df = carrier_df.dropna(subset=["snp_code"])
+    carrier_df = carrier_df.dropna(subset=["snp_code", "analysis_sample_id"])
 
     merged = carrier_df.merge(master, on="snp_code", how="inner")
-    n_phased  = carrier_df["snp_code"].nunique()
-    n_matched = merged["snp_code"].nunique()
-    print(f"  Phased samples: {n_phased} | matched to master: {n_matched} "
+    merged["Sample"] = merged["analysis_sample_id"]
+    n_phased  = carrier_df["analysis_sample_id"].nunique()
+    n_matched = merged["analysis_sample_id"].nunique()
+    print(f"  Phased analysis samples: {n_phased} | matched to master: {n_matched} "
           f"| unmatched: {n_phased - n_matched}")
 
     if n_matched == 0:
         print(f"  Extracted codes (first 8): {sorted(carrier_df['snp_code'].dropna().unique())[:8]}")
         print(f"  Master codes    (first 8): {sorted(master['snp_code'].unique())[:8]}")
     else:
-        unique_samp = merged.drop_duplicates("snp_code")
+        unique_samp = merged.drop_duplicates("analysis_sample_id")
         print(f"  Tissue breakdown : {unique_samp['Tissue'].value_counts().to_dict()}")
         print(f"  Cohort breakdown : {unique_samp['Cohort'].value_counts().to_dict()}")
     return merged
@@ -883,7 +892,7 @@ def tumour_vs_control(merged: pd.DataFrame) -> pd.DataFrame:
     for hap_id, hdf in df.groupby("Haplotype_ID"):
         hap_str  = hdf["Haplotype"].iloc[0]
         hap_freq = hdf["Global_Freq"].iloc[0]
-        sample_hdf = hdf.drop_duplicates("snp_code").copy()
+        sample_hdf = hdf.drop_duplicates("analysis_sample_id").copy()
         if "Callable" in sample_hdf.columns:
             sample_hdf = sample_hdf[sample_hdf["Callable"] == 1]
         sample_hdf = sample_hdf.dropna(subset=["Carrier"])
@@ -899,8 +908,8 @@ def tumour_vs_control(merged: pd.DataFrame) -> pd.DataFrame:
             if tum_df.empty or hlt_df.empty:
                 continue
 
-            tum_samp = tum_df.drop_duplicates("snp_code")
-            hlt_samp = hlt_df.drop_duplicates("snp_code")
+            tum_samp = tum_df.drop_duplicates("analysis_sample_id")
+            hlt_samp = hlt_df.drop_duplicates("analysis_sample_id")
             if len(tum_samp) < MIN_CARRIERS or len(hlt_samp) < MIN_CARRIERS:
                 continue
             a = int(tum_samp["Carrier"].sum())
@@ -950,7 +959,7 @@ def _run_clin_for_cohort(df_t: pd.DataFrame,
     for hap_id, hdf in df_t.groupby("Haplotype_ID"):
         hap_str  = hdf["Haplotype"].iloc[0]
         hap_freq = hdf["Global_Freq"].iloc[0]
-        sample_data = hdf.drop_duplicates("snp_code").set_index("snp_code")
+        sample_data = hdf.drop_duplicates("analysis_sample_id").set_index("analysis_sample_id")
         if "Callable" in sample_data.columns:
             sample_data = sample_data[sample_data["Callable"] == 1]
         sample_data = sample_data.dropna(subset=["Carrier"])
@@ -1031,12 +1040,12 @@ def _run_clin_for_cohort(df_t: pd.DataFrame,
 
 
 def clinical_associations(merged: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    print("=== Analysis 2: Haplotype × Clinical Variable ===")
+    print("=== Analysis 2: Haplotype ? Clinical Variable ===")
     df = merged[~merged["is_replicate"] & (merged["Tissue"] == "Tumour")].copy()
     breast_df = df[df["Cohort"].str.contains("Breast",    case=False, na=False)]
     endo_df   = df[df["Cohort"].str.contains("Endometri", case=False, na=False)]
-    print(f"  Breast tumour:      {breast_df['snp_code'].nunique()} samples")
-    print(f"  Endometrial tumour: {endo_df['snp_code'].nunique()} samples")
+    print(f"  Breast tumour:      {breast_df['analysis_sample_id'].nunique()} samples")
+    print(f"  Endometrial tumour: {endo_df['analysis_sample_id'].nunique()} samples")
 
     breast_res = _run_clin_for_cohort(breast_df, CLINICAL_VARS_BREAST, "Breast_Tumour")
     endo_res   = _run_clin_for_cohort(endo_df,   CLINICAL_VARS_ENDO,   "Endometrial_Tumour")
@@ -1054,6 +1063,68 @@ def clinical_associations(merged: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFr
                   f"{age_n} nominal (age-adj) | {bmi_only_n} nominal (BMI-adj) | {age_bmi_n} nominal (age+BMI-adj)")
     print()
     return breast_res, endo_res
+
+
+def exploratory_breast_treatment_analysis(merged: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Run exploratory breast-only haplotype analyses within treatment-exposed strata."""
+    print("=== Exploratory: Breast treatment-stratified haplotype analysis ===")
+    base = merged[~merged["is_replicate"] & (merged["Tissue"] == "Tumour")].copy()
+    base = base[base["Cohort"].astype(str).str.contains("Breast", case=False, na=False)].copy()
+    if base.empty:
+        print("  No breast tumour rows available.\n")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    sample_base = base.drop_duplicates("analysis_sample_id").copy()
+    summary_rows = []
+    clin_parts = []
+    surv_parts = []
+
+    for tx_col, meta in BREAST_TREATMENT_EXPOSURES.items():
+        if tx_col not in sample_base.columns:
+            continue
+        exposed_ids = sample_base.loc[pd.to_numeric(sample_base[tx_col], errors="coerce") == 1, "analysis_sample_id"]
+        sample_tx = sample_base[sample_base["analysis_sample_id"].isin(exposed_ids)].copy()
+        n_exp = sample_tx["analysis_sample_id"].nunique()
+        summary_rows.append({
+            "Treatment_Exposure_Var": tx_col,
+            "Treatment_Exposure": meta["label"],
+            "N_Exposed": n_exp,
+            "N_With_OS": int(sample_tx["BREAST_OS_MONTHS_DERIVED"].notna().sum()) if "BREAST_OS_MONTHS_DERIVED" in sample_tx.columns else 0,
+            "N_Recurrence_Events": int(pd.to_numeric(sample_tx.get("BREAST_RECURRENCE_DERIVED"), errors="coerce").fillna(0).sum()) if "BREAST_RECURRENCE_DERIVED" in sample_tx.columns else 0,
+            "N_Metastasis_Events": int(pd.to_numeric(sample_tx.get("BREAST_METASTASIS_DERIVED"), errors="coerce").fillna(0).sum()) if "BREAST_METASTASIS_DERIVED" in sample_tx.columns else 0,
+            "N_Death_Events": int(pd.to_numeric(sample_tx.get("BREAST_EXITUS_DERIVED"), errors="coerce").fillna(0).sum()) if "BREAST_EXITUS_DERIVED" in sample_tx.columns else 0,
+        })
+        print(f"  {meta['label']}: {n_exp} exposed breast tumour samples")
+        if n_exp < MIN_TREATMENT_STRATUM_SAMPLES:
+            print(f"    Skipping: fewer than {MIN_TREATMENT_STRATUM_SAMPLES} exposed samples")
+            continue
+
+        tx_df = base[base["analysis_sample_id"].isin(exposed_ids)].copy()
+        clin_res = _run_clin_for_cohort(tx_df, CLINICAL_VARS_BREAST, "Breast_Tumour")
+        if not clin_res.empty:
+            clin_res["Treatment_Exposure_Var"] = tx_col
+            clin_res["Treatment_Exposure"] = meta["label"]
+            clin_res["Exposure_N"] = n_exp
+            clin_parts.append(clin_res)
+            print(f"    Clinical rows: {len(clin_res)}")
+        else:
+            print("    Clinical rows: 0")
+
+        surv_res, _ = survival_analysis(tx_df)
+        if not surv_res.empty:
+            surv_res["Treatment_Exposure_Var"] = tx_col
+            surv_res["Treatment_Exposure"] = meta["label"]
+            surv_res["Exposure_N"] = n_exp
+            surv_parts.append(surv_res)
+            print(f"    Survival rows: {len(surv_res)}")
+        else:
+            print("    Survival rows: 0")
+
+    print()
+    summary_df = pd.DataFrame(summary_rows)
+    clin_df = pd.concat(clin_parts, ignore_index=True) if clin_parts else pd.DataFrame()
+    surv_df = pd.concat(surv_parts, ignore_index=True) if surv_parts else pd.DataFrame()
+    return summary_df, clin_df, surv_df
 
 
 # ── ANALYSIS 3: HAPLOTYPE DOSE ────────────────────────────────────────────────
@@ -1077,7 +1148,7 @@ def haplotype_dose_analysis(merged: pd.DataFrame,
 
     rows = []
     for hap_id in top_haplotypes:
-        hdf = df[df["Haplotype_ID"] == hap_id].drop_duplicates("snp_code").set_index("snp_code")
+        hdf = df[df["Haplotype_ID"] == hap_id].drop_duplicates("analysis_sample_id").set_index("analysis_sample_id")
         if "Callable" in hdf.columns:
             hdf = hdf[hdf["Callable"] == 1]
         hdf = hdf.dropna(subset=["Dosage"])
@@ -1172,7 +1243,7 @@ def survival_analysis(merged: pd.DataFrame) -> Tuple[pd.DataFrame, List]:
         print("=== Analysis 4: Survival — SKIPPED (lifelines not installed) ===\n")
         return pd.DataFrame(), []
 
-    print("=== Analysis 4: Survival — all cohorts ===")
+    print("=== Analysis 4: Survival — endometrial default set ===")
     df = merged[~merged["is_replicate"] & (merged["Tissue"] == "Tumour")].copy()
 
     rows, km_pages = [], []
@@ -1217,7 +1288,7 @@ def survival_analysis(merged: pd.DataFrame) -> Tuple[pd.DataFrame, List]:
         if cdf.empty:
             continue
         age_col = cfg["age_col"]
-        print(f"  {cohort_label}: {cdf['snp_code'].nunique()} tumour samples")
+        print(f"  {cohort_label}: {cdf['analysis_sample_id'].nunique()} tumour samples")
 
         for endpoint, ep_cfg in cfg["endpoints"].items():
             t_col  = ep_cfg["t_col"]
@@ -1229,7 +1300,7 @@ def survival_analysis(merged: pd.DataFrame) -> Tuple[pd.DataFrame, List]:
 
             for hap_id, hdf in cdf.groupby("Haplotype_ID"):
                 hap_str = hdf["Haplotype"].iloc[0]
-                s = hdf.drop_duplicates("snp_code").set_index("snp_code").copy()
+                s = hdf.drop_duplicates("analysis_sample_id").set_index("analysis_sample_id").copy()
                 needed = [t_col, ev_col]
                 if age_col in s.columns: needed.append(age_col)
                 if "canon__bmi" in s.columns: needed.append("canon__bmi")
@@ -1362,8 +1433,8 @@ def cancer_risk_analysis(merged: pd.DataFrame) -> pd.DataFrame:
             hap_str  = df[df["Haplotype_ID"] == hap_id]["Haplotype"].iloc[0]
             hap_freq = df[df["Haplotype_ID"] == hap_id]["Global_Freq"].iloc[0]
 
-            hap_case = case_df[case_df["Haplotype_ID"] == hap_id].drop_duplicates("snp_code").set_index("snp_code")
-            hap_control = control_df[control_df["Haplotype_ID"] == hap_id].drop_duplicates("snp_code").set_index("snp_code")
+            hap_case = case_df[case_df["Haplotype_ID"] == hap_id].drop_duplicates("analysis_sample_id").set_index("analysis_sample_id")
+            hap_control = control_df[control_df["Haplotype_ID"] == hap_id].drop_duplicates("analysis_sample_id").set_index("analysis_sample_id")
             n_cases = len(hap_case)
             n_controls = len(hap_control)
             if hap_i == 0:
@@ -1865,7 +1936,7 @@ def make_haplotype_composition_plots(tvh: pd.DataFrame, merged: pd.DataFrame, ou
     status_hatch = {'Wild-type': '', 'Heterozygous': '//', 'Homozygous': 'xx'}
     status_text_color = {'Wild-type': '#222222', 'Heterozygous': '#222222', 'Homozygous': 'white'}
 
-    sample_manifest = merged[~merged['is_replicate']].drop_duplicates('snp_code').copy()
+    sample_manifest = merged[~merged['is_replicate']].drop_duplicates('analysis_sample_id').copy()
     pooled_controls = sample_manifest[sample_manifest['Tissue'] == 'Healthy'].copy()
 
     comparison_defs = {
@@ -1891,8 +1962,8 @@ def make_haplotype_composition_plots(tvh: pd.DataFrame, merged: pd.DataFrame, ou
         if chosen.empty:
             continue
 
-        tumour_samples = sample_manifest.loc[cfg['tumour_mask'], ['snp_code']].copy()
-        control_samples = pooled_controls[['snp_code']].copy()
+        tumour_samples = sample_manifest.loc[cfg['tumour_mask'], ['analysis_sample_id']].copy()
+        control_samples = pooled_controls[['analysis_sample_id']].copy()
         if tumour_samples.empty or control_samples.empty:
             continue
 
@@ -1914,10 +1985,10 @@ def make_haplotype_composition_plots(tvh: pd.DataFrame, merged: pd.DataFrame, ou
             ax = axes_flat[idx]
             hap_id = row['Haplotype_ID']
             hap_lookup = (merged[(~merged['is_replicate']) & (merged['Haplotype_ID'] == hap_id)]
-                          .drop_duplicates('snp_code')
-                          .set_index('snp_code')['Dosage'])
+                          .drop_duplicates('analysis_sample_id')
+                          .set_index('analysis_sample_id')['Dosage'])
             plot_df = arm_df.copy()
-            plot_df['_dosage'] = plot_df['snp_code'].map(hap_lookup)
+            plot_df['_dosage'] = plot_df['analysis_sample_id'].map(hap_lookup)
             plot_df = plot_df[plot_df['_dosage'].notna()].copy()
             plot_df['Status'] = plot_df['_dosage'].astype(int).map(dosage_labels)
 
@@ -2000,12 +2071,85 @@ def _order_columns(df: pd.DataFrame) -> pd.DataFrame:
         "Region_Name", "Region_Type", "Region_Sheet",
         "Haplotype_ID", "Haplotype", "Haplotype_Source",
         "Global_Freq", "Count", "Num_SNPs", "SNP_Positions", "SNP_Labels",
-        "Cohort", "Tissue", "snp_code",
+        "Cohort", "Tissue", "analysis_sample_id", "snp_code",
         "Clin_Var", "Clin_Label", "Variable", "Analysis_Type",
     ]
     front = [c for c in priority if c in df.columns]
     rest  = [c for c in df.columns if c not in front]
     return df[front + rest]
+
+
+def build_significant_overview(summary: pd.DataFrame) -> pd.DataFrame:
+    """Create a compact overview from the mixed stage-18 summary workbook sheet."""
+    if summary.empty or "Note" in summary.columns:
+        return summary.copy()
+
+    rows = []
+    for _, row in summary.iterrows():
+        candidate_p_cols = [c for c in ["P_Value", "P_Unadj", "P_Cox"] if c in row.index]
+        p_values = [pd.to_numeric(row.get(col), errors="coerce") for col in candidate_p_cols]
+        p_values = [value for value in p_values if pd.notna(value)]
+        best_p = float(min(p_values)) if p_values else np.nan
+        rows.append({
+            "Analysis Type": row.get("Analysis_Type", ""),
+            "Region": row.get("Region_Name", ""),
+            "Region Type": row.get("Region_Type", ""),
+            "Haplotype ID": row.get("Haplotype_ID", ""),
+            "Haplotype": row.get("Haplotype", ""),
+            "Global Frequency": row.get("Global_Freq", np.nan),
+            "Clinical Variable": row.get("Clin_Label", row.get("Variable", "")),
+            "Cohort": row.get("Cohort", row.get("Analysis_Group", "")),
+            "Best P-Value": best_p,
+            "Primary Label": row.get("Clin_Label", row.get("Variable", row.get("Comparison", ""))),
+        })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(["Best P-Value", "Region", "Haplotype ID"], kind="stable").reset_index(drop=True)
+
+
+def make_association_overview_plot(tvh: pd.DataFrame, b_clin: pd.DataFrame, e_clin: pd.DataFrame, out_path: Path):
+    overview_rows = [
+        {
+            "Section": "Tumour vs control",
+            "Count": int(tvh["Nominal_Sig"].sum()) if not tvh.empty and "Nominal_Sig" in tvh.columns else 0,
+            "Colour": arm_color("Tumour"),
+        },
+        {
+            "Section": "Breast clinical",
+            "Count": int(b_clin["Nominal_Sig_Unadj"].sum()) if not b_clin.empty and "Nominal_Sig_Unadj" in b_clin.columns else 0,
+            "Colour": cohort_color("Breast_Tumour"),
+        },
+        {
+            "Section": "Endometrial clinical",
+            "Count": int(e_clin["Nominal_Sig_Unadj"].sum()) if not e_clin.empty and "Nominal_Sig_Unadj" in e_clin.columns else 0,
+            "Colour": cohort_color("Endometrial_Tumour"),
+        },
+    ]
+    overview_df = pd.DataFrame(overview_rows)
+    if overview_df["Count"].sum() == 0:
+        return
+
+    fig, ax = plt.subplots(figsize=(7.8, 4.6))
+    ax.barh(
+        overview_df["Section"],
+        overview_df["Count"],
+        color=overview_df["Colour"],
+        edgecolor="#3A3A3A",
+        linewidth=0.8,
+        alpha=0.9,
+    )
+    for idx, row in overview_df.iterrows():
+        ax.text(row["Count"] + 0.08, idx, str(int(row["Count"])), va="center", fontsize=9, fontweight="bold")
+    ax.set_xlabel("Nominally significant haplotype rows", fontsize=10, fontweight="bold")
+    ax.set_ylabel("")
+    ax.set_title("Stage 18 haplotype association overview", fontsize=12, fontweight="bold", loc="left")
+    ax.grid(True, axis="x", linestyle=":", alpha=0.35)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 
 def _normalise_haplotype_meta(df: pd.DataFrame) -> pd.DataFrame:
@@ -2306,9 +2450,9 @@ def run_region_analysis(region: Dict, args, master: pd.DataFrame) -> Dict[str, p
     merged = merge_haplotypes_with_clinical(carrier_df, master)
     if merged.empty:
         print("  No matched samples for this region, skipping analyses.")
-        return {k: pd.DataFrame() for k in ["freq_df","merged","tvh","b_clin","e_clin","b_dose","e_dose","surv_res","risk_res","manifest"]}
+        return {k: pd.DataFrame() for k in ["freq_df","merged","tvh","b_clin","e_clin","tx_summary","tx_clin","tx_surv","b_dose","e_dose","surv_res","risk_res","manifest"]}
 
-    n_samples = merged["snp_code"].nunique()
+    n_samples = merged["analysis_sample_id"].nunique()
     n_haplotypes = merged["Haplotype_ID"].nunique()
     print(f"\n  Merged: {n_samples} samples × {n_haplotypes} haplotypes\n")
 
@@ -2316,6 +2460,7 @@ def run_region_analysis(region: Dict, args, master: pd.DataFrame) -> Dict[str, p
     if not tvh.empty:
         validate_percentage_columns(tvh, ["Freq_Tumour_%", "Freq_Control_%"], "Script 18 tumour vs control")
     b_clin, e_clin = clinical_associations(merged)
+    tx_summary, tx_clin, tx_surv = exploratory_breast_treatment_analysis(merged)
     # Dose analysis on ALL haplotypes (not pre-filtered by Analysis 2 p-values,
     # which would introduce circular selection bias)
     all_hap_ids = merged["Haplotype_ID"].unique().tolist()
@@ -2325,14 +2470,16 @@ def run_region_analysis(region: Dict, args, master: pd.DataFrame) -> Dict[str, p
     risk_res = cancer_risk_analysis(merged)
 
     manifest_cols = [c for c in [
-        "snp_code", "Cohort", "Tissue", "sheet", "is_replicate",
+        "analysis_sample_id", "snp_code", "Cohort", "Tissue", "sheet", "is_replicate",
+        "BREAST_TX_CHEMOTHERAPY_BIN", "BREAST_TX_ANTI_HER2_BIN",
+        "BREAST_TX_ENDOCRINE_BIN", "BREAST_TX_RADIOTHERAPY_BIN",
         "Haplotype_ID", "Haplotype", "Global_Freq", "Count", "Num_SNPs",
         "SNP_Positions", "SNP_Labels", "Haplotype_Source", "Dosage", "Carrier"
     ] if c in merged.columns]
     manifest = (
         merged[manifest_cols]
-        .drop_duplicates(subset=["snp_code", "Haplotype_ID"])
-        .sort_values(["Cohort", "Tissue", "snp_code"])
+        .drop_duplicates(subset=["analysis_sample_id", "Haplotype_ID"])
+        .sort_values(["Cohort", "Tissue", "analysis_sample_id"])
         .reset_index(drop=True)
     )
 
@@ -2342,6 +2489,9 @@ def run_region_analysis(region: Dict, args, master: pd.DataFrame) -> Dict[str, p
         "tvh": _prefix_region_columns(tvh, region),
         "b_clin": _prefix_region_columns(b_clin, region),
         "e_clin": _prefix_region_columns(e_clin, region),
+        "tx_summary": _prefix_region_columns(tx_summary, region),
+        "tx_clin": _prefix_region_columns(tx_clin, region),
+        "tx_surv": _prefix_region_columns(tx_surv, region),
         "b_dose": _prefix_region_columns(b_dose, region),
         "e_dose": _prefix_region_columns(e_dose, region),
         "surv_res": _prefix_region_columns(surv_res, region),
@@ -2420,6 +2570,12 @@ def main():
     tvh      = _cat("tvh")
     b_clin   = _cat("b_clin")
     e_clin   = _cat("e_clin")
+    tx_summary = _cat("tx_summary")
+    if not tx_summary.empty:
+        tx_summary = tx_summary.drop(columns=[c for c in tx_summary.columns if str(c).startswith("Region_")], errors="ignore")
+        tx_summary = tx_summary.drop_duplicates().reset_index(drop=True)
+    tx_clin = _cat("tx_clin")
+    tx_surv = _cat("tx_surv")
     b_dose   = _cat("b_dose")
     e_dose   = _cat("e_dose")
     dose_all = pd.concat([b_dose, e_dose], ignore_index=True) if (not b_dose.empty or not e_dose.empty) else pd.DataFrame()
@@ -2439,20 +2595,13 @@ def main():
                 _order_columns(df).to_excel(xw, sheet_name=name, index=False)
                 _any_sheet = True
 
-        _write_sheet(freq_df,  "haplotype_frequencies")
-        _write_sheet(tvh,      "tumour_vs_control")
-        _write_sheet(b_clin,   "breast_clinical_assoc")
-        _write_sheet(e_clin,   "endo_clinical_assoc")
-        _write_sheet(dose_all, "haplotype_dose")
-        _write_sheet(surv_res, "survival_cox")
-        _write_sheet(risk_res, "cancer_risk")
-        _write_sheet(manifest, "sample_manifest")
-
         sig_rows = []
         for res_df, analysis in [
             (tvh,      "Tumour_vs_Control"),
             (b_clin,   "Breast_Clinical"),
             (e_clin,   "Endo_Clinical"),
+            (tx_clin,  "Breast_Treatment_Clinical"),
+            (tx_surv,  "Breast_Treatment_Survival"),
             (surv_res, "Survival"),
             (risk_res, "Cancer_Risk"),
         ]:
@@ -2473,7 +2622,64 @@ def main():
                 sig["Passes_Bonferroni"] = sig[p_col] < bonf
                 sig_rows.append(sig)
         summary = pd.concat(sig_rows, ignore_index=True) if sig_rows else pd.DataFrame()
+        significant_overview = build_significant_overview(summary)
+        workbook_readme = pd.DataFrame([
+            {
+                "Section": "Primary thesis outputs",
+                "Details": "The main stage-18 sheets for thesis use are haplotype_frequencies, tumour_vs_control, breast_clinical_assoc, endo_clinical_assoc, summary_significant, Significant Overview, At_A_Glance, and sample_manifest.",
+            },
+            {
+                "Section": "Secondary outputs",
+                "Details": "Treatment-stratified, survival, cancer-risk, and extensive per-model heatmaps are retained for supplementary interpretation only.",
+            },
+            {
+                "Section": "Region note",
+                "Details": "Stage 18 aggregates reference haplotype regions exported by stage 15R, so the workbook includes full-region, LD-block, and gene-level haplotypes.",
+            },
+        ])
+        workbook_index = pd.DataFrame([
+            {"Order": 1, "Sheet": "README", "Priority": "Primary", "Purpose": "Workbook guide and scope note"},
+            {"Order": 2, "Sheet": "At_A_Glance", "Priority": "Primary", "Purpose": "Compact count of the main and secondary stage-18 result rows"},
+            {"Order": 3, "Sheet": "summary_significant", "Priority": "Primary", "Purpose": "Combined nominally significant haplotype rows"},
+            {"Order": 4, "Sheet": "Significant Overview", "Priority": "Primary", "Purpose": "Compact overview of the strongest haplotype signals"},
+            {"Order": 5, "Sheet": "haplotype_frequencies", "Priority": "Primary", "Purpose": "Reference haplotype definitions and global frequencies"},
+            {"Order": 6, "Sheet": "tumour_vs_control", "Priority": "Primary", "Purpose": "Tumour-versus-control haplotype comparisons"},
+            {"Order": 7, "Sheet": "breast_clinical_assoc", "Priority": "Primary", "Purpose": "Breast tumour clinical haplotype associations"},
+            {"Order": 8, "Sheet": "endo_clinical_assoc", "Priority": "Primary", "Purpose": "Endometrial tumour clinical haplotype associations"},
+            {"Order": 9, "Sheet": "haplotype_dose", "Priority": "Primary", "Purpose": "Haplotype-dose follow-up tables"},
+            {"Order": 10, "Sheet": "sample_manifest", "Priority": "Primary", "Purpose": "Manifest of analysed samples and haplotypes"},
+            {"Order": 11, "Sheet": "breast_tx_summary", "Priority": "Secondary", "Purpose": "Breast treatment-stratified summary"},
+            {"Order": 12, "Sheet": "breast_tx_clinical", "Priority": "Secondary", "Purpose": "Breast treatment-stratified clinical associations"},
+            {"Order": 13, "Sheet": "breast_tx_survival", "Priority": "Secondary", "Purpose": "Breast treatment-stratified survival outputs"},
+            {"Order": 14, "Sheet": "survival_cox", "Priority": "Secondary", "Purpose": "Secondary survival modelling outputs"},
+            {"Order": 15, "Sheet": "cancer_risk", "Priority": "Secondary", "Purpose": "Secondary case-control risk summaries"},
+        ])
+        at_a_glance = pd.DataFrame([
+            {"Section": "Haplotype_Frequencies", "Rows": int(len(freq_df)) if not freq_df.empty else 0},
+            {"Section": "Tumour_vs_Control", "Rows": int(len(tvh)) if not tvh.empty else 0},
+            {"Section": "Breast_Clinical", "Rows": int(len(b_clin)) if not b_clin.empty else 0},
+            {"Section": "Endometrial_Clinical", "Rows": int(len(e_clin)) if not e_clin.empty else 0},
+            {"Section": "Haplotype_Dose", "Rows": int(len(dose_all)) if not dose_all.empty else 0},
+            {"Section": "Summary_Significant", "Rows": int(len(summary)) if not summary.empty and "Note" not in summary.columns else 0},
+            {"Section": "Secondary_Survival", "Rows": int(len(surv_res)) if not surv_res.empty else 0},
+            {"Section": "Secondary_Cancer_Risk", "Rows": int(len(risk_res)) if not risk_res.empty else 0},
+        ])
+        workbook_readme.to_excel(xw, sheet_name="README", index=False)
+        workbook_index.to_excel(xw, sheet_name="Workbook_Index", index=False)
+        at_a_glance.to_excel(xw, sheet_name="At_A_Glance", index=False)
         _write_sheet(summary, "summary_significant")
+        _write_sheet(significant_overview, "Significant Overview")
+        _write_sheet(freq_df,  "haplotype_frequencies")
+        _write_sheet(tvh,      "tumour_vs_control")
+        _write_sheet(b_clin,   "breast_clinical_assoc")
+        _write_sheet(e_clin,   "endo_clinical_assoc")
+        _write_sheet(dose_all, "haplotype_dose")
+        _write_sheet(manifest, "sample_manifest")
+        _write_sheet(tx_summary, "breast_tx_summary")
+        _write_sheet(tx_clin, "breast_tx_clinical")
+        _write_sheet(tx_surv, "breast_tx_survival")
+        _write_sheet(surv_res, "survival_cox")
+        _write_sheet(risk_res, "cancer_risk")
 
         # openpyxl requires ≥1 visible sheet — write a diagnostic sheet when
         # no analysis produced results (e.g. --haplo_results not supplied).
@@ -2500,26 +2706,46 @@ def main():
     print("=== Generating figures ===")
     supplementary_dir = out_dir / "supplementary_figures"
     supplementary_dir.mkdir(parents=True, exist_ok=True)
-    significant_dir = out_dir / "significant_only_figures"
+    significant_dir = supplementary_dir / "significant_only_figures"
     significant_dir.mkdir(parents=True, exist_ok=True)
-    for stale in [
-        out_dir / "18_Haplo_Volcano_raw_p.png",
-        out_dir / "18_Haplo_Heatmap_Breast.png",
-        out_dir / "18_Haplo_Heatmap_Endometrial.png",
-        out_dir / "18_Haplo_Heatmap_Breast_AgeAdj.png",
-        out_dir / "18_Haplo_Heatmap_Endometrial_AgeAdj.png",
-        out_dir / "18_Haplo_Forest_CancerRisk.png",
-        out_dir / "GSDMB_Haplotype_KM_Curves_All_Cohorts.pdf",
-    ]:
-        if stale.exists():
-            stale.unlink()
+    legacy_root_dir = supplementary_dir / "_legacy_root_outputs"
+
+    def _archive_root_output(path: Path) -> None:
+        if not path.exists():
+            return
+        legacy_root_dir.mkdir(parents=True, exist_ok=True)
+        if path.is_dir():
+            target = legacy_root_dir / path.name
+            counter = 1
+            while target.exists():
+                target = legacy_root_dir / f"{path.name}__archived_{counter}"
+                counter += 1
+        else:
+            target = legacy_root_dir / path.name
+            counter = 1
+            while target.exists():
+                target = legacy_root_dir / f"{path.stem}__archived_{counter}{path.suffix}"
+                counter += 1
+        shutil.move(str(path), str(target))
+
+    keep_root_figures = {
+        "18_Haplo_Association_Overview.png",
+        "18_Haplo_Heatmap_Breast_MainText.png",
+        "18_Haplo_Heatmap_Endometrial_MainText.png",
+    }
+    for stale in out_dir.glob("18_*.png"):
+        if stale.name not in keep_root_figures:
+            _archive_root_output(stale)
+    for stale in out_dir.glob("18_*.pdf"):
+        _archive_root_output(stale)
+    _archive_root_output(out_dir / "significant_only_figures")
 
     make_volcano(tvh, supplementary_dir)
 
     if not b_clin.empty and "P_Unadj" in b_clin.columns and b_clin["P_Unadj"].notna().any():
         make_heatmap(
             b_clin[b_clin["P_Unadj"].notna()].copy(), "Breast", "P_Unadj", "Unadjusted (all tested associations)",
-            out_dir / "18_Haplo_Heatmap_Breast.png",
+            supplementary_dir / "18_Haplo_Heatmap_Breast.png",
         )
         make_heatmap(
             _filter_significant_haplotype_rows(b_clin, "P_Unadj"), "Breast", "P_Unadj", "Unadjusted (significant only)",
@@ -2528,7 +2754,7 @@ def main():
     if not e_clin.empty and "P_Unadj" in e_clin.columns and e_clin["P_Unadj"].notna().any():
         make_heatmap(
             e_clin[e_clin["P_Unadj"].notna()].copy(), "Endometrial", "P_Unadj", "Unadjusted (all tested associations)",
-            out_dir / "18_Haplo_Heatmap_Endometrial.png",
+            supplementary_dir / "18_Haplo_Heatmap_Endometrial.png",
         )
         make_heatmap(
             _filter_significant_haplotype_rows(e_clin, "P_Unadj"), "Endometrial", "P_Unadj", "Unadjusted (significant only)",
@@ -2537,7 +2763,7 @@ def main():
     if not b_clin.empty and "P_Adj_Age" in b_clin.columns and b_clin["P_Adj_Age"].notna().any():
         make_heatmap(
             b_clin[b_clin["P_Adj_Age"].notna()].copy(), "Breast", "P_Adj_Age", "Age-adjusted (all tested associations)",
-            out_dir / "18_Haplo_Heatmap_Breast_AgeAdj.png",
+            supplementary_dir / "18_Haplo_Heatmap_Breast_AgeAdj.png",
         )
         make_heatmap(
             _filter_significant_haplotype_rows(b_clin, "P_Adj_Age"), "Breast", "P_Adj_Age", "Age-adjusted (significant only)",
@@ -2546,7 +2772,7 @@ def main():
     if not e_clin.empty and "P_Adj_Age" in e_clin.columns and e_clin["P_Adj_Age"].notna().any():
         make_heatmap(
             e_clin[e_clin["P_Adj_Age"].notna()].copy(), "Endometrial", "P_Adj_Age", "Age-adjusted (all tested associations)",
-            out_dir / "18_Haplo_Heatmap_Endometrial_AgeAdj.png",
+            supplementary_dir / "18_Haplo_Heatmap_Endometrial_AgeAdj.png",
         )
         make_heatmap(
             _filter_significant_haplotype_rows(e_clin, "P_Adj_Age"), "Endometrial", "P_Adj_Age", "Age-adjusted (significant only)",
@@ -2555,7 +2781,7 @@ def main():
     if not b_clin.empty and "P_Adj_BMI" in b_clin.columns and b_clin["P_Adj_BMI"].notna().any():
         make_heatmap(
             b_clin[b_clin["P_Adj_BMI"].notna()].copy(), "Breast", "P_Adj_BMI", "BMI-adjusted (all tested associations)",
-            out_dir / "18_Haplo_Heatmap_Breast_BMIAdj.png",
+            supplementary_dir / "18_Haplo_Heatmap_Breast_BMIAdj.png",
         )
         make_heatmap(
             _filter_significant_haplotype_rows(b_clin, "P_Adj_BMI"), "Breast", "P_Adj_BMI", "BMI-adjusted (significant only)",
@@ -2564,7 +2790,7 @@ def main():
     if not e_clin.empty and "P_Adj_BMI" in e_clin.columns and e_clin["P_Adj_BMI"].notna().any():
         make_heatmap(
             e_clin[e_clin["P_Adj_BMI"].notna()].copy(), "Endometrial", "P_Adj_BMI", "BMI-adjusted (all tested associations)",
-            out_dir / "18_Haplo_Heatmap_Endometrial_BMIAdj.png",
+            supplementary_dir / "18_Haplo_Heatmap_Endometrial_BMIAdj.png",
         )
         make_heatmap(
             _filter_significant_haplotype_rows(e_clin, "P_Adj_BMI"), "Endometrial", "P_Adj_BMI", "BMI-adjusted (significant only)",
@@ -2573,7 +2799,7 @@ def main():
     if not b_clin.empty and "P_Adj_AgeBMI" in b_clin.columns and b_clin["P_Adj_AgeBMI"].notna().any():
         make_heatmap(
             b_clin[b_clin["P_Adj_AgeBMI"].notna()].copy(), "Breast", "P_Adj_AgeBMI", "Age+BMI-adjusted (all tested associations)",
-            out_dir / "18_Haplo_Heatmap_Breast_AgeBMIAdj.png",
+            supplementary_dir / "18_Haplo_Heatmap_Breast_AgeBMIAdj.png",
         )
         make_heatmap(
             _filter_significant_haplotype_rows(b_clin, "P_Adj_AgeBMI"), "Breast", "P_Adj_AgeBMI", "Age+BMI-adjusted (significant only)",
@@ -2582,7 +2808,7 @@ def main():
     if not e_clin.empty and "P_Adj_AgeBMI" in e_clin.columns and e_clin["P_Adj_AgeBMI"].notna().any():
         make_heatmap(
             e_clin[e_clin["P_Adj_AgeBMI"].notna()].copy(), "Endometrial", "P_Adj_AgeBMI", "Age+BMI-adjusted (all tested associations)",
-            out_dir / "18_Haplo_Heatmap_Endometrial_AgeBMIAdj.png",
+            supplementary_dir / "18_Haplo_Heatmap_Endometrial_AgeBMIAdj.png",
         )
         make_heatmap(
             _filter_significant_haplotype_rows(e_clin, "P_Adj_AgeBMI"), "Endometrial", "P_Adj_AgeBMI", "Age+BMI-adjusted (significant only)",
@@ -2590,15 +2816,15 @@ def main():
         )
 
     # Main set
+    make_association_overview_plot(tvh, b_clin, e_clin, out_dir / "18_Haplo_Association_Overview.png")
     make_main_text_heatmaps(b_clin, e_clin, out_dir)
-    make_main_text_heatmaps(b_clin, e_clin, significant_dir)
-    make_haplotype_composition_plots(tvh, merged, out_dir)
-    make_forest(b_clin, "Breast",      out_dir / "18_Haplo_Forest_Breast.png")
-    make_forest(e_clin, "Endometrial", out_dir / "18_Haplo_Forest_Endometrial.png")
+    make_haplotype_composition_plots(tvh, merged, supplementary_dir)
+    make_forest(b_clin, "Breast",      supplementary_dir / "18_Haplo_Forest_Breast.png")
+    make_forest(e_clin, "Endometrial", supplementary_dir / "18_Haplo_Forest_Endometrial.png")
 
     # Secondary outputs
     make_risk_forest(risk_res, supplementary_dir / "18_Haplo_Forest_CancerRisk.png")
-    make_km_pdf(all_km_pages, supplementary_dir / "GSDMB_Haplotype_KM_Curves_All_Cohorts.pdf")
+    make_km_pdf(all_km_pages, supplementary_dir / "GSDMB_Haplotype_KM_Curves_Endometrial.pdf")
 
     print()
     print("=" * 60)
@@ -2611,5 +2837,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

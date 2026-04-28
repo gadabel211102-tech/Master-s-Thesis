@@ -694,6 +694,43 @@ def parse_yes_no(x) -> Optional[str]:
     return None
 
 
+def _normalise_treatment_text(x) -> str:
+    """Normalise treatment-history text so simple keyword rules are stable."""
+    if pd.isna(x):
+        return ""
+    s = _strip_accents(_norm_text(x).lower())
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def derive_breast_treatment_exposure_flags(x) -> Dict[str, Optional[str]]:
+    """
+    Convert the free-text breast `Tto` field into coarse exposure flags.
+
+    These flags are intentionally conservative and are meant for exploratory
+    treatment-stratified analyses, not formal treatment-response modelling.
+    """
+    s = _normalise_treatment_text(x)
+    if s in {"", "x", "na", "n/a", "none", "no consta"}:
+        return {
+            "canon__treatment_chemotherapy": None,
+            "canon__treatment_anti_her2": None,
+            "canon__treatment_endocrine": None,
+            "canon__treatment_radiotherapy": None,
+        }
+
+    patterns = {
+        "canon__treatment_chemotherapy": r"\bac\b|\bfec\b|\bcmf\b|taxol|paclitaxel|docetaxel|cbdca|carbo|quimio|chemo|\bqt\b",
+        "canon__treatment_anti_her2": r"hercept|trastu|lapat|pertu|anti[\s-]?her[\s-]?2",
+        "canon__treatment_endocrine": r"tamox|letroz|exemest|anastro|arimid|fulves|hormon|terapia hormonal|\bht\b",
+        "canon__treatment_radiotherapy": r"\brt\b|radiot|radioter|rte|rdt",
+    }
+    return {
+        key: ("Yes" if re.search(pattern, s) else "No")
+        for key, pattern in patterns.items()
+    }
+
+
 def extract_first_number(x) -> Optional[float]:
     """
     Extract first numeric token from a messy cell.
@@ -746,6 +783,67 @@ def parse_bmi_value(x) -> Optional[float]:
         return None
     v = float(m.group(1))
     return round(v, 2) if 10.0 <= v <= 70.0 else None
+
+
+def parse_bmi_category(x) -> Optional[str]:
+    """
+    Parse a BMI value or a source label into a standard BMI category.
+
+    This preserves meaningful source text such as "Sobrepeso" instead of
+    discarding it as missing.
+    """
+    if pd.isna(x):
+        return None
+
+    if isinstance(x, str):
+        s = _norm_text(x).upper().replace(",", ".").replace("?", "-").strip()
+        if not s or s in {"X", "NA", "N/A", "NR", "NULL"}:
+            return None
+        if "SOBREPESO" in s or "OVERWEIGHT" in s:
+            return "Overweight"
+        if "OBESIDAD" in s or "OBESE" in s:
+            return "Obese"
+        if "BAJO PESO" in s or "UNDERWEIGHT" in s:
+            return "Underweight"
+
+    bmi = parse_bmi_value(x)
+    if bmi is None:
+        return None
+    if bmi < 18.5:
+        return "Underweight"
+    if bmi < 25.0:
+        return "Normal"
+    if bmi < 30.0:
+        return "Overweight"
+    return "Obese"
+
+
+def parse_weight_kg_value(x) -> Optional[float]:
+    """Parse a weight value in kilograms from messy BMI/anthropometric text."""
+    if pd.isna(x):
+        return None
+    s = _norm_text(x).upper().replace(",", ".").replace("?", "-")
+    if not s or s in {"X", "SOBREPESO", "OBESIDAD", "SOBREPESO/OBESIDAD"}:
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*KG\b", s)
+    if not m:
+        return None
+    v = float(m.group(1))
+    return round(v, 2) if 25.0 <= v <= 250.0 else None
+
+
+def parse_height_cm_value(x) -> Optional[float]:
+    """Parse a height value in centimetres from messy BMI/anthropometric text."""
+    if pd.isna(x):
+        return None
+    s = _norm_text(x).upper().replace(",", ".").replace("?", "-")
+    if not s or s in {"X", "SOBREPESO", "OBESIDAD", "SOBREPESO/OBESIDAD"}:
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*CM\b", s)
+    if not m:
+        return None
+    v = float(m.group(1))
+    return round(v, 2) if 120.0 <= v <= 230.0 else None
 
 
 def parse_excel_serial_date_percent(x) -> Optional[float]:
@@ -1044,6 +1142,22 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
             "clin_mn__BMI",
             "clin_en__BMI",
         ],
+        "canon__weight_kg": [
+            "clin_au_endo__BMI_CALCULATED",
+            "clin_au_endo__BMI",
+            "clin_dcs__BMI",
+            "clin_her2__BMI",
+            "clin_mn__BMI",
+            "clin_en__BMI",
+        ],
+        "canon__height_cm": [
+            "clin_au_endo__BMI_CALCULATED",
+            "clin_au_endo__BMI",
+            "clin_dcs__BMI",
+            "clin_her2__BMI",
+            "clin_mn__BMI",
+            "clin_en__BMI",
+        ],
         "canon__date_birth": [
             "clin_mn__Fecha nacimiento",
             "clin_en__Fecha nacimiento",
@@ -1165,7 +1279,7 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
             "clin_dcs__STATUS",
         ],
         "canon__recurrence": [           # â† v4: new â€” any recurrence/progression
-            "clin_dcs__Recaida/ProgresiÃ³n",
+            "clin_dcs__Recaida/Progresión",
             "clin_au_endo__PD_STATUS",
         ],
         "canon__distant_mets": [         # â† v4: new â€” distant metastasis
@@ -1184,11 +1298,11 @@ def build_harmonisation_map() -> Dict[str, List[str]]:
             "clin_au_endo__DATE_OF_SURGERY",
         ],
         "canon__date_last_fu": [         # â† v4: new â€” last follow-up (used to derive OS)
-            "clin_dcs__Ãšltima fecha disponible",
+            "clin_dcs__Última fecha disponible",
             "clin_au_endo__LAST_UPDATED",
         ],
         "canon__date_recurrence": [      # â† v4: new
-            "clin_dcs__Fecha Recidiva/ProgresiÃ³n",
+            "clin_dcs__Fecha Recidiva/Progresión",
             "clin_au_endo__PD_DATE",
         ],
 
@@ -1262,7 +1376,7 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
         "clin_dcs__MTxDISTANCIA",
         "clin_dcs__Exitus",
         "clin_dcs__STATUS",
-        "clin_dcs__Recaida/ProgresiÃ³n",
+        "clin_dcs__Recaida/Progresión",
     ]:
         if _col in out.columns:
             out[_col] = out[_col].apply(lambda x: x.strip() if isinstance(x, str) else x)
@@ -1318,6 +1432,44 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
         out["canon__bmi"] = pd.to_numeric(bmi_parsed[0], errors="coerce")
         if "canon__bmi__source" in out.columns:
             out["canon__bmi__source"] = bmi_parsed[1].where(bmi_parsed[1].notna(), out["canon__bmi__source"])
+
+        def _pick_weight_kg(row) -> Tuple[Optional[float], Optional[str]]:
+            for col in bmi_candidates:
+                if col not in row.index:
+                    continue
+                parsed = parse_weight_kg_value(row[col])
+                if parsed is not None:
+                    return parsed, col
+            return None, None
+
+        def _pick_height_cm(row) -> Tuple[Optional[float], Optional[str]]:
+            for col in bmi_candidates:
+                if col not in row.index:
+                    continue
+                parsed = parse_height_cm_value(row[col])
+                if parsed is not None:
+                    return parsed, col
+            return None, None
+
+        weight_parsed = out.apply(_pick_weight_kg, axis=1, result_type="expand")
+        height_parsed = out.apply(_pick_height_cm, axis=1, result_type="expand")
+        out["canon__weight_kg"] = pd.to_numeric(weight_parsed[0], errors="coerce")
+        out["canon__height_cm"] = pd.to_numeric(height_parsed[0], errors="coerce")
+        out["canon__weight_kg__source"] = weight_parsed[1]
+        out["canon__height_cm__source"] = height_parsed[1]
+
+        def _pick_bmi_category(row) -> Tuple[Optional[str], Optional[str]]:
+            for col in bmi_candidates:
+                if col not in row.index:
+                    continue
+                category = parse_bmi_category(row[col])
+                if category is not None:
+                    return category, col
+            return None, None
+
+        bmi_category = out.apply(_pick_bmi_category, axis=1, result_type="expand")
+        out["canon__bmi_category"] = bmi_category[0]
+        out["canon__bmi_category__source"] = bmi_category[1]
 
     # â”€â”€ Dates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     for _dcol in ("canon__date_birth", "canon__date_diagnosis",
@@ -1533,6 +1685,17 @@ def apply_semantic_transforms(df: pd.DataFrame) -> pd.DataFrame:
         ).map({True: "Yes", False: "No"})
         out.loc[out["canon__her2_copies_note"].isna(), "canon__triple_negative_flag"] = pd.NA
 
+    # ?????? Breast treatment text -> exploratory exposure flags ??????????????????????????????????????????????????????
+    if "canon__treatment" in out.columns:
+        tx_flags = out["canon__treatment"].apply(derive_breast_treatment_exposure_flags).apply(pd.Series)
+        for col in tx_flags.columns:
+            out[col] = tx_flags[col]
+            source_col = f"{col}__source"
+            out[source_col] = pd.NA
+            if "canon__treatment__source" in out.columns:
+                valid_mask = out[col].notna()
+                out.loc[valid_mask, source_col] = out.loc[valid_mask, "canon__treatment__source"]
+
     # â”€â”€ Performed/cuts: fix the always-null bug (was checking 'nan' string) â”€â”€â”€
     if "canon__performed_or_cuts" in out.columns:
         out["canon__performed_or_cuts__yesno"] = out["canon__performed_or_cuts"].apply(
@@ -1577,6 +1740,38 @@ def harmonise(df_raw_merged: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, 
 
     # Apply semantic transforms to canon columns (types, derived flags, etc.)
     harm = apply_semantic_transforms(harm)
+
+    for canon in [
+        "canon__treatment_chemotherapy",
+        "canon__treatment_anti_her2",
+        "canon__treatment_endocrine",
+        "canon__treatment_radiotherapy",
+    ]:
+        if canon in harm.columns:
+            map_rows.append({
+                "canon_column": canon,
+                "source_priority_list": "Derived from canon__treatment using keyword-based exploratory exposure flags",
+                "n_sources_found_in_data": int("canon__treatment" in harm.columns),
+            })
+
+    if "canon__bmi_category" in harm.columns:
+        map_rows.append({
+            "canon_column": "canon__bmi_category",
+            "source_priority_list": "Derived from BMI source text and numeric BMI values; preserves labels such as 'Sobrepeso' and standard BMI categories",
+            "n_sources_found_in_data": int("canon__bmi" in harm.columns),
+        })
+    if "canon__weight_kg" in harm.columns:
+        map_rows.append({
+            "canon_column": "canon__weight_kg",
+            "source_priority_list": "Derived from BMI source text when kg is present; preserves weight-only values such as '53.5 kg' and mixed strings like '60 kg; 168 cm'",
+            "n_sources_found_in_data": int("canon__bmi" in harm.columns),
+        })
+    if "canon__height_cm" in harm.columns:
+        map_rows.append({
+            "canon_column": "canon__height_cm",
+            "source_priority_list": "Derived from BMI source text when cm is present; preserves height information in mixed strings like '60 kg; 168 cm'",
+            "n_sources_found_in_data": int("canon__bmi" in harm.columns),
+        })
 
     # â”€â”€ Drop columns that are >99% empty â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Keeps the file clean by removing placeholder/unfilled columns (e.g. the

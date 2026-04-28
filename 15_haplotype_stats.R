@@ -138,6 +138,39 @@ if (!dir.exists(OUT_DIR)) dir.create(OUT_DIR, recursive = TRUE)
 if (!dir.exists(MAIN_FIG_DIR)) dir.create(MAIN_FIG_DIR, recursive = TRUE)
 if (!dir.exists(SUPP_FIG_DIR)) dir.create(SUPP_FIG_DIR, recursive = TRUE)
 
+archive_output <- function(path, archive_dir) {
+  if (!file.exists(path)) return(invisible(FALSE))
+  if (!dir.exists(archive_dir)) dir.create(archive_dir, recursive = TRUE)
+  stem <- tools::file_path_sans_ext(basename(path))
+  ext <- tools::file_ext(path)
+  ext_suffix <- if (nzchar(ext)) paste0(".", ext) else ""
+  target <- file.path(archive_dir, basename(path))
+  counter <- 1L
+  while (file.exists(target)) {
+    target <- file.path(archive_dir, sprintf("%s__archived_%d%s", stem, counter, ext_suffix))
+    counter <- counter + 1L
+  }
+  invisible(file.rename(path, target))
+}
+
+MAIN_TEXT_FIGURES <- c(
+  "Haplotype_Cohort_Comparison_FullRegion.png",
+  "Haplotype_Association_Overview.png",
+  "Haplotype_KeyBlocks_Overview.png"
+)
+LEGACY_MAIN_FIG_DIR <- file.path(MAIN_FIG_DIR, "legacy_demoted_outputs")
+existing_main_figs <- list.files(
+  MAIN_FIG_DIR,
+  pattern = "^Haplotype_.*\\.(png|pdf)$",
+  full.names = TRUE,
+  recursive = FALSE
+)
+for (.fig in existing_main_figs) {
+  if (!(basename(.fig) %in% MAIN_TEXT_FIGURES)) {
+    archive_output(.fig, LEGACY_MAIN_FIG_DIR)
+  }
+}
+
 # Main filters
 MAIN_MIN_FREQ        <- 0.01   # full-region global haplotypes shown from 1%
 SUPP_MIN_FREQ        <- 0.005  # LD-block and gene-specific analyses can be looser
@@ -156,6 +189,7 @@ RUN_GENE_SPECIFIC    <- TRUE
 GENE_LIST_SUPP       <- c("GSDMB")
 GENE_SPECIFIC_USE_LD_BLOCKS <- TRUE
 GENERATE_SUPPLEMENTARY_FIGURES <- FALSE
+GENERATE_BLOCK_COHORT_FIGURES <- TRUE
 MAIN_TOP_FULL_HAPS <- 10
 MAIN_TOP_COMPARISON_HAPS <- 8
 MAX_KEY_BLOCKS_MAIN <- 3
@@ -631,7 +665,12 @@ make_forest_plot <- function(assoc_df, region_name, out_file) {
 # FIGURE: Haplotype allele composition tile grid
 # Each row = one haplotype; each column = one SNP; filled = alt allele carried
 # -----------------------------------------------------------------------------
-make_haplotype_composition_plot <- function(freq_df, snp_meta_sub, region_name, out_file) {
+build_haplotype_composition_plot <- function(freq_df, snp_meta_sub, region_name,
+                                             plot_title = NULL,
+                                             plot_subtitle = "Red = alt allele carried | rows ordered by global frequency",
+                                             legend_position = "top",
+                                             axis_text_x_size = 7.5,
+                                             axis_text_y_size = 8) {
   if (nrow(freq_df) == 0) return(invisible(NULL))
 
   snp_cols <- intersect(snp_meta_sub$rsID_clean, names(freq_df))
@@ -668,21 +707,87 @@ make_haplotype_composition_plot <- function(freq_df, snp_meta_sub, region_name, 
                   label = sprintf("%.1f%%", Frequency * 100)),
               inherit.aes = FALSE, size = 3, hjust = 0) +
     coord_cartesian(clip = "off") +
-    labs(title    = sprintf("Haplotype Allelic Composition: %s", region_name),
-         subtitle = "Red = alt allele carried | rows ordered by global frequency",
+    labs(title    = if (is.null(plot_title)) sprintf("Haplotype Allelic Composition: %s", region_name) else plot_title,
+         subtitle = plot_subtitle,
          x = NULL, y = "Haplotype") +
     theme(
-      axis.text.x    = element_text(angle = 45, hjust = 1, size = 7.5),
-      axis.text.y    = element_text(size = 8),
+      axis.text.x    = element_text(angle = 45, hjust = 1, size = axis_text_x_size),
+      axis.text.y    = element_text(size = axis_text_y_size),
       plot.margin    = margin(8, 50, 6, 8),
-      legend.position = "top"
+      legend.position = legend_position
     )
 
   n_haps <- nrow(hap_mat)
   n_snps <- length(snp_cols)
+  list(plot = p, n_haps = n_haps, n_snps = n_snps)
+}
+
+make_haplotype_composition_plot <- function(freq_df, snp_meta_sub, region_name, out_file) {
+  built <- build_haplotype_composition_plot(freq_df, snp_meta_sub, region_name)
+  if (is.null(built)) return(invisible(NULL))
+  p <- built$plot
+
   SAVE(out_file, p,
-       width  = max(7, n_snps * 0.55 + 2),
-       height = max(4, n_haps * 0.38 + 2))
+       width  = max(7, built$n_snps * 0.55 + 2),
+       height = max(4, built$n_haps * 0.38 + 2))
+}
+
+make_block_haplotype_composition_plot <- function(block_freq_tables, ld_blocks_by_threshold,
+                                                  snp_meta, out_file) {
+  plot_list <- list()
+  max_haps <- 0L
+  max_snps <- 0L
+  cat(sprintf("  Building LD-block composition panels -> %s\n", basename(out_file)))
+
+  for (thr_label in names(ld_blocks_by_threshold)) {
+    thr_blocks <- ld_blocks_by_threshold[[thr_label]]$blocks
+    if (length(thr_blocks) == 0) next
+    for (nm in names(thr_blocks)) {
+      region_name <- sprintf("LD_Block_%s_%s", thr_label, nm)
+      freq_df <- block_freq_tables[[region_name]]
+      if (is.null(freq_df) || nrow(freq_df) == 0) next
+      built <- build_haplotype_composition_plot(
+        freq_df      = freq_df,
+        snp_meta_sub = snp_meta[thr_blocks[[nm]], , drop = FALSE],
+        region_name  = nm,
+        plot_title   = nm,
+        plot_subtitle = NULL,
+        legend_position = "right",
+        axis_text_x_size = 5.8,
+        axis_text_y_size = 6.5
+      )
+      if (is.null(built)) next
+      plot_list[[length(plot_list) + 1L]] <- built$plot
+      max_haps <- max(max_haps, built$n_haps)
+      max_snps <- max(max_snps, built$n_snps)
+    }
+  }
+
+  if (length(plot_list) == 0) {
+    cat("  No LD-block composition panels were built.\n")
+    return(invisible(NULL))
+  }
+
+  cat(sprintf("  LD-block composition panels built: %d | max haplotypes=%d | max SNPs=%d\n",
+              length(plot_list), max_haps, max_snps))
+
+  combined <- patchwork::wrap_plots(plot_list, ncol = 5) +
+    patchwork::plot_layout(guides = "collect") +
+    patchwork::plot_annotation(
+      title = "Haplotype allele composition across LD blocks at r^2 = 0.80",
+      subtitle = "Each panel shows the allelic composition of the haplotypes retained for one LD block; red tiles mark alt alleles"
+    ) &
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold"),
+      plot.subtitle = element_text(size = 10)
+    )
+
+  panel_height <- max(4.8, max_haps * 0.42 + 2.2)
+  n_rows <- ceiling(length(plot_list) / 5)
+  SAVE(out_file, combined,
+       width  = max(14, 5 * 3.0 + 2.5),
+       height = max(10, n_rows * panel_height + 1.5))
 }
 
 # -----------------------------------------------------------------------------
@@ -1028,34 +1133,158 @@ make_haplotype_atlas_plot <- function(freq_df, snp_meta_sub, out_file,
 make_full_region_comparison_plot <- function(a1_mat, a2_mat, freq_df, metadata_df, out_file,
                                              top_n = MAIN_TOP_COMPARISON_HAPS) {
   if (nrow(freq_df) == 0) return(invisible(NULL))
+  rows <- build_cohort_frequency_rows(a1_mat, a2_mat, freq_df, metadata_df, top_n = top_n)
+  if (nrow(rows) == 0) return(invisible(NULL))
+  rows <- rows %>%
+    mutate(
+      Haplotype_ID = factor(Haplotype_ID, levels = unique(Haplotype_ID)),
+      Group = factor(Group, levels = c("Breast tumour", "Endometrial tumour", "Pooled control"))
+    )
+
+  p <- ggplot(rows, aes(x = Haplotype_ID, y = FrequencyPct, fill = Group)) +
+    geom_col(position = position_dodge(width = 0.78), width = 0.66, colour = "white", linewidth = 0.3, alpha = 0.92) +
+    geom_text(
+      aes(label = sprintf("%.1f%%", FrequencyPct)),
+      position = position_dodge(width = 0.78),
+      vjust = -0.35,
+      size = 3.1,
+      colour = "#2f2f2f",
+      fontface = "bold"
+    ) +
+    scale_fill_manual(
+      values = c(
+        "Breast tumour" = "#CC79A7",
+        "Endometrial tumour" = "#009E73",
+        "Pooled control" = "#0072B2"
+      ),
+      name = NULL
+    ) +
+    scale_y_continuous(
+      labels = scales::label_percent(scale = 1, accuracy = 1),
+      expand = expansion(mult = c(0, 0.10))
+    ) +
+    coord_cartesian(ylim = c(0, max(rows$FrequencyPct, na.rm = TRUE) * 1.18), clip = "off") +
+    labs(
+      title = "Full-region haplotype frequency comparison",
+      subtitle = "Breast tumours, endometrial tumours, and pooled controls; estimated from phased haplotype dosage",
+      x = NULL,
+      y = "Estimated haplotype frequency (%)"
+    ) +
+    theme(
+      axis.text.x = element_text(size = 9, face = "bold"),
+      legend.position = "top",
+      legend.title = element_text(face = "bold"),
+      plot.margin = margin(6, 8, 2, 8),
+      panel.grid.minor = element_blank()
+    )
+
+  n_haps <- length(unique(rows$Haplotype_ID))
+  SAVE(out_file, p, width = max(8, n_haps * 0.9 + 2), height = 5.8)
+}
+
+build_cohort_frequency_rows <- function(a1_mat, a2_mat, freq_df, metadata_df, top_n = MAIN_TOP_COMPARISON_HAPS) {
   shown <- freq_df %>% arrange(desc(Frequency)) %>% slice_head(n = top_n)
-  if (nrow(shown) == 0) return(invisible(NULL))
+  if (nrow(shown) == 0) return(data.frame())
+
   hap1 <- make_binary_hap_strings(a1_mat)
   hap2 <- make_binary_hap_strings(a2_mat)
   group_idx <- list(
-    "Pooled control" = which(metadata_df$Tissue == "Healthy"),
     "Breast tumour" = which(metadata_df$Cohort == "Breast" & metadata_df$Tissue == "Tumour"),
-    "Endometrium tumour" = which(metadata_df$Cohort == "Endometrium" & metadata_df$Tissue == "Tumour")
+    "Endometrial tumour" = which(metadata_df$Cohort == "Endometrium" & metadata_df$Tissue == "Tumour"),
+    "Pooled control" = which(metadata_df$Tissue == "Healthy")
   )
-  rows <- bind_rows(lapply(seq_len(nrow(shown)), function(i) {
+
+  bind_rows(lapply(seq_len(nrow(shown)), function(i) {
     hap <- shown$Allele_String[i]
     dosage <- as.integer(hap1 == hap) + as.integer(hap2 == hap)
     bind_rows(lapply(names(group_idx), function(group_name) {
       idx <- group_idx[[group_name]]
-      data.frame(Haplotype_ID = shown$Haplotype_ID[i],
-                 Group = group_name,
-                 FrequencyPct = if (length(idx) > 0) mean(dosage[idx], na.rm = TRUE) * 50 else NA_real_)
+      data.frame(
+        Haplotype_ID = shown$Haplotype_ID[i],
+        Group = group_name,
+        FrequencyPct = if (length(idx) > 0) mean(dosage[idx], na.rm = TRUE) * 50 else NA_real_,
+        stringsAsFactors = FALSE
+      )
     }))
   }))
-  p <- ggplot(rows, aes(x = Haplotype_ID, y = FrequencyPct, colour = Group, group = Group)) +
-    geom_line(position = position_dodge(width = 0.25), alpha = 0.7) +
-    geom_point(position = position_dodge(width = 0.25), size = 3) +
-    scale_colour_manual(values = c("Pooled control" = "#666666", "Breast tumour" = "#B55D6A", "Endometrium tumour" = "#3D7EA6")) +
-    labs(title = "Full-region cohort comparison",
-         subtitle = "Main full-region haplotypes across pooled controls and tumour cohorts",
-         x = NULL, y = "Estimated haplotype frequency (%)") +
-    theme(legend.position = "top")
-  SAVE(out_file, p, width = max(8.5, nrow(shown) * 0.8 + 2), height = 5.5)
+}
+
+make_block_cohort_comparison_plot <- function(block_freq_tables, ld_blocks_by_threshold,
+                                              a1_mat, a2_mat, metadata_df, out_file,
+                                              top_n = MAIN_TOP_COMPARISON_HAPS) {
+  row_list <- list()
+
+  for (thr_label in names(ld_blocks_by_threshold)) {
+    thr_blocks <- ld_blocks_by_threshold[[thr_label]]$blocks
+    if (length(thr_blocks) == 0) next
+    for (nm in names(thr_blocks)) {
+      region_name <- sprintf("LD_Block_%s_%s", thr_label, nm)
+      freq_df <- block_freq_tables[[region_name]]
+      if (is.null(freq_df) || nrow(freq_df) == 0) next
+
+      rows <- build_cohort_frequency_rows(
+        a1_mat      = a1_mat[, thr_blocks[[nm]], drop = FALSE],
+        a2_mat      = a2_mat[, thr_blocks[[nm]], drop = FALSE],
+        freq_df     = freq_df,
+        metadata_df = metadata_df,
+        top_n       = top_n
+      )
+      if (nrow(rows) == 0) next
+      rows$Block <- nm
+      row_list[[length(row_list) + 1L]] <- rows
+    }
+  }
+
+  if (length(row_list) == 0) return(invisible(NULL))
+
+  plot_df <- bind_rows(row_list) %>%
+    mutate(
+      Block = factor(Block, levels = unique(Block)),
+      Haplotype_ID = factor(Haplotype_ID, levels = unique(Haplotype_ID)),
+      Group = factor(Group, levels = c("Breast tumour", "Endometrial tumour", "Pooled control"))
+    )
+
+  p <- ggplot(plot_df, aes(x = Haplotype_ID, y = FrequencyPct, fill = Group)) +
+    geom_col(position = position_dodge(width = 0.78), width = 0.66,
+             colour = "white", linewidth = 0.3, alpha = 0.92) +
+    geom_text(
+      aes(label = sprintf("%.1f%%", FrequencyPct)),
+      position = position_dodge(width = 0.78),
+      vjust = -0.35,
+      size = 2.9,
+      colour = "#2f2f2f",
+      fontface = "bold"
+    ) +
+    facet_wrap(~Block, ncol = 5, scales = "free_x") +
+    scale_fill_manual(
+      values = c(
+        "Breast tumour" = "#CC79A7",
+        "Endometrial tumour" = "#009E73",
+        "Pooled control" = "#0072B2"
+      ),
+      name = NULL
+    ) +
+    scale_y_continuous(
+      labels = scales::label_percent(scale = 1, accuracy = 1),
+      expand = expansion(mult = c(0, 0.10))
+    ) +
+    coord_cartesian(ylim = c(0, max(plot_df$FrequencyPct, na.rm = TRUE) * 1.18), clip = "off") +
+    labs(
+      title = "LD-block haplotype frequency comparison",
+      subtitle = "Breast tumours, endometrial tumours, and pooled controls; estimated from phased haplotype dosage",
+      x = NULL,
+      y = "Estimated haplotype frequency (%)"
+    ) +
+    theme(
+      axis.text.x = element_text(size = 7, face = "bold"),
+      legend.position = "top",
+      legend.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold"),
+      plot.margin = margin(6, 8, 2, 8),
+      panel.grid.minor = element_blank()
+    )
+
+  SAVE(out_file, p, width = 13.5, height = 10.5)
 }
 
 make_key_block_overview_plot <- function(summary_df, block_assoc_tables, gene_assoc_tables, out_file,
@@ -1113,47 +1342,22 @@ make_block_ld_plot <- function(ld_matrix_full, block_idx, snp_meta_full,
 make_cohort_freq_plot <- function(a1_mat, a2_mat, freq_df, metadata_df,
                                   region_name, out_file, min_freq = 0.01,
                                   hap_palette = NULL) {
-  # Canonical order: H1 → HN by descending frequency, then "Other" last.
-  # freq_df rows are already ranked by Frequency desc (from make_em_freq_table).
-  shown_haps <- freq_df %>%
-    filter(Frequency >= min_freq) %>%
-    arrange(desc(Frequency)) %>%
-    pull(Haplotype_ID)
-  if (length(shown_haps) == 0) return(invisible(NULL))
-
-  hap1 <- make_binary_hap_strings(a1_mat)
-  hap2 <- make_binary_hap_strings(a2_mat)
-
-  # Map binary strings -> Haplotype_ID via freq_df
-  str_to_id <- setNames(freq_df$Haplotype_ID, freq_df$Allele_String)
-
-  # Vectorised: build long-form table directly without row-by-row appending
-  n <- nrow(metadata_df)
-  hid1 <- str_to_id[hap1]
-  hid2 <- str_to_id[hap2]
-  hid1[is.na(hid1) | !(hid1 %in% shown_haps)] <- "Other"
-  hid2[is.na(hid2) | !(hid2 %in% shown_haps)] <- "Other"
-  group_vec <- paste(metadata_df$Cohort, metadata_df$Tissue, sep = "\n")
-
-  rows <- data.frame(
-    Haplotype = c(hid1, hid2),
-    Group     = rep(group_vec, 2L),
-    stringsAsFactors = FALSE
+  plot_df <- build_cohort_freq_plot_df(
+    a1_mat      = a1_mat,
+    a2_mat      = a2_mat,
+    freq_df     = freq_df,
+    metadata_df = metadata_df,
+    min_freq    = min_freq
   )
-
-  plot_df <- bind_rows(rows) %>%
-    group_by(Group, Haplotype) %>%
-    summarise(n = n(), .groups = "drop") %>%
-    group_by(Group) %>%
-    mutate(Freq = n / sum(n)) %>%
-    ungroup() %>%
+  if (is.null(plot_df) || nrow(plot_df) == 0) return(invisible(NULL))
+  plot_df <- plot_df %>%
     mutate(
-      Haplotype = factor(Haplotype,
-                         levels = c(shown_haps[shown_haps %in% unique(Haplotype)], "Other")),
-      Group = factor(Group, levels = sort(unique(Group)))
+      Haplotype = as.character(Haplotype),
+      Group = as.character(Group)
     )
 
   # Colour palette: use global palette if provided for cross-figure consistency
+  shown_haps <- unique(plot_df$Haplotype[plot_df$Haplotype != "Other"])
   n_haps  <- length(shown_haps)
   if (!is.null(hap_palette) && all(shown_haps %in% names(hap_palette))) {
     hap_pal <- hap_palette[c(shown_haps, "Other")]
@@ -1166,9 +1370,15 @@ make_cohort_freq_plot <- function(a1_mat, a2_mat, freq_df, metadata_df,
     )
   }
 
+  plot_df <- plot_df %>%
+    mutate(
+      Haplotype = factor(Haplotype, levels = c(shown_haps, "Other")),
+      Group = factor(Group, levels = sort(unique(Group)))
+    )
+
   p <- ggplot(plot_df, aes(x = Group, y = Freq * 100, fill = Haplotype)) +
     geom_col(colour = "white", linewidth = 0.3) +
-    scale_fill_manual(values = hap_pal, name = "Haplotype") +
+    scale_fill_manual(values = hap_pal, name = "Haplotype", drop = FALSE) +
     scale_y_continuous(expand = c(0, 0), limits = c(0, 102)) +
     labs(title    = sprintf("Haplotype Frequency by Cohort: %s", region_name),
          subtitle = "Stacked bars show haplotype frequency within each group",
@@ -1177,6 +1387,85 @@ make_cohort_freq_plot <- function(a1_mat, a2_mat, freq_df, metadata_df,
           legend.position = "right")
 
   SAVE(out_file, p, width = max(7, length(unique(plot_df$Group)) * 1.2 + 3), height = 5.5)
+}
+
+build_cohort_freq_plot_df <- function(a1_mat, a2_mat, freq_df, metadata_df, min_freq = 0.01) {
+  # Canonical order: H1 → HN by descending frequency, then "Other" last.
+  # freq_df rows are already ranked by Frequency desc (from make_em_freq_table).
+  shown_haps <- freq_df %>%
+    filter(Frequency >= min_freq) %>%
+    arrange(desc(Frequency)) %>%
+    pull(Haplotype_ID)
+  if (length(shown_haps) == 0) return(NULL)
+
+  hap1 <- make_binary_hap_strings(a1_mat)
+  hap2 <- make_binary_hap_strings(a2_mat)
+
+  # Map binary strings -> Haplotype_ID via freq_df
+  str_to_id <- setNames(freq_df$Haplotype_ID, freq_df$Allele_String)
+
+  # Vectorised: build long-form table directly without row-by-row appending
+  hid1 <- str_to_id[hap1]
+  hid2 <- str_to_id[hap2]
+  hid1[is.na(hid1) | !(hid1 %in% shown_haps)] <- "Other"
+  hid2[is.na(hid2) | !(hid2 %in% shown_haps)] <- "Other"
+  group_vec <- paste(metadata_df$Cohort, metadata_df$Tissue, sep = "\n")
+
+  rows <- data.frame(
+    Haplotype = c(hid1, hid2),
+    Group     = rep(group_vec, 2L),
+    stringsAsFactors = FALSE
+  )
+
+  bind_rows(rows) %>%
+    group_by(Group, Haplotype) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    group_by(Group) %>%
+    mutate(Freq = n / sum(n)) %>%
+    ungroup() %>%
+    mutate(
+      Haplotype = as.character(Haplotype),
+      Group = as.character(Group)
+    )
+}
+
+make_block_cohort_faceted_plot <- function(block_plot_df, out_file) {
+  if (is.null(block_plot_df) || nrow(block_plot_df) == 0) return(invisible(NULL))
+  block_plot_df <- block_plot_df %>%
+    mutate(
+      Haplotype = as.character(Haplotype),
+      Group = as.character(Group),
+      Block = as.character(Block)
+    )
+  shown_haps <- block_plot_df %>%
+    filter(Haplotype != "Other") %>%
+    pull(Haplotype) %>%
+    unique()
+  n_haps <- length(shown_haps)
+  hap_pal <- setNames(
+    c(RColorBrewer::brewer.pal(min(n_haps, 12), "Paired")[seq_len(min(n_haps, 12))],
+      if (n_haps > 12) scales::hue_pal()(n_haps - 12) else character(0),
+      "grey75"),
+    c(shown_haps, "Other")
+  )
+  block_plot_df <- block_plot_df %>%
+    mutate(
+      Haplotype = factor(Haplotype, levels = c(shown_haps, "Other")),
+      Group = factor(Group, levels = sort(unique(Group))),
+      Block = factor(Block, levels = unique(Block))
+    )
+  p <- ggplot(block_plot_df, aes(x = Group, y = Freq * 100, fill = Haplotype)) +
+    geom_col(colour = "white", linewidth = 0.25) +
+    facet_wrap(~Block, ncol = 5) +
+    scale_fill_manual(values = hap_pal, name = "Haplotype", drop = FALSE) +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, 102)) +
+    labs(title = "Haplotype frequency by cohort across all LD blocks",
+         subtitle = "Each panel shows the cohort-level haplotype composition for one r^2 = 0.80 LD block",
+         x = NULL, y = "Frequency (%)") +
+    theme(axis.text.x = element_text(size = 7),
+          strip.text = element_text(size = 8, face = "bold"),
+          legend.position = "right")
+  SAVE(out_file, p, width = 16, height = 10.5)
 }
 
 # -----------------------------------------------------------------------------
@@ -1318,8 +1607,8 @@ if (!requireNamespace("survminer", quietly = TRUE)) {
 cat("STEP 1: Loading phased genotypes and annotations\n")
 cat("----------------------------------------------------------------------\n")
 
-target_rsids <- read_excel(WHITELIST) %>%
-  pull(Variant_ID) %>%
+target_rsids <- read_excel(WHITELIST, sheet = "Common_SNP_Summary") %>%
+  pull(rsID) %>%
   as.character() %>%
   trimws() %>%
   unique()
@@ -1475,6 +1764,15 @@ if (RUN_BLOCK_ANALYSIS) {
 block_freq_tables <- list()
 block_assoc_tables <- list()
 block_summary_rows <- list()
+block_cohort_plot_rows <- list()
+block_cohort_fig_dir <- file.path(SUPP_FIG_DIR, "LD_Block_Cohort_Comparison")
+if (GENERATE_BLOCK_COHORT_FIGURES && !dir.exists(block_cohort_fig_dir)) {
+  dir.create(block_cohort_fig_dir, recursive = TRUE)
+}
+block_composition_fig_dir <- file.path(SUPP_FIG_DIR, "LD_Block_Composition")
+if (GENERATE_BLOCK_COHORT_FIGURES && !dir.exists(block_composition_fig_dir)) {
+  dir.create(block_composition_fig_dir, recursive = TRUE)
+}
 
 if (length(ld_blocks_by_threshold) > 0) {
   for (thr_label in names(ld_blocks_by_threshold)) {
@@ -1504,8 +1802,62 @@ if (length(ld_blocks_by_threshold) > 0) {
       summary_row$LD_Threshold <- thr
       summary_row$Threshold_Label <- thr_label
       block_summary_rows[[region_name]] <- summary_row
+
+      if (GENERATE_BLOCK_COHORT_FIGURES) {
+        block_plot_df <- build_cohort_freq_plot_df(
+          a1_mat      = a1[, idx, drop = FALSE],
+          a2_mat      = a2[, idx, drop = FALSE],
+          freq_df     = freq_obj$shown,
+          metadata_df = meta,
+          min_freq    = SUPP_MIN_FREQ
+        )
+        if (!is.null(block_plot_df) && nrow(block_plot_df) > 0) {
+          block_plot_df <- block_plot_df %>%
+            mutate(
+              Haplotype = as.character(Haplotype),
+              Group = as.character(Group),
+              Block = nm
+            )
+          block_cohort_plot_rows[[region_name]] <- block_plot_df
+        }
+
+        make_cohort_freq_plot(
+          a1_mat      = a1[, idx, drop = FALSE],
+          a2_mat      = a2[, idx, drop = FALSE],
+          freq_df     = freq_obj$shown,
+          metadata_df = meta,
+          region_name = sprintf("LD block %s (r^2 = %.2f)", nm, thr),
+          out_file    = file.path(block_cohort_fig_dir,
+                                  sprintf("19_LD_Block_Cohort_%s_%s.png", thr_label, nm)),
+          min_freq    = SUPP_MIN_FREQ,
+          hap_palette = .hap_palette
+        )
+      }
     }
   }
+}
+
+if (GENERATE_BLOCK_COHORT_FIGURES && length(block_freq_tables) > 0 && length(ld_blocks_by_threshold) > 0) {
+  make_block_cohort_comparison_plot(
+    block_freq_tables = block_freq_tables,
+    ld_blocks_by_threshold = ld_blocks_by_threshold,
+    a1_mat = a1,
+    a2_mat = a2,
+    metadata_df = meta,
+    out_file = file.path(block_cohort_fig_dir, "19_LD_Block_Cohort_AllBlocks_r2_080.png"),
+    top_n = MAIN_TOP_COMPARISON_HAPS
+  )
+}
+
+if (GENERATE_BLOCK_COHORT_FIGURES && length(block_freq_tables) > 0 && length(ld_blocks_by_threshold) > 0) {
+  cat(sprintf("  LD-block composition gate: cohort_figures=%s | block_freq_tables=%d | thresholds=%d\n",
+              GENERATE_BLOCK_COHORT_FIGURES, length(block_freq_tables), length(ld_blocks_by_threshold)))
+  make_block_haplotype_composition_plot(
+    block_freq_tables       = block_freq_tables,
+    ld_blocks_by_threshold  = ld_blocks_by_threshold,
+    snp_meta                = snp_meta,
+    out_file                = file.path(block_composition_fig_dir, "19_LD_Block_Haplotype_Composition_AllBlocks_r2_080.png")
+  )
 }
 
 # =============================================================================
@@ -1592,6 +1944,65 @@ cat("----------------------------------------------------------------------\n")
 
 wb <- createWorkbook()
 
+workbook_index <- data.frame(
+  Order = c(1, 2, 3, 4, 5, 6),
+  Sheet = c(
+    "Workbook_Index",
+    "Region_Summary",
+    "Analysis_Metadata",
+    "SNPs_Used",
+    "Full_Global_Freqs",
+    "Full_Associations"
+  ),
+  Priority = c("Guide", "Primary", "Primary", "Reference", "Primary", "Primary"),
+  Purpose = c(
+    "Guide to the main stage-15R workbook contents.",
+    "Compact region-level summary of the most thesis-useful haplotype results.",
+    "Analysis settings, thresholds, and retained sample context.",
+    "Reference SNP backbone used to define the haplotypes.",
+    "Shown full-region haplotypes retained for reporting.",
+    "Full-region haplotype association results."
+  ),
+  stringsAsFactors = FALSE
+)
+addWorksheet(wb, "Workbook_Index")
+writeData(wb, "Workbook_Index", workbook_index)
+
+summary_parts <- list(build_region_summary("Full_Region", "Full", snp_meta, full_freq, full_assoc))
+if (length(block_summary_rows) > 0) summary_parts[[length(summary_parts) + 1]] <- bind_rows(block_summary_rows)
+if (length(gene_summary_rows) > 0) summary_parts[[length(summary_parts) + 1]] <- bind_rows(gene_summary_rows)
+summary_rows <- bind_rows(summary_parts)
+addWorksheet(wb, "Region_Summary")
+writeData(wb, "Region_Summary", summary_rows)
+
+analysis_metadata <- data.frame(
+  Setting = c(
+    "Analysis_Label",
+    "Sample_Filter_Mode",
+    "Sample_Filter_File",
+    "Analysis_Context",
+    "LD_Block_Thresholds",
+    "Raw_P_Threshold",
+    "FDR_Threshold",
+    "Samples_Retained",
+    "Cohorts_Retained"
+  ),
+  Value = c(
+    ifelse(nzchar(ANALYSIS_LABEL), ANALYSIS_LABEL, "default"),
+    sample_filter_mode,
+    ifelse(nzchar(SAMPLE_INCLUDE_FILE), SAMPLE_INCLUDE_FILE, ""),
+    ifelse(nzchar(ANALYSIS_CONTEXT), ANALYSIS_CONTEXT, ""),
+    paste(format_threshold_label(LD_BLOCK_THRESHOLDS), collapse = ", "),
+    RAW_P_THRESHOLD,
+    FDR_THRESHOLD,
+    nrow(meta),
+    paste(sort(unique(meta$Cohort)), collapse = ", ")
+  ),
+  stringsAsFactors = FALSE
+)
+addWorksheet(wb, "Analysis_Metadata")
+writeData(wb, "Analysis_Metadata", analysis_metadata)
+
 addWorksheet(wb, "SNPs_Used")
 writeData(wb, "SNPs_Used", snp_meta)
 
@@ -1657,41 +2068,6 @@ for (nm in names(gene_assoc_tables)) {
   }
 }
 
-summary_parts <- list(build_region_summary("Full_Region", "Full", snp_meta, full_freq, full_assoc))
-if (length(block_summary_rows) > 0) summary_parts[[length(summary_parts) + 1]] <- bind_rows(block_summary_rows)
-if (length(gene_summary_rows) > 0) summary_parts[[length(summary_parts) + 1]] <- bind_rows(gene_summary_rows)
-summary_rows <- bind_rows(summary_parts)
-addWorksheet(wb, "Region_Summary")
-writeData(wb, "Region_Summary", summary_rows)
-
-analysis_metadata <- data.frame(
-  Setting = c(
-    "Analysis_Label",
-    "Sample_Filter_Mode",
-    "Sample_Filter_File",
-    "Analysis_Context",
-    "LD_Block_Thresholds",
-    "Raw_P_Threshold",
-    "FDR_Threshold",
-    "Samples_Retained",
-    "Cohorts_Retained"
-  ),
-  Value = c(
-    ifelse(nzchar(ANALYSIS_LABEL), ANALYSIS_LABEL, "default"),
-    sample_filter_mode,
-    ifelse(nzchar(SAMPLE_INCLUDE_FILE), SAMPLE_INCLUDE_FILE, ""),
-    ifelse(nzchar(ANALYSIS_CONTEXT), ANALYSIS_CONTEXT, ""),
-    paste(format_threshold_label(LD_BLOCK_THRESHOLDS), collapse = ", "),
-    RAW_P_THRESHOLD,
-    FDR_THRESHOLD,
-    nrow(meta),
-    paste(sort(unique(meta$Cohort)), collapse = ", ")
-  ),
-  stringsAsFactors = FALSE
-)
-addWorksheet(wb, "Analysis_Metadata")
-writeData(wb, "Analysis_Metadata", analysis_metadata)
-
 saveWorkbook(wb, OUT_XLSX, overwrite = TRUE)
 cat(sprintf("✓ Workbook saved: %s\n", OUT_XLSX))
 
@@ -1700,13 +2076,6 @@ cat(sprintf("✓ Workbook saved: %s\n", OUT_XLSX))
 # =============================================================================
 cat("\nSTEP 7: Generating figures\n")
 cat("----------------------------------------------------------------------\n")
-# ?? Main figure set ??????????????????????????????????????????????????????????
-make_haplotype_atlas_plot(
-  full_freq$all,
-  snp_meta,
-  out_file = file.path(MAIN_FIG_DIR, "Haplotype_Atlas_FullRegion.png")
-)
-
 make_full_region_comparison_plot(
   a1_mat = a1,
   a2_mat = a2,
@@ -1727,17 +2096,23 @@ make_key_block_overview_plot(
   out_file = file.path(MAIN_FIG_DIR, "Haplotype_KeyBlocks_Overview.png")
 )
 
+make_haplotype_atlas_plot(
+  full_freq$all,
+  snp_meta,
+  out_file = file.path(SUPP_FIG_DIR, "Haplotype_Atlas_FullRegion.png")
+)
+
 make_haplotype_composition_plot(
   freq_df      = full_freq$shown,
   snp_meta_sub = snp_meta,
   region_name  = "Full_Region",
-  out_file     = file.path(MAIN_FIG_DIR, "Haplotype_Composition_FullRegion.png")
+  out_file     = file.path(SUPP_FIG_DIR, "Haplotype_Composition_FullRegion.png")
 )
 if (!is.null(full_assoc) && nrow(full_assoc) > 0) {
   make_freq_comparison_plot(
     full_assoc,
     region_name = "Full_Region",
-    out_file    = file.path(MAIN_FIG_DIR, "Haplotype_FreqComparison_FullRegion.png"),
+    out_file    = file.path(SUPP_FIG_DIR, "Haplotype_FreqComparison_FullRegion.png"),
     comparison  = "All"
   )
 }

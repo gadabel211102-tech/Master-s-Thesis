@@ -9,9 +9,8 @@ how frequently they are observed in each cohort/tissue group.
 
 Definition of SNP used here
 ---------------------------
-A variant is treated as an established SNP if its combined non-Finnish European
-(NFE) allele frequency in gnomAD exceeds the configured threshold. Exome NFE is
-used when present, with genome NFE as fallback.
+A variant is treated as an established SNP if either the gnomAD exome NFE or
+genome NFE allele frequency exceeds the configured threshold.
 
 Outputs
 -------
@@ -29,8 +28,9 @@ import seaborn as sns
 from pipeline_utils import (
     attach_amplicon_warning_columns,
     build_amplicon_warning_lookup,
-    build_variant_id_series,
+    build_genomic_variant_id_series,
     combine_gnomad_nfe,
+    common_nfe_variant_mask,
     ensure_directory,
     get_paths,
     get_thresholds,
@@ -55,7 +55,7 @@ def identify_snps_pipeline():
     df = pd.read_excel(input_file, sheet_name="Biological_Annotations")
 
     required_cols = [
-        "Existing_variation", "SYMBOL", "HGVSp", "Cohort", "Tissue",
+        "Variant_Key", "CHROM", "POS", "REF", "ALT", "Cohort", "Tissue",
         "Sample", "Consequence", "IMPACT", "GT", "gnomADe_NFE_AF", "gnomADg_NFE_AF"
     ]
     validate_required_columns(df, required_cols, "Script 11 Biological_Annotations")
@@ -63,7 +63,7 @@ def identify_snps_pipeline():
     # Create a single harmonised gnomAD frequency field before thresholding so
     # that exome and genome sources are treated consistently.
     df = combine_gnomad_nfe(df)
-    df_snps_all = df[df["gnomAD_NFE_AF_combined"] > THRESHOLDS["min_nfe_af"]].copy()
+    df_snps_all = df[common_nfe_variant_mask(df, THRESHOLDS["min_nfe_af"])].copy()
     validate_nonempty(df_snps_all, "Script 11 common SNP subset")
 
     gt_map = {"0/0": "WT", "0/1": "Het", "1/0": "Het", "1/1": "Hom"}
@@ -75,11 +75,28 @@ def identify_snps_pipeline():
     df_snps = df_snps_all[df_snps_all["Genotype_Category"].isin(["Het", "Hom"])].copy()
     validate_nonempty(df_snps, "Script 11 common SNP carrier subset")
 
-    # Prefer rsIDs when available; otherwise fall back to a gene plus protein
-    # notation so every retained SNP remains traceable in the output tables.
-    df_snps["Variant_ID"] = build_variant_id_series(
-        df_snps["Existing_variation"], df_snps["SYMBOL"], df_snps["HGVSp"]
+    # Use genomic variant identity so non-coding common SNPs are preserved in
+    # the unique set instead of disappearing when no protein label is available.
+    df_snps["Variant_ID"] = build_genomic_variant_id_series(
+        variant_key_series=df_snps["Variant_Key"],
+        chrom_series=df_snps["CHROM"],
+        pos_series=df_snps["POS"],
+        ref_series=df_snps["REF"],
+        alt_series=df_snps["ALT"],
     )
+
+    # Extract rsID from Existing_variation so that script 15 (haplotype analysis)
+    # can match whitelist entries against rsID_clean from the annotated variants
+    # workbook. Existing_variation may contain compound strings like
+    # "rs11078928&COSV58780118" so we extract only the leading rs accession.
+    if "Existing_variation" in df_snps.columns:
+        df_snps["rsID"] = df_snps["Existing_variation"].astype(str).str.extract(r"(rs\d+)", expand=False)
+    else:
+        df_snps["rsID"] = pd.NA
+
+    df_snps["SYMBOL"] = df_snps["SYMBOL"].fillna("Intergenic")
+    df_snps["Consequence"] = df_snps["Consequence"].fillna("Unknown")
+    df_snps["IMPACT"] = df_snps["IMPACT"].fillna("Unknown")
     warning_lookup = build_amplicon_warning_lookup(df_snps, variant_col="Variant_ID", chrom_col="CHROM", pos_col="POS")
     print_validation_summary(df_snps, "Sample", "Script 11 SNP carrier subset", ["Cohort", "Tissue"])
     print(f"    Excluded GT 0/0 rows from carrier counts: {excluded_reference_rows}")
@@ -89,8 +106,10 @@ def identify_snps_pipeline():
     # sample cannot contribute multiple times through transcript-level repeats.
     # Denominators still come from the full common-SNP subset before removing WT rows.
     total_samples_dict = df_snps_all.groupby(["Cohort", "Tissue"])["Sample"].nunique().to_dict()
+
+    # Include rsID in the groupby so it is carried through to the pivot table.
     summary = df_snps.groupby([
-        "Variant_ID", "Cohort", "Tissue", "SYMBOL",
+        "Variant_ID", "rsID", "Cohort", "Tissue", "SYMBOL",
         "Consequence", "IMPACT", "gnomAD_NFE_AF_combined", "gnomAD_NFE_Source"
     ]).agg({"Sample": "nunique"}).reset_index()
     summary.rename(columns={"Sample": "Carrier_Count"}, inplace=True)
@@ -104,7 +123,7 @@ def identify_snps_pipeline():
     # group-by-group percentage layout easier to review in Excel.
     master_pivot = summary.pivot_table(
         index=[
-            "Variant_ID", "SYMBOL", "Consequence", "IMPACT",
+            "Variant_ID", "rsID", "SYMBOL", "Consequence", "IMPACT",
             "gnomAD_NFE_AF_combined", "gnomAD_NFE_Source"
         ],
         columns=["Cohort", "Tissue"],
@@ -117,16 +136,65 @@ def identify_snps_pipeline():
     master_pivot = attach_amplicon_warning_columns(master_pivot, warning_lookup)
 
     cols = master_pivot.columns.tolist()
+    # rsID is placed first so the whitelist workbook is easier to read
+    # downstream and the genomic coordinate remains available as a fallback.
     preferred_order = [
-        "Variant_ID", "Coverage_Risk_Flag", "Coverage_Risk_Amplicon",
+        "rsID", "Variant_ID", "Coverage_Risk_Flag", "Coverage_Risk_Amplicon",
         "Coverage_Risk_Region", "Coverage_Risk_Note", "SYMBOL", "Consequence", "IMPACT",
         "gnomAD_NFE_AF", "gnomAD_NFE_Source"
     ]
     freq_cols = [c for c in cols if c not in preferred_order]
     master_pivot = master_pivot[preferred_order + freq_cols]
 
+    n_with_rsid = master_pivot["rsID"].notna().sum()
+    print(f"    rsID populated for {n_with_rsid} / {len(master_pivot)} SNPs in whitelist")
+
     output_excel = os.path.join(output_dir, "GSDMB_Common_SNP_Frequency_Summary.xlsx")
-    master_pivot.to_excel(output_excel, index=False)
+    group_sample_counts = (
+        df_snps_all[["Cohort", "Tissue", "Sample"]]
+        .drop_duplicates()
+        .groupby(["Cohort", "Tissue"], as_index=False)
+        .agg(Total_Group_Samples=("Sample", "nunique"))
+        .sort_values(["Cohort", "Tissue"], kind="stable")
+        .reset_index(drop=True)
+    )
+    summary = summary.sort_values(
+        ["Variant_ID", "Cohort", "Tissue"],
+        kind="stable",
+    ).reset_index(drop=True)
+
+    workbook_readme = pd.DataFrame(
+        [
+            {
+                "Sheet": "Common_SNP_Summary",
+                "Purpose": "Wide thesis-facing summary of common SNP carrier frequencies by cohort and tissue group.",
+                "Notes": "This is the canonical whitelist sheet used by downstream scripts.",
+            },
+            {
+                "Sheet": "README",
+                "Purpose": "Workbook guide and SNP definition notes.",
+                "Notes": "A common SNP is defined here by combined gnomAD NFE frequency thresholding.",
+            },
+            {
+                "Sheet": "Carrier_Frequency_Long",
+                "Purpose": "Long-form per-group carrier counts and carrier frequencies.",
+                "Notes": "Useful for checking exact cohort and tissue frequencies without the wide pivot.",
+            },
+            {
+                "Sheet": "Group_Sample_Counts",
+                "Purpose": "Group denominators used for carrier-frequency calculations.",
+                "Notes": "These totals come from the common-SNP-ready annotated input before removing WT rows.",
+            },
+        ]
+    )
+
+    with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
+        # Keep the canonical summary as the first sheet so older helper scripts
+        # that read the workbook without an explicit sheet name remain compatible.
+        master_pivot.to_excel(writer, sheet_name="Common_SNP_Summary", index=False)
+        workbook_readme.to_excel(writer, sheet_name="README", index=False)
+        summary.to_excel(writer, sheet_name="Carrier_Frequency_Long", index=False)
+        group_sample_counts.to_excel(writer, sheet_name="Group_Sample_Counts", index=False)
 
     sns.set_style("whitegrid")
 

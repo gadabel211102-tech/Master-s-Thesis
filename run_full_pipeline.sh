@@ -67,11 +67,11 @@ TO_STEP="26"
 
 # Step groups mirror the workflow classification in README.md and
 # script_classification_table.tsv.
-STEP_ORDER=(01 02 02b 02c 03 04 04bV 04bP 05 06 07 07b 08 09 09b 10 11 12 13 14 15 15R 16 17 18 19 19b 20 20b 21 22 23 24 25 26)
-CORE_STEPS=(01 02 02b 05 06 07 11 12 15 15R 16 17 18 19b 20 20b 23)
+STEP_ORDER=(01 02 02b 02c 03 04 04bV 04bP 05 05b 06 07 07b 08 09 09b 10 11 12 13 14 15 15R 16 17 17b 18 19 19b 20 20b 21 22 23 24 25 26)
+CORE_STEPS=(01 02 02b 05 05b 06 07 11 12 15 15R 16 17 18 19b 20 20b 23)
 EXPLORATORY_VALIDATION_STEPS=(09b 13 19 22 24 25 26)
 UTILITY_REPORTING_STEPS=(02c 03 04 04bV 04bP 07b 08 09 10 14 21)
-PYTHON_STEPS=(02c 03 04 04bV 04bP 07 07b 08 09 09b 10 11 12 13 14 16 17 18 19 19b 20 20b 21 22 23 24 25 26)
+PYTHON_STEPS=(02c 03 04 04bV 04bP 05b 07 07b 08 09 09b 10 11 12 13 14 16 17 17b 18 19 19b 20 20b 21 22 23 24 25 26)
 BAM_STEPS=(01 02 02b 05 15)
 
 usage() {
@@ -93,7 +93,7 @@ Supported step labels:
   ${STEP_ORDER[*]}
 
 Profile contents:
-  core                01 02 02b 05 06 07 11 12 15 15R 16 17 18 19b 20 20b 23
+  core                01 02 02b 05 05b 06 07 11 12 15 15R 16 17 18 19b 20 20b 23
   exploratory         09b 13 19 22 24 25 26
   utility             02c 03 04 04bV 04bP 07b 08 09 10 14 21
   full                all classified steps in step order
@@ -286,12 +286,12 @@ ensure_prereqs() {
     command -v "${R_BIN}" >/dev/null 2>&1 || die "R executable not found on PATH: ${R_BIN}"
   fi
 
-  if should_run_any 02 05; then
+  if should_run_any 02 05 05b; then
     [[ -f "${REF_FA}" ]] || die "Reference FASTA not found: ${REF_FA}"
     [[ -f "${BED_FILE}" ]] || die "Target BED not found: ${BED_FILE}"
   fi
 
-  if should_run_any 02b 05; then
+  if should_run_any 02b 05 05b; then
     mkdir -p "${ROOT_DIR}/manifests"
   fi
 
@@ -443,6 +443,7 @@ if should_run_step 04; then announce_step "04" "Running technical audit"; run_py
 if should_run_step 04bV; then announce_step "04bV" "Building flagged amplicon failure visualisations"; run_python_script 04b_amplicon_failure_visualisation.py; fi
 if should_run_step 04bP; then announce_step "04bP" "Building the flagged amplicon overview panel"; run_python_script 04b_amplicon_failure_panel.py; fi
 if should_run_step 05; then run_variant_calling_loop; fi
+if should_run_step 05b; then announce_step "05b" "Force genotyping all cohort-observed loci across every sample"; run_python_script 05b_force_genotype_union_sites.py --project-root "${ROOT_DIR}" --reference "${REF_FA}" --output-dir "${ANALYSIS_ROOT}/05b_forced_genotypes" --threads "${THREADS}" --callable-dp "${MIN_DP}"; fi
 if should_run_step 06; then announce_step "06" "Annotating variants with VEP"; run_vep_script; fi
 if should_run_step 07; then announce_step "07" "Merging annotated VCFs into the canonical workbook"; run_python_script 07_merge_annotations.py; fi
 if should_run_step 07b; then announce_step "07b" "Running variant-level QC checks"; run_python_script 07b_variant_qc.py; fi
@@ -467,6 +468,7 @@ if should_run_step 15R; then
 fi
 if should_run_step 16; then announce_step "16" "Harmonising clinical workbooks"; run_python_script 16_excel_harmonisation.py; fi
 if should_run_step 17; then announce_step "17" "Running SNP-clinical association analysis"; run_python_script 17_snp_association.py; fi
+if should_run_step 17b; then announce_step "17b" "Running rare-variant association analysis"; run_python_script 17b_rare_variant_association.py; fi
 if should_run_step 18; then announce_step "18" "Running haplotype-clinical association analysis"; run_python_script 18_haplotype_association.py; fi
 if should_run_step 19; then
   announce_step "19" "Comparing study haplotypes against 1000 Genomes"
@@ -494,8 +496,12 @@ fi
 if should_run_step 25; then announce_step "25" "Running the focused rs11078928 / rs869402 haplotype analysis"; run_python_script 25_rs11078928_rs869402_haplotype_focus.py; fi
 if should_run_step 26; then announce_step "26" "Building the final SNP functional interpretation and biological-context layer"; run_python_script 26_snp_functional_interpretation.py; fi
 
-log "Pipeline run completed."
+if should_run_any 02 02b 19b; then
+  announce_step "QC-SUMMARY" "Refreshing the combined DNA/RNA sample-count summary"
+  run_python_script pipeline_sample_summary.py --project-root "${ROOT_DIR}" --analysis-root "${ANALYSIS_ROOT}"
+fi
 
+log "Pipeline run completed."
 
 
 

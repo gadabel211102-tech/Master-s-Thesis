@@ -11,8 +11,8 @@ closed-form contingency testing alone.
 
 Methodological rationale
 ------------------------
-The script keeps the SNP definition aligned with scripts 11 and 12 by using the
-combined gnomAD NFE allele frequency field. Comparison plots are expressed in
+The script keeps the SNP definition aligned with scripts 11 and 12 by using
+exome-or-genome gnomAD NFE AF > 1%. Comparison plots are expressed in
 proportional terms wherever possible so they do not visually overstate patterns
 from larger sample sets.
 
@@ -24,16 +24,22 @@ import numpy as np
 from scipy import stats
 import matplotlib.pyplot as plt
 import seaborn as sns
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
 import warnings
 from statsmodels.stats.multitest import multipletests
 
 from pipeline_utils import (
     attach_amplicon_warning_columns,
     build_amplicon_warning_lookup,
-    build_variant_id_series,
+    build_genomic_variant_id_series,
     combine_gnomad_nfe,
+    common_nfe_variant_mask,
     ensure_directory,
+    extract_rsid,
     find_col,
     get_paths,
     get_thresholds,
@@ -197,21 +203,24 @@ def run_permutation_analysis():
     sym_c = find_col(df, "SYMBOL")
     tis_c = find_col(df, "TISSUE")
     sam_c = find_col(df, "SAMPLE")
-    var_c = find_col(df, "Existing_variation")
-    hgv_c = find_col(df, "HGVSp")
+    var_key_c = find_col(df, "Variant_Key")
+    chrom_c = find_col(df, "CHROM")
+    pos_c = find_col(df, "POS")
+    ref_c = find_col(df, "REF")
+    alt_c = find_col(df, "ALT")
     coh_c = find_col(df, "COHORT")
     exome_nfe_c = find_col(df, "gnomADe_NFE_AF")
     genome_nfe_c = find_col(df, "gnomADg_NFE_AF")
     imp_c = find_col(df, "IMPACT")
     con_c = find_col(df, "CONSEQUENCE")
 
-    validate_required_columns(df, [sym_c, tis_c, sam_c, var_c, hgv_c, coh_c, exome_nfe_c, genome_nfe_c, imp_c, con_c], "Script 13 Biological_Annotations")
+    validate_required_columns(df, [sym_c, tis_c, sam_c, chrom_c, pos_c, ref_c, alt_c, coh_c, exome_nfe_c, genome_nfe_c, imp_c, con_c], "Script 13 Biological_Annotations")
 
     # --- Build combined NFE AF column ---
     df = combine_gnomad_nfe(df, exome_nfe_c, genome_nfe_c)
 
-    # --- Filter for common SNPs (>1% combined NFE AF) ---
-    df = df[df["gnomAD_NFE_AF_combined"] > THRESHOLDS["min_nfe_af"]].copy()
+    # --- Filter for common SNPs (>1% exome or genome NFE AF) ---
+    df = df[common_nfe_variant_mask(df, THRESHOLDS["min_nfe_af"], exome_nfe_c, genome_nfe_c)].copy()
     validate_nonempty(df, "Script 13 common SNP subset")
 
     # Standardise labels
@@ -222,8 +231,19 @@ def run_permutation_analysis():
     df = df[df[tis_c].isin(["Tumour", "Healthy"])].copy()
     validate_tissue_values(df, tis_c, "Script 13 filtered tissues")
 
-    # Create variant IDs
-    df["Variant_ID"] = build_variant_id_series(df[var_c], df[sym_c], df[hgv_c])
+    # Create genomic variant IDs
+    df["Variant_ID"] = build_genomic_variant_id_series(
+        variant_key_series=df[var_key_c] if var_key_c else None,
+        chrom_series=df[chrom_c],
+        pos_series=df[pos_c],
+        ref_series=df[ref_c],
+        alt_series=df[alt_c],
+    )
+    if "Existing_variation" in df.columns:
+        df["rsID"] = df["Existing_variation"].apply(extract_rsid)
+    else:
+        df["rsID"] = pd.NA
+    df["Variant_Display"] = df["rsID"].fillna(df["Variant_ID"])
     warning_lookup = build_amplicon_warning_lookup(df, variant_col="Variant_ID", chrom_col="CHROM", pos_col="POS")
     print_validation_summary(df, sam_c, "Script 13 filtered SNPs", [coh_c, tis_c])
 
@@ -283,6 +303,8 @@ def run_permutation_analysis():
 
             all_results.append({
                 "Cohort": cohort_name,
+                "Variant_Display": var_data["Variant_Display"].iloc[0],
+                "rsID": var_data["rsID"].iloc[0],
                 "Variant_ID": var,
                 "Symbol": var_data[sym_c].iloc[0],
                 "Impact": var_data[imp_c].iloc[0],
@@ -416,7 +438,7 @@ def run_permutation_analysis():
             print("\n  Top 5 SNPs by permutation test:")
             for _, row in top5.iterrows():
                 print(
-                    f"    {row['Variant_ID']} "
+                    f"    {row['Variant_Display']} "
                     f"(p={row['Permutation_P_Value']:.4e}, "
                     f"perm_FDR={row['Permutation_FDR']:.4e}, "
                     f"source={row['gnomAD_NFE_Source']})"

@@ -273,6 +273,51 @@ def build_variant_id_series(existing_series: pd.Series, symbol_series: pd.Series
     return rsids.fillna(fallback)
 
 
+def build_genomic_variant_id_series(
+    variant_key_series: pd.Series | None = None,
+    chrom_series: pd.Series | None = None,
+    pos_series: pd.Series | None = None,
+    ref_series: pd.Series | None = None,
+    alt_series: pd.Series | None = None,
+) -> pd.Series:
+    """Build a genomic variant identifier that preserves all called variants."""
+    if variant_key_series is not None:
+        variant_ids = variant_key_series.astype(str).str.strip().replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+    else:
+        index = next(
+            (series.index for series in [chrom_series, pos_series, ref_series, alt_series] if series is not None),
+            None,
+        )
+        variant_ids = pd.Series(pd.NA, index=index, dtype="object")
+
+    if all(series is not None for series in [chrom_series, pos_series, ref_series, alt_series]):
+        chrom = chrom_series.map(normalise_chromosome_label)
+        pos = pd.to_numeric(pos_series, errors="coerce").astype("Int64").astype(str).replace({"<NA>": ""})
+        ref = ref_series.astype(str).str.strip().str.upper().replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+        alt = alt_series.astype(str).str.strip().str.upper().replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+        fallback = (chrom + ":" + pos + ":" + ref.astype(str) + ":" + alt.astype(str)).where(
+            chrom.ne("") & pos.ne("") & ref.notna() & alt.notna(),
+            other=pd.NA,
+        )
+        variant_ids = variant_ids.fillna(fallback)
+
+    return variant_ids
+
+
+def common_nfe_variant_mask(
+    df: pd.DataFrame,
+    threshold: float,
+    exome_col: str = "gnomADe_NFE_AF",
+    genome_col: str = "gnomADg_NFE_AF",
+    combined_col: str = "gnomAD_NFE_AF_combined",
+) -> pd.Series:
+    """Return True for variants that are common in either gnomAD NFE source."""
+    exome = pd.to_numeric(df[exome_col], errors="coerce") if exome_col in df.columns else pd.Series(np.nan, index=df.index)
+    genome = pd.to_numeric(df[genome_col], errors="coerce") if genome_col in df.columns else pd.Series(np.nan, index=df.index)
+    combined = pd.to_numeric(df[combined_col], errors="coerce") if combined_col in df.columns else pd.Series(np.nan, index=df.index)
+    return exome.gt(float(threshold)).fillna(False) | genome.gt(float(threshold)).fillna(False) | combined.gt(float(threshold)).fillna(False)
+
+
 def pooled_control_frame(
     df: pd.DataFrame,
     cohort_col: str,
@@ -398,19 +443,26 @@ def load_common_snp_ld_reference(
 
     annot = pd.read_excel(annotated_path, sheet_name='Biological_Annotations')
     sym_c = find_col(annot, 'SYMBOL')
-    var_c = find_col(annot, 'Existing_variation')
-    hgv_c = find_col(annot, 'HGVSp')
+    variant_key_c = find_col(annot, 'Variant_Key')
+    chrom_c = find_col(annot, 'CHROM')
     exome_c = find_col(annot, 'gnomADe_NFE_AF')
     genome_c = find_col(annot, 'gnomADg_NFE_AF')
     pos_c = find_col(annot, 'POS')
     ref_c = find_col(annot, 'REF')
     alt_c = find_col(annot, 'ALT')
-    required = [sym_c, var_c, hgv_c, exome_c, genome_c, pos_c, ref_c, alt_c]
-    if any(col is None for col in required):
+    required = [sym_c, exome_c, genome_c, pos_c, ref_c, alt_c]
+    if any(col is None for col in required) or (variant_key_c is None and chrom_c is None):
         raise ValueError('Annotated report is missing one or more columns required to build the LD backbone.')
 
     annot = combine_gnomad_nfe(annot, exome_c, genome_c)
-    annot = annot[annot['gnomAD_NFE_AF_combined'] > float(min_nfe_af)].copy()
+    annot = annot[common_nfe_variant_mask(annot, float(min_nfe_af), exome_c, genome_c)].copy()
+    annot['Variant_ID'] = build_genomic_variant_id_series(
+        variant_key_series=annot[variant_key_c] if variant_key_c else None,
+        chrom_series=annot[chrom_c] if chrom_c else None,
+        pos_series=annot[pos_c],
+        ref_series=annot[ref_c],
+        alt_series=annot[alt_c],
+    )
     if common_snp_whitelist:
         whitelist_path = Path(common_snp_whitelist)
         if whitelist_path.exists():
@@ -418,9 +470,7 @@ def load_common_snp_ld_reference(
             variant_col = find_col(whitelist_df, 'Variant_ID')
             if variant_col is not None:
                 whitelist_ids = set(whitelist_df[variant_col].dropna().astype(str).str.strip())
-                annot['Variant_ID'] = build_variant_id_series(annot[var_c], annot[sym_c], annot[hgv_c])
                 annot = annot[annot['Variant_ID'].astype(str).isin(whitelist_ids)].copy()
-    annot['Variant_ID'] = build_variant_id_series(annot[var_c], annot[sym_c], annot[hgv_c])
     annot['POS_int'] = pd.to_numeric(annot[pos_c], errors='coerce').astype('Int64')
     annot['REF_clean'] = annot[ref_c].astype(str).str.strip().str.upper()
     annot['ALT_clean'] = annot[alt_c].astype(str).str.strip().str.upper()

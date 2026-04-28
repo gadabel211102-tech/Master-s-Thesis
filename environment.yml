@@ -1,0 +1,21 @@
+# Canonical Python dependency specification for the GSDMB pipeline.
+# Usable with either conda or micromamba.
+# Historical project runs may also refer to a local environment named tfm_env.
+name: tfm-gsdmb
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pandas
+  - numpy
+  - scipy
+  - matplotlib
+  - seaborn
+  - openpyxl
+  - statsmodels
+  - scikit-learn
+  - plotly
+  - biopython
+  - lifelines
+  - tqdm
+  - pysam

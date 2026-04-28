@@ -126,10 +126,20 @@ def parse_collab_core(path: Path):
             'Haplotype': str(hap).strip(),
             'Count': count_val,
             'Frequency': freq_val,
-            'Rank': None,
         })
     df = pd.DataFrame(rows)
-    df['Rank'] = df.groupby('Set')['Frequency'].rank(method='first', ascending=False).astype(int)
+
+    # rank() returns NaN for rows where Frequency is NaN.
+    # Use pandas nullable integer 'Int64' (capital I) so NaN ranks are
+    # preserved as pd.NA rather than crashing on .astype(int).
+    n_nan = df['Frequency'].isna().sum()
+    if n_nan > 0:
+        print(f"  WARNING: {n_nan} collaborator rows have NaN Frequency — their ranks will be pd.NA")
+    df['Rank'] = (
+        df.groupby('Set')['Frequency']
+        .rank(method='first', ascending=False)
+        .astype('Int64')
+    )
     return df.sort_values(['Set', 'Rank', 'Haplotype'])
 
 
