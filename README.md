@@ -13,11 +13,11 @@ The cleaned project is built around an explicitly unpaired study design:
 
 There are three different orders in this repository, and they should not be confused.
 
-1. Computational execution order
+1. Computational execution order: 
    Scripts that must run first because later stages depend on their outputs.
-2. Thesis or story order
+2. Thesis or story order: 
    The cleanest order for Methods, Results, and figure presentation.
-3. Naming or numbering order
+3. Naming or numbering order:
    The historical numbered filenames kept for stability and manuscript cross-reference.
 
 The numbered filenames are being kept as they are. The final clean-up is achieved by regrouping and documenting them properly rather than renumbering everything at the end.
