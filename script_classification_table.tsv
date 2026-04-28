@@ -41,7 +41,6 @@ install_haplotype_r_dependencies.R	./install_haplotype_r_dependencies.R	UTILITY_
 24_external_cross_validation.py	./24_external_cross_validation.py	EXPLORATORY_VALIDATION	Runs external breast and endometrial validation against female-only 1000 Genomes reference samples.	no	no
 25_rs11078928_rs869402_haplotype_focus.py	./25_rs11078928_rs869402_haplotype_focus.py	EXPLORATORY_VALIDATION	Performs a focused follow-up analysis on the rs11078928 and rs869402 haplotypic context.	no	no
 26_snp_functional_interpretation.py	./26_snp_functional_interpretation.py	EXPLORATORY_VALIDATION	Adds a SNP biological interpretation layer combining annotations, RNA context, and optional external support.	no	no
-27_breast_paired_validation.py	./27_breast_paired_validation.py	UTILITY_REPORTING	Historical paired breast tumour-normal prototype retained only for reference; it is not part of the active pipeline because the breast BAM cohort is unpaired.	no	no
 28_sample_similarity_audit.py	./28_sample_similarity_audit.py	UTILITY_REPORTING	Audits sample concordance, aliasing, and identity separation across the study set.	no	no
 29_collect_significant_survival_curves.py	./29_collect_significant_survival_curves.py	UTILITY_REPORTING	Bundles significant survival-curve pages into thesis-friendly PDFs and an index.	no	no
 association_runtime.py	./association_runtime.py	UTILITY_REPORTING	Shared runtime defaults used by the association and RNA scripts to keep paths and thresholds aligned.	yes	no
