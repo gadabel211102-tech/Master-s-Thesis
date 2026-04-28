@@ -127,11 +127,6 @@ These scripts are useful to keep in the GitHub repository, but they are not part
 - `28_sample_similarity_audit.py`
 - `29_collect_significant_survival_curves.py`
 
-### Archive or legacy candidates
-
-- `24_prepare_tcga_inputs.py`
-- `27_breast_paired_validation.py`
-- stray temporary files or placeholders that are not part of the workflow
 
 ## How to run
 
