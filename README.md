@@ -20,7 +20,6 @@ There are three different orders in this repository, and they should not be conf
 3. Naming or numbering order:
    The historical numbered filenames kept for stability and manuscript cross-reference.
 
-The numbered filenames are being kept as they are. The final clean-up is achieved by regrouping and documenting them properly rather than renumbering everything at the end.
 
 ## Canonical computational core
 
