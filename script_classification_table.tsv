@@ -37,12 +37,10 @@ install_haplotype_r_dependencies.R	./install_haplotype_r_dependencies.R	UTILITY_
 21_core_haplotype_comparison.py	./21_core_haplotype_comparison.py	UTILITY_REPORTING	Produces a compact collaborator-facing core haplotype summary when the external workbook is available.	no	no
 22_haplotype_first_interpretation.py	./22_haplotype_first_interpretation.py	EXPLORATORY_VALIDATION	Builds an interpretation layer for significant haplotypes; useful downstream context but not a required core generator.	no	no
 23_rna_integration.py	./23_rna_integration.py	CORE	Integrates RNA, significant SNPs, and significant haplotypes for the final thesis objective-2 reporting layer.	yes	yes
-24_prepare_tcga_inputs.py	./24_prepare_tcga_inputs.py	UTILITY_REPORTING	Historical TCGA-preparation helper retained only for reference; it is not part of the active pipeline because the TCGA germline branch was not accessible.	no	no
 24_external_cross_validation.py	./24_external_cross_validation.py	EXPLORATORY_VALIDATION	Runs external breast and endometrial validation against female-only 1000 Genomes reference samples.	no	no
 25_rs11078928_rs869402_haplotype_focus.py	./25_rs11078928_rs869402_haplotype_focus.py	EXPLORATORY_VALIDATION	Performs a focused follow-up analysis on the rs11078928 and rs869402 haplotypic context.	no	no
 26_snp_functional_interpretation.py	./26_snp_functional_interpretation.py	EXPLORATORY_VALIDATION	Adds a SNP biological interpretation layer combining annotations, RNA context, and optional external support.	no	no
 28_sample_similarity_audit.py	./28_sample_similarity_audit.py	UTILITY_REPORTING	Audits sample concordance, aliasing, and identity separation across the study set.	no	no
-29_collect_significant_survival_curves.py	./29_collect_significant_survival_curves.py	UTILITY_REPORTING	Bundles significant survival-curve pages into thesis-friendly PDFs and an index.	no	no
 association_runtime.py	./association_runtime.py	UTILITY_REPORTING	Shared runtime defaults used by the association and RNA scripts to keep paths and thresholds aligned.	yes	no
 objective2_gene_report_exports.py	./objective2_gene_report_exports.py	UTILITY_REPORTING	Shared export helpers used by the core objective-2 RNA workflow.	yes	no
 objective2_rna_qc_utils.py	./objective2_rna_qc_utils.py	UTILITY_REPORTING	Shared RNA QC and matching helpers used by stages 19b and 20.	yes	no
