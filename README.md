@@ -182,13 +182,12 @@ The repository is now best understood in five groups.
 These scripts are useful to keep in the GitHub repository, but they are not part of the canonical rerun launched by `run_full_pipeline.sh`.
 
 - `08b_bed_vs_detected_excel.py`
-- `28_sample_similarity_audit.py`
-- `29_collect_significant_survival_curves.py`
+- `27_sample_similarity_audit.py`
+- `28_collect_significant_survival_curves.py`
 
 ### Archive or legacy candidates
 
 - `24_prepare_tcga_inputs.py`
-- `27_breast_paired_validation.py`
 - stray temporary files or placeholders that are not part of the workflow
 
 ## How to run
