@@ -1,13 +1,62 @@
-# GSDMB Thesis Workflow
+# Reproducible Cancer Genomics Workflow for `GSDMB` and `17q12-q21`
 
-This repository contains the final analysis code for a Master's thesis on the clinical significance of polymorphic variation around `GSDMB` and the `17q12-q21` region in breast and endometrial cancer.
+This repository contains the analysis code for a Master's thesis on the
+clinical significance of polymorphic variation around `GSDMB` and the
+`17q12-q21` region in breast and endometrial cancer.
 
-The cleaned project is built around an explicitly unpaired study design:
+It is designed as a public-facing, code-only scientific repository that shows
+an end-to-end targeted cancer genomics workflow, including:
 
-- healthy and tumour cohorts are analysed as separate groups rather than matched tumour-normal pairs
+- sequencing QC and sample-level technical checks
+- variant calling and functional annotation
+- common SNP enrichment and association testing
+- haplotype phasing and haplotype association analysis
+- RNA QC, isoform analysis, and downstream RNA integration
+- reproducibility notes, workflow classification, and interpretation guardrails
+
+## What this repository demonstrates
+
+- End-to-end biomedical data analysis across Bash, Python, and R
+- Workflow orchestration for a multi-stage genomics pipeline
+- Variant interpretation around a focused disease-relevant locus
+- Integration of sequencing, haplotype, clinical, and RNA-derived results
+- Careful documentation of analytical boundaries and non-causal interpretation
+
+## Privacy and data availability
+
+This public repository does not include raw or participant-level study data.
+
+- No raw sequencing files such as BAMs, VCFs, or full clinical source workbooks
+- No patient-identifiable outputs or participant-level result exports
+- No generated `analysis_results/`, local runtime environments, or machine-local
+  reference bundles
+- Public-facing configuration should be based on
+  `pipeline_config.example.toml`, not local machine-specific overrides
+
+The aim is to make the code structure, workflow logic, and reproducibility
+approach visible without exposing restricted research inputs.
+
+## Study design at a glance
+
+The active project is built around an explicitly unpaired study design:
+
+- healthy and tumour cohorts are analysed as separate groups rather than
+  matched tumour-normal pairs
 - tumour-versus-healthy comparisons are used for risk or enrichment questions
 - tumour-only analyses are used for clinicopathological associations
-- RNA integration is a downstream objective built on the cleaned DNA and haplotype backbone
+- RNA integration is a downstream objective built on the DNA and haplotype
+  backbone
+
+## Repository snapshot
+
+- `run_full_pipeline.sh`: main launcher for the documented rerun profiles
+- numbered `.py`, `.sh`, and `.R` scripts: thesis workflow stages retained with
+  stable historical numbering
+- `docs/notes/`: pipeline, reproducibility, methods-alignment, and repository
+  guidance
+- `script_classification_table.tsv`: concise machine-readable stage
+  classification
+- `pipeline_config.example.toml`: safe public template for configuration
 
 ## Pipeline logic at a glance
 
@@ -133,8 +182,14 @@ The repository is now best understood in five groups.
 These scripts are useful to keep in the GitHub repository, but they are not part of the canonical rerun launched by `run_full_pipeline.sh`.
 
 - `08b_bed_vs_detected_excel.py`
-- `27_sample_similarity_audit.py`
+- `28_sample_similarity_audit.py`
+- `29_collect_significant_survival_curves.py`
 
+### Archive or legacy candidates
+
+- `24_prepare_tcga_inputs.py`
+- `27_breast_paired_validation.py`
+- stray temporary files or placeholders that are not part of the workflow
 
 ## How to run
 
@@ -201,4 +256,9 @@ Core outputs are written under `analysis_results/`, especially:
 
 ## Public repository note
 
-The tracked `pipeline_config.toml` in this workspace still reflects a local machine setup. For GitHub or examiner-facing sharing, use `pipeline_config.example.toml` as the public template and keep local path overrides out of the repository.
+For GitHub, examiner-facing sharing, or professional portfolio use:
+
+- keep `pipeline_config.example.toml` as the public template
+- do not track local machine-specific configuration overrides
+- do not track local third-party runtimes or bundled jars unless there is a
+  clear redistribution reason
