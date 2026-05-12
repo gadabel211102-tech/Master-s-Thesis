@@ -1391,7 +1391,7 @@ def survival_analysis(merged: pd.DataFrame) -> Tuple[pd.DataFrame, List]:
                 )
                 ax.set_xlabel(f"{endpoint} (months)")
                 ax.set_ylabel("Survival probability")
-                ax.legend(fontsize=8)
+                ax.legend(fontsize=8, title="Haplotype group")
                 _style_ax(ax)
                 plt.tight_layout()
                 km_pages.append(fig)
@@ -1565,12 +1565,12 @@ def make_volcano(tvh: pd.DataFrame, out_dir: Path):
                 right_hits.append(point)
         _add_margin_labels(ax, left_hits, side="left", max_labels=4)
         _add_margin_labels(ax, right_hits, side="right", max_labels=4)
-    ax.axhline(-np.log10(0.05), ls="--", c="#aaaaaa", lw=1, label="p=0.05")
+    ax.axhline(-np.log10(0.05), ls="--", c="#aaaaaa", lw=1, label="P = 0.05")
     ax.axvline(0, ls=":", c="#cccccc", lw=0.8)
-    ax.set_xlabel("log₂(OR)  —  tumour vs control")
-    ax.set_ylabel("-log₁₀(p)")
-    ax.set_title(tagged_title("Haplotype Volcano", COMPARATIVE_TAG), fontweight="bold")
-    ax.legend(fontsize=8.5, loc="upper left", bbox_to_anchor=(1.01, 1.0), frameon=True)
+    ax.set_xlabel("log₂ odds ratio (tumour / control)")
+    ax.set_ylabel("-log₁₀(P value)")
+    ax.set_title(tagged_title("Haplotype tumour-control association volcano", COMPARATIVE_TAG), fontweight="bold")
+    ax.legend(fontsize=8.5, loc="upper left", bbox_to_anchor=(1.01, 1.0), frameon=True, title="Cohort")
     _style_ax(ax)
     plt.tight_layout(rect=[0, 0, 0.88, 1])
     out = out_dir / "18_Haplo_Volcano_raw_p.png"
@@ -1584,7 +1584,7 @@ def make_heatmap(clin_res: pd.DataFrame, cohort_label: str,
     """
     Dual-panel heatmap showing ALL haplotypes with global frequency >= MIN_HAP_FREQ.
 
-    Panel A  -- -log10(p) for each haplotype x clinical variable combination.
+    Panel A  -- -log10(P value) for each haplotype x clinical variable combination.
                 Cells with p < 0.05 annotated with "*"; p < 0.01 with "**".
     Panel B  -- Effect size: log2(OR) for binary/nominal variables, or
                 median(carriers) - median(non-carriers) for continuous variables.
@@ -1673,7 +1673,7 @@ def make_heatmap(clin_res: pd.DataFrame, cohort_label: str,
     ax_es  = fig.add_subplot(gs[1])
     ax_bar = fig.add_subplot(gs[2])
 
-    # --- Panel A: -log10(p) ---
+    # --- Panel A: -log10(P value) ---
     log_p_mat = -np.log10(pivot_p.fillna(1).clip(lower=1e-300))
     vmax_p = max(3.0, float(log_p_mat.max().max()))
 
@@ -1685,7 +1685,7 @@ def make_heatmap(clin_res: pd.DataFrame, cohort_label: str,
                 annot_kws={"size": ann_fs + 1, "weight": "bold", "color": "#333333"},
                 linewidths=0.25, linecolor="#e0e0e0",
                 vmin=0, vmax=vmax_p,
-                cbar_kws={"label": "-log10(p)", "shrink": 0.55},
+                cbar_kws={"label": "-log10(P value)", "shrink": 0.55},
                 xticklabels=True, yticklabels=True)
     ax_p.set_title(f"Significance [{title_suffix}]", fontsize=9, fontweight="bold", pad=6)
     ax_p.set_xlabel("")
@@ -1711,7 +1711,7 @@ def make_heatmap(clin_res: pd.DataFrame, cohort_label: str,
                 mask = np.isfinite(col_vals) & (col_vals > 0)
                 es_display[mask, ci] = np.log2(col_vals[mask])
                 es_display[~mask & np.isfinite(col_vals), ci] = np.nan
-        cbar_label = "log2(OR)  /  Δmedian"
+        cbar_label = "log2(OR) / Δ median"
     else:
         es_display = es_vals
         cbar_label = "Δmedian (carriers − non-carriers)"
@@ -1743,8 +1743,8 @@ def make_heatmap(clin_res: pd.DataFrame, cohort_label: str,
     ax_bar.set_xlim(0, max(xmax_bar, 5))
     ax_bar.set_ylim(0, n_haps)
     ax_bar.set_yticks([])
-    ax_bar.set_xlabel("Global\nfreq (%)", fontsize=7.5)
-    ax_bar.set_title("Global Freq.", fontsize=9, fontweight="bold")
+    ax_bar.set_xlabel("Global\nfrequency (%)", fontsize=7.5)
+    ax_bar.set_title("Global frequency", fontsize=9, fontweight="bold")
     ax_bar.tick_params(axis="x", labelsize=7)
     ax_bar.spines["top"].set_visible(False)
     ax_bar.spines["right"].set_visible(False)
@@ -1755,7 +1755,7 @@ def make_heatmap(clin_res: pd.DataFrame, cohort_label: str,
 
     fig.suptitle(
         f"Haplotype-Clinical Heatmap: {cohort_label} ({title_suffix})\n"
-        f"Haplotypes >= {MIN_HAP_FREQ*100:.0f}% global frequency | * p<0.05 | ** p<0.01",
+        f"Haplotypes >= {MIN_HAP_FREQ*100:.0f}% global frequency | * P<0.05 | ** P<0.01",
         fontsize=10,
         fontweight="bold",
         y=0.97,
@@ -1783,7 +1783,7 @@ def make_forest(clin_res: pd.DataFrame, cohort_label: str, out_path: Path):
     ax.set_yticks(list(ys))
     ax.set_yticklabels([_wrap_label(f"{r['Haplotype_ID']} | {r['Clin_Label']}", width=32, max_lines=2)
                         for _, r in sub.iterrows()], fontsize=8)
-    ax.set_xlabel("Odds Ratio (unadjusted)")
+    ax.set_xlabel("Odds ratio (unadjusted)")
     ax.set_title(
         f"Binary Clinical Outcomes: {cohort_label}",
         fontweight="bold",
@@ -1850,7 +1850,7 @@ def make_risk_forest(risk_res: pd.DataFrame, out_path: Path):
     ax.set_yticks(ys)
     ax.set_yticklabels([_wrap_label(f"{r['Haplotype_ID']} ({r['Cohort']})", width=24, max_lines=2)
                         for _, r in df.iterrows()], fontsize=8.5)
-    ax.set_xlabel("Odds Ratio — unadjusted (95% CI)", fontsize=10)
+    ax.set_xlabel("Odds ratio, unadjusted (95% CI)", fontsize=10)
     ax.set_title(
         "Associations Between GSDMB Haplotypes and Cancer Risk",
         fontweight="bold",
@@ -1863,7 +1863,7 @@ def make_risk_forest(risk_res: pd.DataFrame, out_path: Path):
                           df.get("OR_CI95_Hi", pd.Series(dtype=float))]).dropna()
     if all_vals.min() > 0:
         ax.set_xscale("log")
-        ax.set_xlabel("Odds Ratio — unadjusted (95% CI, log scale)", fontsize=10)
+        ax.set_xlabel("Odds ratio, unadjusted (95% CI, log scale)", fontsize=10)
         from matplotlib.ticker import ScalarFormatter
         ax.xaxis.set_major_formatter(ScalarFormatter())
         ax.xaxis.get_major_formatter().set_scientific(False)
@@ -2031,7 +2031,7 @@ def make_haplotype_composition_plots(tvh: pd.DataFrame, merged: pd.DataFrame, ou
             ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f'{v:.0f}%'))
             ax.set_ylabel('Samples by haplotype state (%)', fontsize=9)
             p_val = row['FDR_P_Value'] if bool(row.get('FDR_Sig', False)) else row['P_Value']
-            sig_label = 'FDR' if bool(row.get('FDR_Sig', False)) else ('p<0.05' if bool(row.get('Nominal_Sig', False)) else 'top hit')
+            sig_label = 'FDR' if bool(row.get('FDR_Sig', False)) else ('P<0.05' if bool(row.get('Nominal_Sig', False)) else 'top hit')
             ax.set_title(f'Haplotype {hap_id}\nOR={row["OR"]:.2f} | p={p_val:.3g} ({sig_label})', fontsize=8.5, fontweight='bold')
             _style_ax(ax)
 
@@ -2039,7 +2039,7 @@ def make_haplotype_composition_plots(tvh: pd.DataFrame, merged: pd.DataFrame, ou
             ax.set_visible(False)
 
         handles = [mpatches.Patch(facecolor=HAPLOTYPE_STATUS_COLORS[s], edgecolor='#4A4A4A', hatch=status_hatch[s], label=s) for s in status_order]
-        fig.legend(handles, status_order, title='Haplotype state (WT / Het / Hom)', loc='upper center', ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.02))
+        fig.legend(handles, status_order, title='Haplotype state (wild-type / heterozygous / homozygous)', loc='upper center', ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.02))
         fig.suptitle(tagged_title(f'Haplotype-state composition in tumour and pooled control samples: {cohort}', COMPARATIVE_TAG), fontsize=12, fontweight='bold', y=1.04)
         plt.tight_layout(rect=[0, 0, 1, 0.95])
         out_path = out_dir / f'18_HaplotypeComposition_{cohort}.png'

@@ -27,7 +27,28 @@ from objective2_gene_report_exports import export_panel_gene_reports
 from sample_identity_utils import build_analysis_sample_map
 warnings.filterwarnings("ignore")
 D=script20_defaults(); MIN_NFE=float(D["min_nfe_af"]); MIN_HAP=float(D["min_hap_freq"]); MIN_C=int(D["min_carriers"]); FDR=float(D["fdr_threshold"])
-ISO=["G1","G2","G3","G3b","G4"]; ENDPTS=ISO+["GSDMB","pyroptotic_isoform_fraction","non_pyroptotic_isoform_fraction","G4_vs_total","G2_vs_total"]
+ISO=["G1","G2","G3","G3b","G4"]
+REQUESTED_ENDPOINTS=[
+    "GSDMB",
+    "GSDMB1_expression",
+    "GSDMB2_expression",
+    "GSDMB3_expression",
+    "GSDMB4_expression",
+    "exon6_positive_fraction",
+    "exon6_positive_to_negative_log2",
+    "exon7_containing_fraction",
+    "exon7_deficient_fraction",
+    "exon7_containing_to_deficient_log2",
+    "GSDMB2_fraction",
+    "GSDMB_to_ERBB2_ratio",
+    "exon6_positive_GSDMB_to_ERBB2_ratio",
+]
+LEGACY_SUPPORT_ENDPOINTS=[
+    "pyroptotic_isoform_fraction","non_pyroptotic_isoform_fraction","G4_vs_total","G2_vs_total",
+    "exon6_containing_fraction","exon6_lacking_fraction","exon6_balance_log2",
+    "exon7_lacking_fraction","exon7_balance_log2",
+]
+ENDPTS=REQUESTED_ENDPOINTS
 TMAP={"breast tumor":("Breast","Tumour","Breast_Tumour","primary_tumour"),"breast tumour":("Breast","Tumour","Breast_Tumour","primary_tumour"),"breast normal":("Breast","Healthy","Breast_Normal","context_control"),"endometrial cancer":("Endometrial","Tumour","Endometrial_Tumour","primary_tumour"),"endometrial normal":("Endometrial","Healthy","Endometrial_Normal","context_control"),"endometrial_normal":("Endometrial","Healthy","Endometrial_Normal","context_control"),"ovarian":("Ovarian","Tumour","Ovarian","excluded"),"ovarian organoids":("Ovarian","Tumour","Ovarian_Organoids","excluded"),"cell line":("CellLine","Unknown","Cell_Line","excluded")}
 CB_CORE={"BREAST_RECURRENCE_DERIVED":("binary","Recurrence / progression",1),"BREAST_METASTASIS_DERIVED":("binary","Distant metastasis",1),"BREAST_ANY_METASTASIS_BIN":("binary","Any metastasis",1),"BREAST_EXITUS_DERIVED":("binary","Death",1),"BREAST_OS_MONTHS_DERIVED":("continuous","Overall survival (months)",1)}
 CB_SUPPLEMENTARY={"BREAST_HER2_SUBTYPE":("nominal","HER2 subtype",0),"BREAST_DX_TYPE":("nominal","Histological diagnosis",0),"BREAST_P53_NUMERIC":("continuous","p53",0)}
@@ -58,6 +79,9 @@ def first(x):
 def z(x):
     x=pd.to_numeric(x,errors="coerce"); sd=x.std(ddof=0)
     return (x-x.mean())/sd if pd.notna(sd) and sd!=0 else pd.Series(np.nan,index=x.index)
+def log2_ratio(numer,denom,pseudocount=1e-6):
+    numer=pd.to_numeric(numer,errors="coerce"); denom=pd.to_numeric(denom,errors="coerce")
+    return np.log2((numer+pseudocount)/(denom+pseudocount))
 def bh(vals):
     a=np.asarray(vals,dtype=float); out=np.full(a.shape,np.nan); m=np.isfinite(a)
     if not m.any(): return out
@@ -72,7 +96,7 @@ def add_fdr(df,p,grp):
     return df
 def sx(v):
     t=s(v)
-    for pat,fmt in [(r"^(SNP_(?:AT|EN|MN|MT-T)_\d+)",lambda m:m.group(1).upper()),(r"^SNP_DNA_(EN|MN|AT)_(\d+)",lambda m:f"SNP_{m.group(1).upper()}_{m.group(2)}"),(r"^SNP_DNA_MT[-_]T_(\d+)",lambda m:f"SNP_MT-T_{m.group(1)}"),(r"^DNA_SNP_(EN|MN|AT)_(\d+)",lambda m:f"SNP_{m.group(1).upper()}_{m.group(2)}"),(r"^DNA_(AT|EN|MN)_(\d+)",lambda m:f"SNP_{m.group(1).upper()}_{m.group(2)}"),(r"^DNA_(?:SNP_)?MT[-_]T_(\d+)",lambda m:f"SNP_MT-T_{m.group(1)}"),(r"^MAMAH2_MT[-_]T_(\d+)",lambda m:f"SNP_MT-T_{m.group(1)}"),(r"^MAMAH2_MT[-_]N_(\d+)",lambda m:f"SNP_MN_{m.group(1)}"),(r"^RNA_SNP_(AT|EN|MN|MT-T)_(\d+)",lambda m:f"SNP_{m.group(1).upper()}_{m.group(2)}"),(r"^SNP_RNA_(AT|EN|MN|MT-T)_(\d+)",lambda m:f"SNP_{m.group(1).upper()}_{m.group(2)}"),(r"^RNA_(AT|EN|MN)_(\d+)",lambda m:f"SNP_{m.group(1).upper()}_{m.group(2)}"),(r"^RNA_MT[-_]T_(\d+)",lambda m:f"SNP_MT-T_{m.group(1)}")]:
+    for pat,fmt in [(r"^(SNP_(?:AT|EN|MN|MT-T)_\d+)",lambda m:m.group(1).upper()),(r"^SNP_DNA_(EN|MN|AT)_(\d+)",lambda m:f"SNP_{m.group(1).upper()}_{m.group(2)}"),(r"^SNP_DNA_MT[-_]T_(\d+)",lambda m:f"SNP_MT-T_{m.group(1)}"),(r"^DNA_SNP_(EN|MN|AT)_(\d+)",lambda m:f"SNP_{m.group(1).upper()}_{m.group(2)}"),(r"^DNA_(AT|EN|MN)_(\d+)",lambda m:f"SNP_{m.group(1).upper()}_{m.group(2)}"),(r"^DNA_(?:SNP_)?MT[-_]T_(\d+)",lambda m:f"SNP_MT-T_{m.group(1)}"),(r"^MAMAH2_MT[-_]T_(\d+)",lambda m:f"SNP_MT-T_{m.group(1)}"),(r"^MAMAH2_MT[-_]N_(\d+)",lambda m:f"SNP_MT-T_{m.group(1)}"),(r"^RNA_SNP_(AT|EN|MN|MT-T)_(\d+)",lambda m:f"SNP_{m.group(1).upper()}_{m.group(2)}"),(r"^SNP_RNA_(AT|EN|MN|MT-T)_(\d+)",lambda m:f"SNP_{m.group(1).upper()}_{m.group(2)}"),(r"^RNA_(AT|EN|MN)_(\d+)",lambda m:f"SNP_{m.group(1).upper()}_{m.group(2)}"),(r"^RNA_MT[-_]T_(\d+)",lambda m:f"SNP_MT-T_{m.group(1)}"),(r"^RNA_MT[-_]N_(\d+)",lambda m:f"SNP_MT-T_{m.group(1)}")]:
         m=re.match(pat,t,re.I)
         if m: return fmt(m)
     return None
@@ -177,11 +201,37 @@ def load_expr(path):
     key=[c for c in ["NOMBRE DE LA MUESTRA","CODIGO JC"] if c in eva.columns]; sup=[c for c in ["observaciones EVA","TIENEN RNA","FALTA MUESTRA"] if c in eva.columns]
     if key: df=df.merge(eva[key+sup].drop_duplicates(),on=key,how="left")
     for c in set(ISO+["GSDMB"]): df[c]=pd.to_numeric(df.get(c),errors="coerce")
+    if "ERBB2" in df.columns:
+        df["ERBB2"]=pd.to_numeric(df["ERBB2"],errors="coerce")
+    else:
+        df["ERBB2"]=np.nan
+    df["GSDMB1_expression"]=df["G1"]
+    df["GSDMB2_expression"]=df["G2"]
+    df["GSDMB3_expression"]=df[["G3","G3b"]].sum(axis=1,min_count=1)
+    df["GSDMB4_expression"]=df["G4"]
     df["pyroptotic_isoform_fraction"]=df[["G3","G3b","G4"]].sum(axis=1,min_count=1); df["non_pyroptotic_isoform_fraction"]=df[["G1","G2"]].sum(axis=1,min_count=1); df["isoform_total_sum"]=df[ISO].sum(axis=1,min_count=1)
     med=pd.to_numeric(df["isoform_total_sum"],errors="coerce").median(skipna=True); lo,hi=(95,105) if pd.notna(med) and med>2 else (0.95,1.05)
     df["isoform_total_scale"]="percentage" if pd.notna(med) and med>2 else "fraction"; df["isoform_total_flag"]=df["isoform_total_sum"].notna()&~df["isoform_total_sum"].between(lo,hi)
     df["G4_vs_total"]=np.where(df["isoform_total_sum"]>0,df["G4"]/df["isoform_total_sum"],np.nan); df["G2_vs_total"]=np.where(df["isoform_total_sum"]>0,df["G2"]/df["isoform_total_sum"],np.nan)
-    df["endpoint_missing_count"]=df[["G1","G2","G3","G3b","G4","GSDMB","pyroptotic_isoform_fraction"]].isna().sum(axis=1)
+    canonical_total=df[["G1","G2","G3","G3b","G4"]].sum(axis=1,min_count=1)
+    exon6_containing=df[["G3","G3b","G4"]].sum(axis=1,min_count=1)
+    exon6_lacking=df[["G1","G2"]].sum(axis=1,min_count=1)
+    exon7_containing=df[["G1","G3","G3b"]].sum(axis=1,min_count=1)
+    exon7_lacking=df[["G2","G4"]].sum(axis=1,min_count=1)
+    df["exon6_positive_fraction"]=np.where(canonical_total>0,exon6_containing/canonical_total,np.nan)
+    df["exon6_positive_to_negative_log2"]=log2_ratio(exon6_containing,exon6_lacking)
+    df["exon7_deficient_fraction"]=np.where(canonical_total>0,exon7_lacking/canonical_total,np.nan)
+    df["exon7_containing_to_deficient_log2"]=log2_ratio(exon7_containing,exon7_lacking)
+    df["GSDMB2_fraction"]=np.where(canonical_total>0,df["G2"]/canonical_total,np.nan)
+    df["GSDMB_to_ERBB2_ratio"]=np.where(df["ERBB2"]>0,df["GSDMB"]/df["ERBB2"],np.nan)
+    df["exon6_positive_GSDMB_to_ERBB2_ratio"]=np.where(df["ERBB2"]>0,exon6_containing/df["ERBB2"],np.nan)
+    df["exon6_containing_fraction"]=df["exon6_positive_fraction"]
+    df["exon6_lacking_fraction"]=np.where(canonical_total>0,exon6_lacking/canonical_total,np.nan)
+    df["exon6_balance_log2"]=df["exon6_positive_to_negative_log2"]
+    df["exon7_containing_fraction"]=np.where(canonical_total>0,exon7_containing/canonical_total,np.nan)
+    df["exon7_lacking_fraction"]=df["exon7_deficient_fraction"]
+    df["exon7_balance_log2"]=df["exon7_containing_to_deficient_log2"]
+    df["endpoint_missing_count"]=df[[e for e in REQUESTED_ENDPOINTS if e in df.columns]].isna().sum(axis=1)
     df["raw1"]=df["CODIGO JC"].fillna(df["NOMBRE DE LA MUESTRA"]); df["raw2"]=df["NOMBRE DE LA MUESTRA"].fillna(df["CODIGO JC"]); df["sx1"]=df["raw1"].map(sx); df["sx2"]=df["raw2"].map(sx)
     return df
 def load_master(path):
@@ -353,7 +403,7 @@ def bridge(snp,hap,clin):
     out=gdf.merge(cdf,on=["Cohort","Endpoint"],how="outer"); out["Bridge_Signal"]=(out["Num_Genetic_Hits"].fillna(0)+out["Num_Clinical_Hits"].fillna(0))>=2; return out.sort_values(["Bridge_Signal","Cohort","Endpoint"],ascending=[False,True,True])
 
 def panel_cols(df):
-    exc=set(ENDPTS+["NOMBRE DE LA MUESTRA","CODIGO JC","Tissue","SNP28","rs869402","observaciones EVA","TIENEN RNA","FALTA MUESTRA","cohort","tumour_normal","analysis_group","analysis_role","raw1","raw2","sx1","sx2","snp_code","match_status","match_method","match_candidates","master_join_success","analysis_include_primary","isoform_total_sum","isoform_total_scale","isoform_total_flag","endpoint_missing_count"]+RNA_QC_COLUMNS)
+    exc=set(ENDPTS+LEGACY_SUPPORT_ENDPOINTS+ISO+["NOMBRE DE LA MUESTRA","CODIGO JC","Tissue","SNP28","rs869402","observaciones EVA","TIENEN RNA","FALTA MUESTRA","cohort","tumour_normal","analysis_group","analysis_role","raw1","raw2","sx1","sx2","snp_code","match_status","match_method","match_candidates","master_join_success","analysis_include_primary","isoform_total_sum","isoform_total_scale","isoform_total_flag","endpoint_missing_count"]+RNA_QC_COLUMNS)
     return sorted([c for c in df.columns if c not in exc and pd.to_numeric(df[c],errors="coerce").notna().sum()>=10])
 
 def compute_immune_response_score(df):
@@ -368,7 +418,7 @@ def compute_immune_response_score(df):
 
 def exploratory(expr,gl,hc,snp,hap,genes):
     if not genes: return pd.DataFrame({"Note":["No exploratory panel-gene columns were detected."]})
-    fs=[] if snp.empty else snp[(snp["Endpoint"].isin(["GSDMB","pyroptotic_isoform_fraction"]))&(snp["P_Value"]<0.05)]["Variant_ID"].dropna().astype(str).unique().tolist()
+    fs=[] if snp.empty else snp[(snp["Endpoint"].isin(["GSDMB","exon6_positive_fraction","exon6_positive_to_negative_log2"]))&(snp["P_Value"]<0.05)]["Variant_ID"].dropna().astype(str).unique().tolist()
     fh=[] if hap.empty else hap[(hap["Endpoint"].isin(["GSDMB","pyroptotic_isoform_fraction"]))&(hap["P_Value"]<0.05)]["Haplotype_ID"].dropna().astype(str).unique().tolist()
     if not fs and not fh: return pd.DataFrame({"Note":["No nominally significant GSDMB-core genetic signals were available for exploratory panel-gene testing."]})
     rows=[]
@@ -434,22 +484,26 @@ def plot_dist(df,out,controls):
     if p.empty or not order:
         return
     endpoints=[
-        "G1","G2","G3",
-        "G3b","G4","GSDMB",
-        "pyroptotic_isoform_fraction","non_pyroptotic_isoform_fraction","G4_vs_total",
+        "GSDMB","GSDMB1_expression","GSDMB2_expression",
+        "GSDMB3_expression","GSDMB4_expression","exon6_positive_fraction",
+        "exon6_positive_to_negative_log2","exon7_containing_fraction","exon7_deficient_fraction",
+        "exon7_containing_to_deficient_log2","GSDMB2_fraction","GSDMB_to_ERBB2_ratio",
     ]
     endpoint_titles={
-        "G1":"G1",
-        "G2":"G2",
-        "G3":"G3",
-        "G3b":"G3b",
-        "G4":"G4",
-        "GSDMB":"GSDMB",
-        "pyroptotic_isoform_fraction":"Pyroptotic fraction",
-        "non_pyroptotic_isoform_fraction":"Non-pyroptotic fraction",
-        "G4_vs_total":"G4 / total",
+        "GSDMB":"Total GSDMB",
+        "GSDMB1_expression":"GSDMB1",
+        "GSDMB2_expression":"GSDMB2",
+        "GSDMB3_expression":"GSDMB3 (G3+G3b)",
+        "GSDMB4_expression":"GSDMB4",
+        "exon6_positive_fraction":"Exon-6-positive fraction",
+        "exon6_positive_to_negative_log2":"Exon-6-positive / negative",
+        "exon7_containing_fraction":"Exon-7-containing fraction",
+        "exon7_deficient_fraction":"Exon-7-deficient fraction",
+        "exon7_containing_to_deficient_log2":"Exon-7-containing / deficient",
+        "GSDMB2_fraction":"GSDMB2 / total",
+        "GSDMB_to_ERBB2_ratio":"Total GSDMB / ERBB2",
     }
-    fig,ax=plt.subplots(3,3,figsize=(18.5,13.2),constrained_layout=True)
+    fig,ax=plt.subplots(4,3,figsize=(18.5,17.0),constrained_layout=True)
     legend_handles=[Line2D([0],[0],marker="s",linestyle="",markersize=9,markerfacecolor=colour_map[g],markeredgecolor="none",label=group_map.get(g,g)) for g in order]
     fill_map={"Breast_Tumour":"#F3D3DC","Endometrial_Tumour":"#D5F0E8","Pooled_Control":"#D7E7F7"}
     group_counts = summarise_group_counts(p, "plot_group")
@@ -465,7 +519,7 @@ def plot_dist(df,out,controls):
             continue
         scale_to_percent=t[e].abs().max()<=1.5
         t["plot_value"]=t[e]*100.0 if scale_to_percent else t[e]
-        y_label="Expression (%)" if scale_to_percent else "Expression"
+        y_label="Isoform abundance (%)" if scale_to_percent else "Isoform abundance"
         if sns is not None:
             sns.violinplot(data=t,x="plot_group",y="plot_value",order=order,ax=a,inner=None,cut=0,linewidth=0.9,palette=[colour_map[g] for g in order])
             sns.boxplot(data=t,x="plot_group",y="plot_value",order=order,ax=a,width=0.22,showfliers=False,boxprops={"facecolor":"white","zorder":3},medianprops={"color":"#222222","linewidth":1.2},whiskerprops={"linewidth":1.0},capprops={"linewidth":1.0})
@@ -527,12 +581,23 @@ def heat(df,row,col,val,out,title,row_label_col=None,top_n=20,note=None):
     fig_h=max(4.5, 0.42*len(p.index)+2)
     fig,a=plt.subplots(figsize=(fig_w,fig_h))
     if sns is not None:
-        sns.heatmap(p,cmap="coolwarm",center=0,linewidths=0.5,linecolor="white",ax=a,annot=annot.values,fmt="",annot_kws={"fontsize":8,"fontweight":"bold"})
+        sns.heatmap(
+            p,
+            cmap="coolwarm",
+            center=0,
+            linewidths=0.5,
+            linecolor="white",
+            ax=a,
+            annot=annot.values,
+            fmt="",
+            annot_kws={"fontsize":8,"fontweight":"bold"},
+            cbar_kws={"label": "signed -log10(P value)"},
+        )
     else:
         im=a.imshow(p.values, aspect="auto", cmap="coolwarm")
         a.set_xticks(range(len(p.columns))); a.set_xticklabels([short_label(c, 20) for c in p.columns], rotation=35, ha="right", fontsize=8)
         a.set_yticks(range(len(p.index))); a.set_yticklabels([short_label(i, 28) for i in p.index], fontsize=8)
-        fig.colorbar(im, ax=a, fraction=0.03, pad=0.02)
+        fig.colorbar(im, ax=a, fraction=0.03, pad=0.02, label="signed -log10(P value)")
     a.set_xticklabels([short_label(c, 24) for c in p.columns], rotation=35, ha="right", fontsize=9)
     a.set_yticklabels([short_label(i, 40) for i in p.index], fontsize=8.5)
     a.set_ylabel("")
@@ -571,10 +636,10 @@ def plot_top_snp_hits(snp,out,top_n=18):
     ax.set_yticks(np.arange(len(keep)))
     ax.set_yticklabels([short_label(v, 58) for v in keep["Plot_Label"]], fontsize=8.5)
     ax.set_xlabel("-log10(P value)")
-    ax.set_title("Top SNP vs isoform associations", fontsize=13, fontweight="bold")
+    ax.set_title("Top SNP-isoform associations", fontsize=13, fontweight="bold")
     ax.grid(axis="x", linestyle=":", alpha=0.3)
     cbar=fig.colorbar(sc, ax=ax, fraction=0.03, pad=0.02)
-    cbar.set_label("Slope")
+    cbar.set_label("Association slope")
     for i,(_,rowv) in enumerate(keep.iterrows()):
         star = "**" if bool(rowv.get("FDR_Sig", False)) else "*" if bool(rowv.get("Nominal_Sig", False)) else ""
         text = f"{rowv.get('Variant_Display', rowv.get('Variant_ID',''))}  n={int(rowv.get('N',0))}, carriers={int(rowv.get('Carrier_Count',0))}{star}"
@@ -706,7 +771,3 @@ def main():
     print("=== Objective 2 summary ==="); print(f"Workbook rows                    : {len(expr)}"); print(f"Matched RNA rows                : {int(merged['master_join_success'].sum())}"); print(f"RNA QC strict-ready rows        : {int(strict_ready.sum())}"); print(f"RNA QC exploratory-ready rows   : {int(exploratory_ready.sum())}"); print(f"RNA QC exploratory-only rows    : {int((exploratory_ready & ~strict_ready).sum())}"); print(f"RNA QC excluded rows            : {int((~exploratory_ready).sum())}"); print(f"Primary tumour samples analysed : {primary['snp_code'].nunique()} biological RNA samples ({primary_gate_label})"); print(f"Unmatched/ambiguous RNA rows    : {len(audit)}"); print(f"Common-SNP backbone             : {back['Variant_ID'].nunique()} variants"); print(f"Haplotypes retained             : {hf['Haplotype_ID'].nunique() if not hf.empty else 0}"); print(f"SNP vs isoform tests            : {len(snp)}"); print(f"Haplotype vs isoform tests      : {len(hap)}"); print(f"Isoform vs clinical tests       : {len(clin)}"); print(f"Panel-gene report files         : {len(gene_reports)}"); print(f"BAM inventory rows              : {len(bami)}"); print(f"RNA QC manifest                 : {manifestp if manifestp and manifestp.exists() else 'built inline'}"); print(f"Results workbook                : {xlsx}"); print(f"Panel-gene reports              : {gene_report_dir}"); print(f"Figures                         : {out}")
 
 if __name__=="__main__": main()
-
-
-
-

@@ -60,7 +60,7 @@ def canonical_snp_code(v):
     text = s(v).upper()
     if not text:
         return None
-    text = text.replace("SNP_MT-N_", "SNP_MN_")
+    text = text.replace("SNP_MT-N_", "SNP_MT-T_")
     text = re.sub(r"_REP$", "", text)
     return text
 
@@ -71,19 +71,19 @@ def sx(v):
         (r"^(SNP_(?:AT|EN|MN|MT-T|MT-N)_\d+)", lambda m: m.group(1).upper()),
         (r"^SNP_DNA_(EN|MN|AT)_(\d+)", lambda m: f"SNP_{m.group(1).upper()}_{m.group(2)}"),
         (r"^SNP_DNA_MT[-_]T_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
-        (r"^SNP_DNA_MT[-_]N_(\d+)", lambda m: f"SNP_MN_{m.group(1)}"),
+        (r"^SNP_DNA_MT[-_]N_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
         (r"^DNA_SNP_(EN|MN|AT)_(\d+)", lambda m: f"SNP_{m.group(1).upper()}_{m.group(2)}"),
         (r"^DNA_(AT|EN|MN)_(\d+)", lambda m: f"SNP_{m.group(1).upper()}_{m.group(2)}"),
         (r"^DNA_(?:SNP_)?MT[-_]T_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
         (r"^MAMAH2_MT[-_]T_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
-        (r"^DNA_(?:SNP_)?MT[-_]N_(\d+)", lambda m: f"SNP_MN_{m.group(1)}"),
-        (r"^MAMAH2_MT[-_]N_(\d+)", lambda m: f"SNP_MN_{m.group(1)}"),
-        (r"^RNA_SNP_(AT|EN|MN|MT-T|MT-N)[-_]?(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
-        (r"^SNP_RNA_(AT|EN|MN|MT-T|MT-N)_(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
-        (r"^SNP_(AT|EN|MN|MT-T|MT-N)_RNA_(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
+        (r"^DNA_(?:SNP_)?MT[-_]N_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
+        (r"^MAMAH2_MT[-_]N_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
+        (r"^RNA_SNP_(AT|EN|MN|MT-T|MT-N)[-_]?(\d+)", lambda m: f"SNP_{'MT-T' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
+        (r"^SNP_RNA_(AT|EN|MN|MT-T|MT-N)_(\d+)", lambda m: f"SNP_{'MT-T' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
+        (r"^SNP_(AT|EN|MN|MT-T|MT-N)_RNA_(\d+)", lambda m: f"SNP_{'MT-T' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
         (r"^RNA_(AT|EN|MN)_(\d+)", lambda m: f"SNP_{m.group(1).upper()}_{m.group(2)}"),
         (r"^RNA_MT[-_]T_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
-        (r"^RNA_MT[-_]N_(\d+)", lambda m: f"SNP_MN_{m.group(1)}"),
+        (r"^RNA_MT[-_]N_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
     ]
     for pat, fmt in patterns:
         match = re.match(pat, text, re.I)
@@ -153,12 +153,12 @@ def machine_sample_to_snp(value):
         return canonical_snp_code(code)
     compact = re.sub(r"\s+", "", text.upper())
     patterns = [
-        (r"^SNP_(AT|EN|MN|MT-T|MT-N)_RNA_(\d+)", lambda m: f"SNP_{'MN' if m.group(1) == 'MT-N' else m.group(1)}_{m.group(2)}"),
-        (r"^RNA_SNP_(AT|EN|MN|MT-T|MT-N)[-_]?(\d+)", lambda m: f"SNP_{'MN' if m.group(1) == 'MT-N' else m.group(1)}_{m.group(2)}"),
-        (r"^SNP_RNA_(AT|EN|MN|MT-T|MT-N)_(\d+)", lambda m: f"SNP_{'MN' if m.group(1) == 'MT-N' else m.group(1)}_{m.group(2)}"),
+        (r"^SNP_(AT|EN|MN|MT-T|MT-N)_RNA_(\d+)", lambda m: f"SNP_{'MT-T' if m.group(1) == 'MT-N' else m.group(1)}_{m.group(2)}"),
+        (r"^RNA_SNP_(AT|EN|MN|MT-T|MT-N)[-_]?(\d+)", lambda m: f"SNP_{'MT-T' if m.group(1) == 'MT-N' else m.group(1)}_{m.group(2)}"),
+        (r"^SNP_RNA_(AT|EN|MN|MT-T|MT-N)_(\d+)", lambda m: f"SNP_{'MT-T' if m.group(1) == 'MT-N' else m.group(1)}_{m.group(2)}"),
         (r"^RNA_(AT|EN|MN)_(\d+)", lambda m: f"SNP_{m.group(1)}_{m.group(2)}"),
         (r"^RNA_MT[-_]T_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
-        (r"^RNA_MT[-_]N_(\d+)", lambda m: f"SNP_MN_{m.group(1)}"),
+        (r"^RNA_MT[-_]N_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
     ]
     for pattern, formatter in patterns:
         match = re.match(pattern, compact)
@@ -529,4 +529,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

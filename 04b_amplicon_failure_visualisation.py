@@ -211,29 +211,29 @@ def make_figure(row: pd.Series, cohort: str, all_rows: list[SamplePick], fail_pi
     ax1 = fig.add_subplot(gs[0])
     ax1.scatter(rank_df['rank'], rank_df['cohort_depth'], color='#9aa4b2', s=28)
     ax1.set_yscale('symlog', linthresh=1)
-    ax1.set_ylabel('Mean amplicon depth')
+    ax1.set_ylabel('Mean amplicon read depth')
     ax1.set_xlabel(f"{cohort.replace('_', ' ')} samples ranked by amplicon depth")
     ax1.set_title(f"{row['Flagged label']} | {cohort.replace('_', ' ')} | {row['Global_Failure_%']:.1f}% global fail", fontsize=14, weight='bold')
     if fail_pick:
         fx = int(rank_df.loc[rank_df['sample_key'] == fail_pick.sample_key, 'rank'].iloc[0])
-        ax1.scatter([fx], [fail_pick.cohort_depth], color='#c0392b', s=65, label='Fail example')
+        ax1.scatter([fx], [fail_pick.cohort_depth], color='#c0392b', s=65, label='Failed-sample example')
         ax1.annotate(fail_pick.sample_key, (fx, max(fail_pick.cohort_depth, 0.15)), xytext=(8, 8), textcoords='offset points', fontsize=8, color='#c0392b')
     if pass_pick:
         px = int(rank_df.loc[rank_df['sample_key'] == pass_pick.sample_key, 'rank'].iloc[0])
-        ax1.scatter([px], [pass_pick.cohort_depth], color='#1f77b4', s=65, label='Pass example')
+        ax1.scatter([px], [pass_pick.cohort_depth], color='#1f77b4', s=65, label='Passed-sample example')
         ax1.annotate(pass_pick.sample_key, (px, pass_pick.cohort_depth), xytext=(8, -12), textcoords='offset points', fontsize=8, color='#1f77b4')
     ax1.legend(loc='upper left', frameon=False)
     ax1.grid(alpha=0.2)
 
     ax2 = fig.add_subplot(gs[1])
     if fail_depth is not None and not fail_depth.empty:
-        ax2.plot(fail_depth['pos'], fail_depth['depth'], color='#c0392b', lw=1.6, label='Fail sample')
+        ax2.plot(fail_depth['pos'], fail_depth['depth'], color='#c0392b', lw=1.6, label='Failed sample')
     if pass_depth is not None and not pass_depth.empty:
-        ax2.plot(pass_depth['pos'], pass_depth['depth'], color='#1f77b4', lw=1.6, label='Pass sample')
+        ax2.plot(pass_depth['pos'], pass_depth['depth'], color='#1f77b4', lw=1.6, label='Passed sample')
     ax2.axvspan(start, end, color='#f1c40f', alpha=0.25, label='Amplicon')
     ax2.set_xlim(region_start, region_end)
-    ax2.set_ylabel('Per-base depth')
-    ax2.set_xlabel(f'chr17 position ({padding} bp flank each side)')
+    ax2.set_ylabel('Per-base read depth')
+    ax2.set_xlabel(f'Chromosome 17 position ({padding} bp flank each side)')
     ax2.grid(alpha=0.2)
     ax2.legend(loc='upper right', frameon=False)
 

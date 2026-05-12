@@ -13,13 +13,14 @@ The cleaned project is built around an explicitly unpaired study design:
 
 There are three different orders in this repository, and they should not be confused.
 
-1. Computational execution order: 
+1. Computational execution order
    Scripts that must run first because later stages depend on their outputs.
-2. Thesis or story order: 
+2. Thesis or story order
    The cleanest order for Methods, Results, and figure presentation.
-3. Naming or numbering order:
+3. Naming or numbering order
    The historical numbered filenames kept for stability and manuscript cross-reference.
 
+The numbered filenames are being kept as they are. The final clean-up is achieved by regrouping and documenting them properly rather than renumbering everything at the end.
 
 ## Canonical computational core
 
@@ -48,6 +49,14 @@ Two points matter here:
 
 - `05b_force_genotype_union_sites.py` is a true dependency, even though it is more of a technical backbone step than a headline thesis result.
 - `17b_rare_variant_association.py` is not part of the canonical rerun. It remains a secondary follow-up analysis.
+
+Current analysis conventions:
+
+- Stage 17 uses the forced genotype matrix as the SNP source of truth, so WT/non-carrier samples are included instead of relying only on variant-positive rows.
+- Raw forced-genotype columns are mapped to formal clinical `snp_code` values and then to analysis sample IDs. Exact aliases collapse only when their phased-genotype digest is identical; non-identical repeats are kept as separate `__RUNN` entries.
+- The Stage 17 workbook includes `sample_identity_audit` and `sample_collapse_summary` tabs to document this raw-to-analysis mapping.
+- Current DNA accounting: 232 post-QC DNA BAMs/forced-genotype columns enter the genotype backbone and resolve to 215 Stage 17 analysis sample IDs after exact duplicate collapse. Breast tumours drive the difference: 91 breast tumour BAMs map to 60 formal clinical codes; 31 codes have duplicate BAMs, 17 exact pairs are collapsed, and 14 discordant pairs remain as run-level `__RUNN` entries.
+- RNA isoform endpoints treat `G3b` with `G3` for exon-defined categories.
 
 ## Recommended thesis story
 
@@ -127,6 +136,11 @@ These scripts are useful to keep in the GitHub repository, but they are not part
 - `28_sample_similarity_audit.py`
 - `29_collect_significant_survival_curves.py`
 
+### Archive or legacy candidates
+
+- `24_prepare_tcga_inputs.py`
+- `27_breast_paired_validation.py`
+- stray temporary files or placeholders that are not part of the workflow
 
 ## How to run
 
@@ -174,6 +188,12 @@ Core outputs are written under `analysis_results/`, especially:
 - `analysis_results/20b_panel_gene_expression`
 - `analysis_results/23_rna_integration`
 
+## Important interpretation guardrails
+
+- Do not describe the breast analysis as matched tumour-normal unless you are explicitly referring to an old prototype script that is no longer part of the active pipeline.
+- Do not describe stage `12` and stage `17` as the same thing. Stage `12` is the main common-SNP tumour-versus-healthy enrichment layer; stage `17` is the broader follow-up association suite.
+- Do not present permutation testing, dashboard outputs, technical audits, or rare-variant follow-up as if they were part of the primary discovery chain.
+- Use association language, not causal language.
 
 ## Key documentation
 

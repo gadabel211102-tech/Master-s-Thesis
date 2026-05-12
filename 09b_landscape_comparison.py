@@ -400,7 +400,7 @@ def main() -> None:
         comparison_part = f"{row['Comparison_Label']}: " if pd.notna(row.get('Comparison_Label')) and str(row.get('Comparison_Label')).strip() else ''
         p_val = row['p_value']
         fdr_val = row['FDR_BH']
-        return f"{comparison_part}{gene_part}{rs_part} (p={p_val:.4g}, FDR={fdr_val:.4g})" if p_val is not None and fdr_val is not None and not pd.isna(p_val) and not pd.isna(fdr_val) else f"{comparison_part}{gene_part}{rs_part}"
+        return f"{comparison_part}{gene_part}{rs_part} (P = {p_val:.4g}, FDR q = {fdr_val:.4g})" if p_val is not None and fdr_val is not None and not pd.isna(p_val) and not pd.isna(fdr_val) else f"{comparison_part}{gene_part}{rs_part}"
 
     significance_counts_rows: list[dict[str, object]] = []
     significance_detail_rows: list[dict[str, object]] = []

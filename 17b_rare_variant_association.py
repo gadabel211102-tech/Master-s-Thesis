@@ -108,6 +108,18 @@ def _safe_join(values: Iterable[object], sep: str = "; ") -> str:
     return sep.join(cleaned)
 
 
+def _join_component_lists(values: Iterable[object]) -> str:
+    parts = []
+    for value in values:
+        parts.extend(part.strip() for part in str(value).split(";") if part.strip())
+    return _safe_join(parts)
+
+
+def _component_count(values: Iterable[object]) -> int:
+    joined = _join_component_lists(values)
+    return len([part for part in joined.split("; ") if part])
+
+
 def _build_variant_key(df: pd.DataFrame) -> pd.Series:
     chrom = df["CHROM"].astype(str).str.strip()
     pos = pd.to_numeric(df["POS"], errors="coerce").fillna(-1).astype(int).astype(str)
@@ -130,6 +142,14 @@ def _exposure_meta_defaults(frame: pd.DataFrame) -> dict[str, object]:
         "Genomic_Label": _first_nonempty(frame.get("Genomic_Label", pd.Series([], dtype=object))),
         "Label_Source": _first_nonempty(frame.get("Label_Source", pd.Series([], dtype=object))),
     }
+
+
+EXPOSURE_COLUMNS = [
+    "analysis_sample_id", "snp_code", "Exposure_ID", "Exposure_Label", "Exposure_Type",
+    "Variant_ID", "rsID", "Variant_Label", "Genomic_Label", "Label_Source", "Gene",
+    "Consequence", "IMPACT", "HGVSp", "VARIANT_CLASS",
+    "Component_Genes", "Component_Variants", "Component_Variant_Count",
+]
 
 
 def _apply_fdr(df: pd.DataFrame, p_col: str, out_col: str, group_cols: list[str]) -> pd.DataFrame:
@@ -478,12 +498,23 @@ def build_single_variant_exposures(rare_df: pd.DataFrame) -> pd.DataFrame:
     exp["Exposure_Label"] = exp["Variant_Label"]
     exp["Gene"] = exp["Gene_Label"]
     exp["Exposure_Type"] = "Rare_Variant"
-    return exp[["analysis_sample_id", "snp_code", "Exposure_ID", "Exposure_Label", "Exposure_Type", "Variant_ID", "rsID", "Variant_Label", "Genomic_Label", "Label_Source", "Gene", "Consequence", "IMPACT", "HGVSp", "VARIANT_CLASS"]]
+    exp["Component_Genes"] = exp["Gene_Label"]
+    exp["Component_Variants"] = exp["Variant_Label"]
+    exp["Component_Variant_Count"] = 1
+    return exp[EXPOSURE_COLUMNS]
 
 
 def build_gene_burden_exposures(rare_df: pd.DataFrame) -> pd.DataFrame:
     sub = rare_df[rare_df["Gene_Label"].astype(str).str.strip() != ""].copy()
-    exp = sub[["analysis_sample_id", "snp_code", "Gene_Label"]].drop_duplicates().rename(columns={"Gene_Label": "Gene"})
+    exp = (
+        sub.groupby(["analysis_sample_id", "snp_code", "Gene_Label"], as_index=False)
+        .agg(
+            Component_Genes=("Gene_Label", _safe_join),
+            Component_Variants=("Variant_Label", _safe_join),
+            Component_Variant_Count=("Variant_Key", pd.Series.nunique),
+        )
+        .rename(columns={"Gene_Label": "Gene"})
+    )
     exp["Exposure_ID"] = "GeneBurden:" + exp["Gene"].astype(str)
     exp["Exposure_Label"] = exp["Gene"].astype(str) + " rare burden"
     exp["Exposure_Type"] = "Gene_Burden"
@@ -496,17 +527,20 @@ def build_gene_burden_exposures(rare_df: pd.DataFrame) -> pd.DataFrame:
     exp["IMPACT"] = "Mixed"
     exp["HGVSp"] = ""
     exp["VARIANT_CLASS"] = "Burden"
-    return exp[["analysis_sample_id", "snp_code", "Exposure_ID", "Exposure_Label", "Exposure_Type", "Variant_ID", "rsID", "Variant_Label", "Genomic_Label", "Label_Source", "Gene", "Consequence", "IMPACT", "HGVSp", "VARIANT_CLASS"]]
+    return exp[EXPOSURE_COLUMNS]
 
 
 def build_burden_flag_exposures(sample_burden: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for _, row in sample_burden.iterrows():
+        component_genes = row.get("Rare_Genes", "")
+        component_variants = row.get("Rare_Variant_List", "")
+        component_count = row.get("N_Rare_Variants", 0)
         if row["N_Rare_Variants"] >= 1:
-            rows.append({"analysis_sample_id": row["analysis_sample_id"], "snp_code": row["snp_code"], "Exposure_ID": "Any_Rare_Variant", "Exposure_Label": "Any rare variant", "Exposure_Type": "Burden_Flag", "Variant_ID": "", "rsID": pd.NA, "Variant_Label": "Any rare variant", "Genomic_Label": "", "Label_Source": "Burden_Flag", "Gene": "", "Consequence": "Any rare variant in GSDMB", "IMPACT": "Mixed", "HGVSp": "", "VARIANT_CLASS": "Burden"})
+            rows.append({"analysis_sample_id": row["analysis_sample_id"], "snp_code": row["snp_code"], "Exposure_ID": "Any_Rare_Variant", "Exposure_Label": "Any rare variant", "Exposure_Type": "Burden_Flag", "Variant_ID": "", "rsID": pd.NA, "Variant_Label": "Any rare variant", "Genomic_Label": "", "Label_Source": "Burden_Flag", "Gene": component_genes, "Consequence": "Any rare variant in GSDMB-region panel", "IMPACT": "Mixed", "HGVSp": "", "VARIANT_CLASS": "Burden", "Component_Genes": component_genes, "Component_Variants": component_variants, "Component_Variant_Count": component_count})
         if row["N_Rare_Variants"] >= 2:
-            rows.append({"analysis_sample_id": row["analysis_sample_id"], "snp_code": row["snp_code"], "Exposure_ID": "Multiple_Rare_Variants", "Exposure_Label": "Multiple rare variants", "Exposure_Type": "Burden_Flag", "Variant_ID": "", "rsID": pd.NA, "Variant_Label": "Multiple rare variants", "Genomic_Label": "", "Label_Source": "Burden_Flag", "Gene": "", "Consequence": "At least two rare variants in GSDMB", "IMPACT": "Mixed", "HGVSp": "", "VARIANT_CLASS": "Burden"})
-    return pd.DataFrame(rows, columns=["analysis_sample_id", "snp_code", "Exposure_ID", "Exposure_Label", "Exposure_Type", "Variant_ID", "rsID", "Variant_Label", "Genomic_Label", "Label_Source", "Gene", "Consequence", "IMPACT", "HGVSp", "VARIANT_CLASS"])
+            rows.append({"analysis_sample_id": row["analysis_sample_id"], "snp_code": row["snp_code"], "Exposure_ID": "Multiple_Rare_Variants", "Exposure_Label": "Multiple rare variants", "Exposure_Type": "Burden_Flag", "Variant_ID": "", "rsID": pd.NA, "Variant_Label": "Multiple rare variants", "Genomic_Label": "", "Label_Source": "Burden_Flag", "Gene": component_genes, "Consequence": "At least two rare variants in GSDMB-region panel", "IMPACT": "Mixed", "HGVSp": "", "VARIANT_CLASS": "Burden", "Component_Genes": component_genes, "Component_Variants": component_variants, "Component_Variant_Count": component_count})
+    return pd.DataFrame(rows, columns=EXPOSURE_COLUMNS)
 
 def build_pair_exposures(single_variant_exp: pd.DataFrame, min_pair_carriers: int) -> pd.DataFrame:
     label_lookup = (
@@ -514,21 +548,27 @@ def build_pair_exposures(single_variant_exp: pd.DataFrame, min_pair_carriers: in
         .set_index("Exposure_ID")["Exposure_Label"]
         .to_dict()
     )
+    gene_lookup = (
+        single_variant_exp.drop_duplicates("Exposure_ID")
+        .set_index("Exposure_ID")["Gene"]
+        .to_dict()
+    )
     per_sample = single_variant_exp.groupby("analysis_sample_id")["Exposure_ID"].apply(lambda s: sorted(set(s))).to_dict()
+    sample_code_lookup = single_variant_exp.groupby("analysis_sample_id")["snp_code"].agg(_first_nonempty).to_dict()
     pair_rows = []
     for analysis_sample_id, variant_keys in per_sample.items():
         if len(variant_keys) < 2:
             continue
         for left, right in combinations(variant_keys, 2):
-            pair_rows.append({"analysis_sample_id": analysis_sample_id, "Exposure_ID": f"Pair:{left}||{right}", "Left_Variant": left, "Right_Variant": right})
+            pair_rows.append({"analysis_sample_id": analysis_sample_id, "snp_code": sample_code_lookup.get(analysis_sample_id, ""), "Exposure_ID": f"Pair:{left}||{right}", "Left_Variant": left, "Right_Variant": right})
     if not pair_rows:
-        return pd.DataFrame(columns=["analysis_sample_id", "Exposure_ID", "Exposure_Label", "Exposure_Type", "Variant_ID", "rsID", "Variant_Label", "Genomic_Label", "Label_Source", "Gene", "Consequence", "IMPACT", "HGVSp", "VARIANT_CLASS"])
+        return pd.DataFrame(columns=EXPOSURE_COLUMNS)
     pair_df = pd.DataFrame(pair_rows)
     carrier_counts = pair_df.groupby("Exposure_ID")["analysis_sample_id"].nunique()
     keep_ids = carrier_counts[carrier_counts >= min_pair_carriers].index
     pair_df = pair_df[pair_df["Exposure_ID"].isin(keep_ids)].copy()
     if pair_df.empty:
-        return pd.DataFrame(columns=["analysis_sample_id", "Exposure_ID", "Exposure_Label", "Exposure_Type", "Variant_ID", "rsID", "Variant_Label", "Genomic_Label", "Label_Source", "Gene", "Consequence", "IMPACT", "HGVSp", "VARIANT_CLASS"])
+        return pd.DataFrame(columns=EXPOSURE_COLUMNS)
     pair_df["Exposure_Label"] = pair_df.apply(lambda r: _pair_label(r["Left_Variant"], r["Right_Variant"], label_lookup), axis=1)
     pair_df["Exposure_Type"] = "Variant_Pair"
     pair_df["Variant_ID"] = ""
@@ -541,7 +581,10 @@ def build_pair_exposures(single_variant_exp: pd.DataFrame, min_pair_carriers: in
     pair_df["IMPACT"] = "Mixed"
     pair_df["HGVSp"] = ""
     pair_df["VARIANT_CLASS"] = "Pair"
-    return pair_df[["analysis_sample_id", "Exposure_ID", "Exposure_Label", "Exposure_Type", "Variant_ID", "rsID", "Variant_Label", "Genomic_Label", "Label_Source", "Gene", "Consequence", "IMPACT", "HGVSp", "VARIANT_CLASS"]].drop_duplicates()
+    pair_df["Component_Genes"] = pair_df.apply(lambda r: _safe_join([gene_lookup.get(r["Left_Variant"], ""), gene_lookup.get(r["Right_Variant"], "")]), axis=1)
+    pair_df["Component_Variants"] = pair_df["Exposure_Label"]
+    pair_df["Component_Variant_Count"] = 2
+    return pair_df[EXPOSURE_COLUMNS].drop_duplicates()
 
 
 def build_exposure_catalogue(exposure_df: pd.DataFrame, sample_manifest: pd.DataFrame) -> pd.DataFrame:
@@ -566,6 +609,9 @@ def build_exposure_catalogue(exposure_df: pd.DataFrame, sample_manifest: pd.Data
             "Gene": _first_nonempty(sub["Gene"]),
             "Consequence": _first_nonempty(sub["Consequence"]),
             "IMPACT": _first_nonempty(sub["IMPACT"]),
+            "Component_Genes": _join_component_lists(sub.get("Component_Genes", pd.Series([], dtype=object))),
+            "Component_Variants": _join_component_lists(sub.get("Component_Variants", pd.Series([], dtype=object))),
+            "Component_Variant_Count": _component_count(sub.get("Component_Variants", pd.Series([], dtype=object))),
             "N_Carriers_Total": len(carriers),
             "N_Carriers_Tumour": len(carriers & tumours),
             "N_Carriers_Control": len(carriers & controls),
@@ -603,6 +649,11 @@ def tumour_vs_control(exposure_df: pd.DataFrame, sample_manifest: pd.DataFrame, 
             odds_ratio, or_method = S17._haldane_or(a, b, c, d)
             meta_row = meta.loc[exposure_id]
             meta_defaults = _exposure_meta_defaults(pd.DataFrame([meta_row]))
+            comparison_carriers = (carriers & tumour_codes) | (carriers & pooled_controls)
+            component_sub = exposure_df[
+                (exposure_df["Exposure_ID"] == exposure_id) &
+                (exposure_df["analysis_sample_id"].isin(comparison_carriers))
+            ]
             rows.append({
                 "Analysis_Group": analysis_group,
                 "Exposure_ID": exposure_id,
@@ -616,6 +667,9 @@ def tumour_vs_control(exposure_df: pd.DataFrame, sample_manifest: pd.DataFrame, 
                 "Gene": meta_row.get("Gene", ""),
                 "Consequence": meta_row.get("Consequence", ""),
                 "IMPACT": meta_row.get("IMPACT", ""),
+                "Component_Genes": _join_component_lists(component_sub.get("Component_Genes", pd.Series([], dtype=object))),
+                "Component_Variants": _join_component_lists(component_sub.get("Component_Variants", pd.Series([], dtype=object))),
+                "Component_Variant_Count": _component_count(component_sub.get("Component_Variants", pd.Series([], dtype=object))),
                 "N_Tumour": n_tumour,
                 "N_Control": n_control,
                 "Carriers_Tumour": a,
@@ -660,6 +714,10 @@ def clinical_associations(
             continue
         meta_row = meta_lookup.loc[exposure_id]
         meta_defaults = _exposure_meta_defaults(pd.DataFrame([meta_row]))
+        component_sub = exposure_df[
+            (exposure_df["Exposure_ID"] == exposure_id) &
+            (exposure_df["analysis_sample_id"].isin(c_df["analysis_sample_id"]))
+        ]
         for clin_col, clin_meta in clinical_vars.items():
             if clin_col not in cohort_df.columns:
                 continue
@@ -693,6 +751,9 @@ def clinical_associations(
                 "Gene": meta_row.get("Gene", ""),
                 "Consequence": meta_row.get("Consequence", ""),
                 "IMPACT": meta_row.get("IMPACT", ""),
+                "Component_Genes": _join_component_lists(component_sub.get("Component_Genes", pd.Series([], dtype=object))),
+                "Component_Variants": _join_component_lists(component_sub.get("Component_Variants", pd.Series([], dtype=object))),
+                "Component_Variant_Count": _component_count(component_sub.get("Component_Variants", pd.Series([], dtype=object))),
                 "Clinical_Var": clin_col,
                 "Clin_Label": clin_meta["label"],
                 "Clin_Type": clin_meta["type"],
@@ -775,6 +836,7 @@ def build_readme(
         "3. Recurrent rare-variant pairs shared by multiple samples.",
         "4. Simple burden flags (any rare variant, multiple rare variants).",
         "5. Exploratory clinical association testing for recurrent rare-variant pairs.",
+        "Burden and pair rows include Component_Genes, Component_Variants, and Component_Variant_Count so the exact burden composition is visible downstream.",
         "",
         "Interpretation notes:",
         "Tumour-vs-control tables compare tumour samples against pooled healthy controls from the sequenced manifest.",

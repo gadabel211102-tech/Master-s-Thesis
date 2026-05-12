@@ -208,9 +208,9 @@ def identify_snps_pipeline():
     )
     plt.figure(figsize=(10, 6))
     sns.barplot(data=gene_counts, x="SYMBOL", y="Variant_ID", hue="SYMBOL", palette="viridis", legend=False)
-    plt.title("Unique SNPs per Gene", fontsize=14, fontweight="bold")
-    plt.ylabel("Unique SNP Count")
-    plt.xlabel("SYMBOL")
+    plt.title("Common SNPs per gene", fontsize=14, fontweight="bold")
+    plt.ylabel("Unique SNP count")
+    plt.xlabel("Gene")
     plt.xticks(rotation=45)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "Common_SNPs_Per_Gene.png"), dpi=300)
@@ -232,12 +232,21 @@ def identify_snps_pipeline():
             alpha=0.75
         )
         plt.plot([0, 1], [0, 100], "--", color="grey", alpha=0.4, label="Reference line")
-        plt.title(f"Study vs gnomAD NFE: {cohort}", fontsize=15, fontweight="bold")
-        plt.xlabel("gnomAD NFE AF")
-        plt.ylabel("Carrier Frequency in Study (%)")
+        plt.title(f"Study versus gnomAD NFE reference: {cohort}", fontsize=15, fontweight="bold")
+        plt.xlabel("gnomAD NFE allele frequency")
+        plt.ylabel("Study carrier frequency (%)")
         plt.xlim(0, 1)
         plt.ylim(0, 100)
-        plt.legend(frameon=False)
+        legend = plt.legend(frameon=False, title="Tissue / reference source")
+        for text in legend.get_texts():
+            text.set_text(
+                text.get_text()
+                .replace("gnomAD_NFE_Source", "Reference source")
+                .replace("Exome_NFE", "gnomAD exome NFE")
+                .replace("Genome_NFE", "gnomAD genome NFE")
+                .replace("Tumour", "Tumour")
+                .replace("Healthy", "Healthy")
+            )
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, f"Common_SNP_Frequency_vs_gnomAD_{cohort}.png"), dpi=300)
         plt.close()
@@ -245,11 +254,22 @@ def identify_snps_pipeline():
     # This final panel documents how often the retained SNP definition was driven
     # by exome versus genome reference frequencies.
     source_counts = master_pivot.groupby("gnomAD_NFE_Source")["Variant_ID"].count().reset_index()
+    source_counts["Reference_Source_Display"] = source_counts["gnomAD_NFE_Source"].replace({
+        "Exome_NFE": "gnomAD exome NFE",
+        "Genome_NFE": "gnomAD genome NFE",
+    })
     plt.figure(figsize=(8, 5))
-    sns.barplot(data=source_counts, x="gnomAD_NFE_Source", y="Variant_ID", hue="gnomAD_NFE_Source", palette="mako", legend=False)
-    plt.title("gnomAD NFE Source Counts", fontsize=13, fontweight="bold")
+    sns.barplot(
+        data=source_counts,
+        x="Reference_Source_Display",
+        y="Variant_ID",
+        hue="Reference_Source_Display",
+        palette="mako",
+        legend=False,
+    )
+    plt.title("gnomAD NFE reference source counts", fontsize=13, fontweight="bold")
     plt.ylabel("Number of SNPs")
-    plt.xlabel("Source")
+    plt.xlabel("Reference allele-frequency source")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "Common_SNP_Annotation_Source_Counts.png"), dpi=300)
     plt.close()

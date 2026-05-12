@@ -1,18 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-17_snp_association.py  (v4 — SNP-only, genotypic model, all-cohort Cox, age+BMI adjusted)
+17_snp_association.py  (v5 — forced-genotype SNP model, all-cohort Cox, age+BMI adjusted)
 =======================================================================
 SNP–Clinical Variable Association Analysis
 
-Joins the GSDMB variant report (GSDMB_Annotated_Report.xlsx) with the
-harmonised clinical master (MASTER_SNP_plus_clinical__HARMONISED_B_v3.xlsx)
-and tests each SNP for association with clinical variables.
+Uses the forced GSDMB genotype matrix as the SNP source of truth, joins
+analysis-level sample IDs to the harmonised clinical master, and tests each
+callable SNP for association with clinical variables. WT, heterozygous, and
+homozygous calls are all retained; no-call / below-depth entries are excluded
+per locus when calculating denominators.
 
-SAMPLE FILTERING — SEQUENCED SAMPLES ONLY
--------------------------------------------
-Analysis is restricted to samples confirmed as sequenced, derived from the
-manifest sheets in the harmonised master.  Exclusion rules (verified from data):
+SAMPLE IDENTITY AND FILTERING
+-----------------------------
+The current default skips the legacy pass-manifest filter when a forced
+genotype matrix is supplied. The current forced genotype matrix contributes
+232 raw post-QC genotype columns, which are resolved to 215 analysis sample
+IDs after exact alias collapse. Raw runs collapse only when they map to the
+same formal clinical snp_code and have an identical phased-genotype digest;
+non-identical repeats are kept separately with __RUNN suffixes.
+
+Breast tumour sample accounting is the main reason raw run counts and analysis
+IDs differ. The breast tumour pass manifest contains 91 DNA BAMs. These resolve
+to 60 formal SNP_MT-T clinical codes; 31 codes have two raw BAMs. Of those 31
+repeated-code pairs, 17 exact genotype-matched pairs are collapsed and 14
+discordant/non-identical pairs are retained as separate run-level analysis IDs
+in the current workflow. Therefore the current Stage 17 breast tumour count
+should be described as 74 analysis sample IDs, not as 74 independent biological
+patients without this caveat.
+
+Clinical master filtering still removes non-usable AU rows:
 
   AT=AUs (AU endometrial):
     EXCLUDE extraction_flag == 'NO HAY'   — no biological material available
@@ -27,11 +44,6 @@ manifest sheets in the harmonised master.  Exclusion rules (verified from data):
 
   MN (breast healthy):
     No exclusion flags present → all 100 DNA samples retained
-
-The GSDMB variant report (inner join on snp_code) provides a second-level
-filter: only snp_codes that produced variant calls will be present in that
-file.  Together, these two filters ensure analysis is limited to samples
-that have both been (a) approved for sequencing and (b) successfully run.
 
 ANALYSES
 --------
@@ -75,6 +87,8 @@ OUTPUTS
     • survival_cox          (endometrial survival only in current default set)
     • summary_significant
     • sample_manifest
+    • sample_identity_audit
+    • sample_collapse_summary
 
   17_SNP_Volcano_Plots_raw_p.png
   17_SNP_Volcano_Plots_FDR.png
@@ -122,7 +136,7 @@ from association_runtime import script17_defaults
 from figure_style import COMPARATIVE_TAG, COHORT_COLORS, GENOTYPE_COLORS, IMPACT_COLORS, arm_color, cohort_color, tagged_title
 from pipeline_utils import attach_amplicon_warning_columns, build_amplicon_warning_lookup
 from pipeline_validation import print_validation_summary, validate_file_exists, validate_percentage_columns
-from sample_identity_utils import attach_analysis_sample_ids
+from sample_identity_utils import attach_analysis_sample_ids, build_analysis_sample_map
 
 # lifelines optional — only needed for survival plots
 try:
@@ -572,6 +586,10 @@ DEFAULTS = script17_defaults()
 DEFAULT_GSDMB  = DEFAULTS["gsdmb"]
 DEFAULT_MASTER = DEFAULTS["master"]
 DEFAULT_PHASED = DEFAULTS["phased"]
+DEFAULT_FORCED_GENOTYPE_MATRIX = DEFAULTS.get(
+    "forced_genotype_matrix",
+    Path(__file__).resolve().parent / "analysis_results/05b_forced_genotypes/05b_genotype_matrix.tsv",
+)
 DEFAULT_OUT    = DEFAULTS["out_dir"]
 DEFAULT_VARIANT_WHITELIST = DEFAULTS.get("variant_whitelist")
 
@@ -661,6 +679,11 @@ def _extract_snp_code(sample_name: str) -> Optional[str]:
       DNA_MT_T_17_Repeticion_IonCode_0119 ? SNP_MT-T_17_REP
     """
     s = str(sample_name)
+    folder_context = None
+    ctx = re.match(r"^(?P<base>.+?)__(?P<cohort>Breast|Endometrium)_(?P<tissue>Healthy|Normal|Tumour|Tumor)$", s, re.IGNORECASE)
+    if ctx:
+        s = ctx.group("base")
+        folder_context = (ctx.group("cohort").lower(), ctx.group("tissue").lower())
     m = re.match(r"^(SNP_MT-T_\d+_REP)", s, re.IGNORECASE)
     if m: return m.group(1).upper()
     m = re.match(r"^(SNP_(?:AT|EN|MN|MT-T)_\d+)", s, re.IGNORECASE)
@@ -674,7 +697,10 @@ def _extract_snp_code(sample_name: str) -> Optional[str]:
     m = re.match(r"^DNA_AT_(\d+)_", s, re.IGNORECASE)
     if m: return f"SNP_AT_{int(m.group(1))}"
     m = re.match(r"^DNA_SNP_(?:CK|RSB)_ECLAI_(\d+)_", s, re.IGNORECASE)
-    if m: return f"SNP_AT_{int(m.group(1))}"
+    if m:
+        if folder_context in {("endometrium", "healthy"), ("endometrium", "normal")}:
+            return f"SNP_EN_{int(m.group(1))}"
+        return f"SNP_AT_{int(m.group(1))}"
     m = re.match(r"^SNP_DNA_AT_(\d+)_", s, re.IGNORECASE)
     if m: return f"SNP_AT_{m.group(1)}"
     m = re.match(r"^SNP_DNA_(MN|EN)_(\d+)_", s, re.IGNORECASE)
@@ -904,6 +930,139 @@ def _extract_variant_id(row: pd.Series) -> str:
     if chrom and pd.notna(pos):
         return f"{chrom}:{int(pos)}"
     return existing.split("&")[0].strip() if existing else "UNKNOWN_VARIANT"
+
+
+def _variant_key_from_columns(df: pd.DataFrame, alt_col: str = "ALT") -> pd.Series:
+    chrom = df["CHROM"].astype(str).str.strip()
+    pos = pd.to_numeric(df["POS"], errors="coerce").fillna(-1).astype(int).astype(str)
+    ref = df["REF"].astype(str).str.strip().str.upper()
+    alt = df[alt_col].astype(str).str.strip().str.upper()
+    return chrom + ":" + pos + ":" + ref + ":" + alt
+
+
+def _genomic_variant_id_from_columns(df: pd.DataFrame, alt_col: str = "ALT") -> pd.Series:
+    chrom = df["CHROM"].astype(str).str.strip()
+    pos = pd.to_numeric(df["POS"], errors="coerce").fillna(-1).astype(int).astype(str)
+    ref = df["REF"].astype(str).str.strip().str.upper()
+    alt = df[alt_col].astype(str).str.strip().str.upper()
+    return chrom + ":" + pos + "_" + ref + ">" + alt
+
+
+def _load_variant_metadata(gsdmb_path: Path, whitelist_path: Optional[Path] = None) -> pd.DataFrame:
+    """Load one annotation row per genomic variant for forced-genotype joins."""
+    variants = pd.read_excel(gsdmb_path, sheet_name="Biological_Annotations")
+    variants.columns = [str(c).strip() for c in variants.columns]
+    required = {"CHROM", "POS", "REF", "ALT"}
+    missing = sorted(required - set(variants.columns))
+    if missing:
+        raise ValueError(f"Annotated GSDMB workbook is missing required variant columns: {missing}")
+
+    variants["rsID"] = variants.apply(_extract_rsid, axis=1).replace("", np.nan)
+    variants["Variant_ID"] = variants.apply(_extract_variant_id, axis=1)
+    variants["Variant_Label"] = variants["rsID"].fillna(variants["Variant_ID"])
+    variants["Variant_Key"] = _variant_key_from_columns(variants, "ALT")
+    variants["_coord_key"] = (
+        variants["CHROM"].astype(str).str.strip() + "|"
+        + pd.to_numeric(variants["POS"], errors="coerce").fillna(-1).astype(int).astype(str) + "|"
+        + variants["REF"].astype(str).str.strip().str.upper() + "|"
+        + variants["ALT"].astype(str).str.strip().str.upper()
+    )
+
+    if whitelist_path is not None:
+        filters = _load_variant_whitelist_filters(whitelist_path)
+        rsid_mask = variants["Variant_ID"].astype(str).str.lower().isin(filters["rsids"])
+        id_mask = variants["Variant_ID"].astype(str).isin(filters["ids"])
+        coord_mask = variants["_coord_key"].isin(filters["coord_keys"])
+        pos_mask = pd.to_numeric(variants.get("POS"), errors="coerce").fillna(-1).astype(int).isin(filters["positions"])
+        keep_mask = id_mask | rsid_mask | coord_mask | pos_mask
+        before = variants["Variant_ID"].nunique()
+        variants = variants[keep_mask].copy()
+        after = variants["Variant_ID"].nunique()
+        print(f"  Variant whitelist retained {after} / {before} unique variants")
+
+    if "SYMBOL" in variants.columns and "Gene" not in variants.columns:
+        variants["Gene"] = variants["SYMBOL"]
+    if "Gene" in variants.columns and "SYMBOL" not in variants.columns:
+        variants["SYMBOL"] = variants["Gene"]
+
+    sort_cols = [c for c in ["Variant_Key", "CANONICAL", "MANE_SELECT", "IMPACT"] if c in variants.columns]
+    if sort_cols:
+        variants = variants.sort_values(sort_cols, ascending=[True] + [False] * (len(sort_cols) - 1), kind="stable")
+    keep = [
+        c for c in [
+            "Variant_Key", "Variant_ID", "rsID", "Variant_Label", "CHROM", "POS", "REF", "ALT",
+            "Gene", "SYMBOL", "Consequence", "IMPACT", "Existing_variation", "HGVSc", "HGVSp",
+            "gnomAD_NFE_AF_combined", "gnomADe_NFE_AF", "gnomADg_NFE_AF",
+        ]
+        if c in variants.columns
+    ]
+    return variants.drop_duplicates("Variant_Key")[keep].copy()
+
+
+def _load_forced_genotype_matrix_long(forced_path: Path, phased_path: Path, metadata: pd.DataFrame) -> pd.DataFrame:
+    """Return forced WT/Het/Hom/no-call genotypes in long format with annotation metadata."""
+    if forced_path is None or not Path(forced_path).exists():
+        raise FileNotFoundError(f"Forced genotype matrix not found: {forced_path}")
+    matrix = pd.read_csv(forced_path, sep="\t", dtype=str)
+    matrix.columns = [str(c).strip() for c in matrix.columns]
+    fixed_cols = ["CHROM", "POS", "REF", "Union_ALT_List", "Multi_Allelic_Union_Site", "Locus_Key"]
+    sample_cols = [c for c in matrix.columns if c not in fixed_cols]
+    if not sample_cols:
+        raise ValueError("Forced genotype matrix has no sample genotype columns")
+
+    matrix["Variant_Key"] = _variant_key_from_columns(matrix.rename(columns={"Union_ALT_List": "ALT"}), "ALT")
+    matrix = matrix.merge(metadata, on="Variant_Key", how="left", suffixes=("", "_annot"))
+    union_coord = pd.DataFrame({
+        "CHROM": matrix["CHROM"],
+        "POS": matrix["POS"],
+        "REF": matrix["REF"],
+        "ALT": matrix["Union_ALT_List"],
+    })
+    matrix["Variant_ID"] = matrix["Variant_ID"].fillna(_genomic_variant_id_from_columns(union_coord, "ALT"))
+    matrix["Variant_Label"] = matrix["Variant_Label"].fillna(matrix["rsID"]).fillna(matrix["Variant_ID"])
+    for col in ["CHROM", "POS", "REF", "ALT"]:
+        annot_col = f"{col}_annot"
+        if annot_col in matrix.columns:
+            matrix[col] = matrix.get(col, pd.Series(np.nan, index=matrix.index)).fillna(matrix[annot_col])
+    if "ALT" not in matrix.columns:
+        matrix["ALT"] = matrix["Union_ALT_List"]
+
+    id_map = build_analysis_sample_map(sample_cols, phased_path, _extract_snp_code)
+    long = matrix.melt(
+        id_vars=[c for c in matrix.columns if c not in sample_cols],
+        value_vars=sample_cols,
+        var_name="Sample_callset_raw",
+        value_name="Genotype_Status",
+    )
+    id_cols = [
+        "raw_sample_name",
+        "snp_code",
+        "analysis_sample_id",
+        "identity_root",
+        "group_order",
+        "exact_group_size",
+        "n_exact_groups_for_code",
+        "collapsed_exact_alias_group",
+        "in_phased_backbone",
+    ]
+    long = long.merge(
+        id_map[[c for c in id_cols if c in id_map.columns]],
+        left_on="Sample_callset_raw",
+        right_on="raw_sample_name",
+        how="left",
+    ).drop(columns=["raw_sample_name"], errors="ignore")
+    long = long.dropna(subset=["snp_code", "analysis_sample_id", "Variant_ID"]).copy()
+    long["Sample"] = long["analysis_sample_id"]
+    state_map = {"WT": "WT", "Het_ALT": "Het", "Hom_ALT": "Hom"}
+    long["Genotype_State"] = long["Genotype_Status"].map(state_map)
+    long["Genotype_Dose"] = long["Genotype_State"].map({"WT": 0, "Het": 1, "Hom": 2})
+    long["GT"] = long["Genotype_State"].map({"WT": "0/0", "Het": "0/1", "Hom": "1/1"})
+    long["Callable_Genotype"] = long["Genotype_State"].isin(["WT", "Het", "Hom"])
+    print(
+        f"  Forced genotype matrix: {len(sample_cols)} raw columns -> "
+        f"{long['Sample'].nunique()} analysis samples x {long['Variant_ID'].nunique()} variants"
+    )
+    return long
 
 
 def _load_variant_whitelist_filters(whitelist_path: Path) -> Dict[str, set]:
@@ -1175,87 +1334,34 @@ def load_clinical_master(master_path: Path,
 
 def load_and_merge(gsdmb_path: Path,
                    master_path: Path,
+                   forced_genotype_path: Path = DEFAULT_FORCED_GENOTYPE_MATRIX,
                    manifest_paths: Optional[Dict[str, Path]] = None,
                    whitelist_path: Optional[Path] = None) -> pd.DataFrame:
     """
-    Join the annotated GSDMB callset to the harmonised clinical master.
+    Join the forced genotype matrix to the harmonised clinical master.
 
-    The merge is intentionally a sample-level inner join on `snp_code`: only
-    samples present in the clinical master and represented in the annotated
-    callset are retained, matching the documented script-17 behaviour.
+    Stage 17 uses the forced genotype matrix as the sample-genotype source so
+    variant-negative callable samples remain in the denominators as WT rather
+    than disappearing from the manifest.
     """
-    print("=== Loading GSDMB SNP calls and harmonised clinical data ===")
-    master = load_clinical_master(master_path, manifest_paths=manifest_paths)
+    print("=== Loading forced GSDMB genotypes and harmonised clinical data ===")
+    if manifest_paths:
+        print("  Forced genotype matrix supplied; skipping legacy pass-manifest filter for clinical master")
+    master = load_clinical_master(master_path, manifest_paths=None)
 
-    print("  Loading annotated GSDMB variants ?")
-    variants = pd.read_excel(gsdmb_path, sheet_name="Biological_Annotations")
-    variants.columns = [str(c).strip() for c in variants.columns]
+    print("  Loading annotated GSDMB variant metadata")
+    metadata = _load_variant_metadata(gsdmb_path, whitelist_path=whitelist_path)
+    print(f"  Variant metadata rows: {len(metadata)}")
 
-    if "Sample" not in variants.columns:
-        raise ValueError("Annotated GSDMB workbook is missing the Sample column")
-
-    variants["Sample"] = variants["Sample"].astype(str).str.strip()
-    variants = attach_analysis_sample_ids(
-        variants,
-        raw_col="Sample",
-        phased_path=DEFAULT_PHASED,
-        extract_snp_code=_extract_snp_code,
-    )
-    failed_rows = int(variants["snp_code"].isna().sum())
-    if failed_rows:
-        examples = variants.loc[variants["snp_code"].isna(), "Sample"].drop_duplicates().head(8).tolist()
-        print(f"  WARNING: could not derive snp_code for {failed_rows} rows; examples: {examples}")
-    variants = variants.dropna(subset=["snp_code", "analysis_sample_id"]).copy()
-
-    if "GT" in variants.columns:
-        variants["GT"] = (
-            variants["GT"].astype(str).str.strip()
-            .replace({"0|0": "0/0", "0|1": "0/1", "1|0": "1/0", "1|1": "1/1"})
-        )
-
-    if "Cohort" in variants.columns:
-        variants = variants.rename(columns={"Cohort": "Cohort_callset"})
-    if "Tissue" in variants.columns:
-        variants = variants.rename(columns={"Tissue": "Tissue_callset"})
-
-    variants["rsID"] = variants.apply(_extract_rsid, axis=1).replace("", np.nan)
-    variants["Variant_ID"] = variants.apply(_extract_variant_id, axis=1)
-    variants["Variant_Label"] = variants["rsID"].fillna(variants["Variant_ID"])
-    if all(c in variants.columns for c in ["CHROM", "POS", "REF", "ALT"]):
-        variants["_coord_key"] = (
-            variants["CHROM"].astype(str).str.strip() + "|"
-            + pd.to_numeric(variants["POS"], errors="coerce").fillna(-1).astype(int).astype(str) + "|"
-            + variants["REF"].astype(str).str.strip().str.upper() + "|"
-            + variants["ALT"].astype(str).str.strip().str.upper()
-        )
-    else:
-        variants["_coord_key"] = ""
-
-    if whitelist_path is not None:
-        filters = _load_variant_whitelist_filters(whitelist_path)
-        rsid_mask = variants["Variant_ID"].astype(str).str.lower().isin(filters["rsids"])
-        id_mask = variants["Variant_ID"].astype(str).isin(filters["ids"])
-        coord_mask = variants["_coord_key"].isin(filters["coord_keys"])
-        pos_mask = pd.to_numeric(variants.get("POS"), errors="coerce").fillna(-1).astype(int).isin(filters["positions"])
-        keep_mask = id_mask | rsid_mask | coord_mask | pos_mask
-        before = variants["Variant_ID"].nunique()
-        variants = variants[keep_mask].copy()
-        after = variants["Variant_ID"].nunique()
-        print(f"  Variant whitelist retained {after} / {before} unique variants")
-
-    # Sample identity is now tracked at analysis_sample_id level: raw runs are
-    # collapsed only when their phased genotype columns are exactly identical.
-    dedup_cols = [c for c in ["analysis_sample_id", "Variant_ID", "CHROM", "POS", "REF", "ALT", "GT"] if c in variants.columns]
-    if dedup_cols:
-        variants = variants.drop_duplicates(subset=dedup_cols).copy()
-
-    merged = variants.merge(master, on="snp_code", how="inner")
-    if "Sample" in merged.columns:
-        merged["Sample_callset_raw"] = merged["Sample"]
-    merged["Sample"] = merged["analysis_sample_id"]
+    forced = _load_forced_genotype_matrix_long(forced_genotype_path, DEFAULT_PHASED, metadata)
+    merged = forced.merge(master, on="snp_code", how="inner", suffixes=("", "_master"))
+    for col in ["Cohort", "Tissue"]:
+        callset_col = f"{col}_callset"
+        if callset_col in merged.columns:
+            merged = merged.drop(columns=[callset_col])
 
     print(
-        f"  Annotated analysis samples: {variants['analysis_sample_id'].nunique()} | "
+        f"  Forced-genotype analysis samples: {forced['analysis_sample_id'].nunique()} | "
         f"clinical samples: {master['snp_code'].nunique()} | "
         f"matched analysis samples: {merged['analysis_sample_id'].nunique()}"
     )
@@ -1304,10 +1410,10 @@ def tumour_vs_control(merged: pd.DataFrame) -> pd.DataFrame:
         if tumour_samples.empty or pooled_controls.empty:
             continue
 
-        n_tumour = len(tumour_samples)
-        n_control = len(pooled_controls)
-        print(f"  {analysis_group}: tumour n={n_tumour}, pooled control n={n_control}")
-        if n_tumour < MIN_CARRIERS or n_control < MIN_CARRIERS:
+        manifest_n_tumour = len(tumour_samples)
+        manifest_n_control = len(pooled_controls)
+        print(f"  {analysis_group}: tumour n={manifest_n_tumour}, pooled control n={manifest_n_control}")
+        if manifest_n_tumour < MIN_CARRIERS or manifest_n_control < MIN_CARRIERS:
             continue
 
         tumour_df = df[df["Sample"].isin(tumour_samples["Sample"])]
@@ -1318,12 +1424,15 @@ def tumour_vs_control(merged: pd.DataFrame) -> pd.DataFrame:
         )["Variant_ID"].dropna().unique()
 
         for var_id in all_variants:
-            tum_carriers = set(tumour_df.loc[tumour_df["Variant_ID"] == var_id, "Sample"].unique())
-            ctl_carriers = set(control_df.loc[control_df["Variant_ID"] == var_id, "Sample"].unique())
-
-            a = len(tum_carriers)
+            tum_geno = _variant_sample_table(df, var_id, tumour_samples["Sample"]).drop_duplicates("Sample")
+            ctl_geno = _variant_sample_table(df, var_id, pooled_controls["Sample"]).drop_duplicates("Sample")
+            if tum_geno.empty or ctl_geno.empty:
+                continue
+            n_tumour = int(tum_geno["Sample"].nunique())
+            n_control = int(ctl_geno["Sample"].nunique())
+            a = int(tum_geno["Genotype_State"].isin(["Het", "Hom"]).sum())
             b = n_tumour - a
-            c = len(ctl_carriers)
+            c = int(ctl_geno["Genotype_State"].isin(["Het", "Hom"]).sum())
             d = n_control - c
 
             if a + c < MIN_COMPARISON_CARRIERS:
@@ -1597,51 +1706,67 @@ def build_bmi_by_tissue_summary(bmi_summary: pd.DataFrame) -> pd.DataFrame:
 
 @lru_cache(maxsize=1)
 def _load_forced_genotype_calls() -> pd.DataFrame:
-    forced_path = Path('/home/gadeaalonsoj/tfm/analysis_results/05b_forced_genotypes/GSDMB_Forced_Genotypes_Union_Sites.xlsx')
-    if not forced_path.exists():
+    forced_path = Path(DEFAULT_FORCED_GENOTYPE_MATRIX)
+    if not forced_path.exists() or not Path(DEFAULT_GSDMB).exists():
         return pd.DataFrame()
-    df = pd.read_excel(forced_path, sheet_name='Per_Sample_Genotypes', engine='openpyxl')
-    df.columns = [str(c).strip() for c in df.columns]
-    df['Variant_Key'] = df['CHROM'].astype(str).str.strip() + ':' + pd.to_numeric(df['POS'], errors='coerce').fillna(-1).astype(int).astype(str) + ':' + df['REF'].astype(str).str.strip().str.upper() + ':' + df['Union_ALT_List'].astype(str).str.strip().str.upper()
-    df['snp_code'] = df['Sample'].map(_extract_snp_code)
-    state_map = {'WT': 'WT', 'Het_ALT': 'Het', 'Hom_ALT': 'Hom'}
-    df['Genotype_State'] = df['Genotype_Status'].map(state_map)
-    df['Genotype_Dose'] = df['Genotype_State'].map({'WT': 0, 'Het': 1, 'Hom': 2})
-    return df
+    metadata = _load_variant_metadata(Path(DEFAULT_GSDMB), whitelist_path=None)
+    return _load_forced_genotype_matrix_long(forced_path, Path(DEFAULT_PHASED), metadata)
 
 
 def _fit_glm_binomial(df: pd.DataFrame, y_col: str, x_cols: List[str]) -> Tuple[float, float, float, float]:
     data = df[[y_col] + x_cols].dropna().copy()
     if data.empty or data[y_col].nunique() < 2:
         return np.nan, np.nan, np.nan, np.nan
+    primary_x = x_cols[0]
+    if data[primary_x].nunique(dropna=True) < 2:
+        return np.nan, np.nan, np.nan, np.nan
+    model_x_cols = [primary_x] + [
+        col for col in x_cols[1:]
+        if data[col].nunique(dropna=True) >= 2
+    ]
     try:
-        X = sm.add_constant(data[x_cols], has_constant='add')
+        X = sm.add_constant(data[model_x_cols], has_constant='add')
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", PerfectSeparationWarning)
             res = sm.GLM(data[y_col].astype(float), X, family=sm.families.Binomial()).fit()
-        coef = float(res.params[x_cols[0]])
-        ci = res.conf_int().loc[x_cols[0]]
+        coef = float(res.params[primary_x])
+        ci = res.conf_int().loc[primary_x]
         coef = float(np.clip(coef, -20, 20))
         lo = float(np.clip(ci.iloc[0], -20, 20))
         hi = float(np.clip(ci.iloc[1], -20, 20))
-        return float(np.exp(coef)), float(np.exp(lo)), float(np.exp(hi)), float(res.pvalues[x_cols[0]])
+        return float(np.exp(coef)), float(np.exp(lo)), float(np.exp(hi)), float(res.pvalues[primary_x])
     except Exception:
         return np.nan, np.nan, np.nan, np.nan
 
 
 def _variant_sample_table(merged: pd.DataFrame, variant_id: str, sample_subset: Optional[pd.Series] = None) -> pd.DataFrame:
-    forced = _load_forced_genotype_calls()
-    if forced.empty:
-        return pd.DataFrame()
-    vmap = _variant_map(merged)
-    vmap = vmap[vmap['Variant_ID'].astype(str) == str(variant_id)].copy()
-    if vmap.empty:
-        return pd.DataFrame()
-    out = forced.merge(vmap[['Variant_ID', 'Variant_Key', 'Gene']], on='Variant_Key', how='inner')
+    if merged is not None and not merged.empty and "Genotype_State" in merged.columns:
+        keep_cols = [
+            c for c in [
+                "Sample", "Sample_callset_raw", "snp_code", "analysis_sample_id",
+                "Variant_ID", "Variant_Key", "Gene", "Genotype_State",
+                "Genotype_Dose", "Genotype_Status", "Callable_Genotype",
+            ]
+            if c in merged.columns
+        ]
+        out = merged.loc[merged["Variant_ID"].astype(str) == str(variant_id), keep_cols].drop_duplicates().copy()
+    else:
+        forced = _load_forced_genotype_calls()
+        if forced.empty:
+            return pd.DataFrame()
+        vmap = _variant_map(merged)
+        vmap = vmap[vmap['Variant_ID'].astype(str) == str(variant_id)].copy()
+        if vmap.empty:
+            return pd.DataFrame()
+        out = forced.merge(vmap[['Variant_ID', 'Variant_Key', 'Gene']], on='Variant_Key', how='inner')
     if sample_subset is not None:
         keep = set(pd.Series(sample_subset).astype(str))
         keep_codes = {k for k in (_extract_snp_code(v) for v in keep) if k}
-        out = out[out['Sample'].astype(str).isin(keep) | out['snp_code'].astype(str).isin(keep) | out['snp_code'].astype(str).isin(keep_codes)].copy()
+        mask = out['Sample'].astype(str).isin(keep)
+        if "snp_code" in out.columns:
+            mask |= out['snp_code'].astype(str).isin(keep) | out['snp_code'].astype(str).isin(keep_codes)
+        out = out[mask].copy()
+    out = out[out["Genotype_State"].isin(["WT", "Het", "Hom"])].copy()
     return out
 
 
@@ -2022,8 +2147,8 @@ def make_volcano_plots(tvh: pd.DataFrame, out_dir: Path):
     if tvh.empty:
         return
     for suffix, p_col, threshold, ylabel in [
-        ("raw_p", "P_Value", 0.05, "-log10 raw p-value"),
-        ("FDR", "FDR_P_Value", FDR_THRESHOLD, "-log10 FDR q-value"),
+        ("raw_p", "P_Value", 0.05, "-log10 raw P value"),
+        ("FDR", "FDR_P_Value", FDR_THRESHOLD, "-log10(FDR q-value)"),
     ]:
         fig, axes = plt.subplots(1, 3, figsize=(17.8, 6.2), squeeze=False, gridspec_kw={"wspace": 0.18})
         legend_handles = []
@@ -2080,7 +2205,7 @@ def make_volcano_plots(tvh: pd.DataFrame, out_dir: Path):
             ax.text(
                 0.02,
                 0.98,
-                f"n={len(sub)} tests\nnominal={(sub['P_Value'] < 0.05).sum()} | FDR={(sub['FDR_P_Value'] < FDR_THRESHOLD).sum()}",
+                f"n = {len(sub)} tests\nNominal: {(sub['P_Value'] < 0.05).sum()} | FDR q: {(sub['FDR_P_Value'] < FDR_THRESHOLD).sum()}",
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
@@ -2088,13 +2213,13 @@ def make_volcano_plots(tvh: pd.DataFrame, out_dir: Path):
                 bbox=dict(boxstyle="round,pad=0.28", fc="white", ec="#D0D5DD", alpha=0.96),
             )
             ax.set_title(f'{grp} tumour vs pooled control', fontsize=10.5, fontweight='bold', loc="left", pad=10)
-            ax.set_xlabel('log2 odds ratio (tumour vs control)')
-            ax.set_ylabel(ylabel)
+            ax.set_xlabel('log2 odds ratio (tumour / control)')
+            ax.set_ylabel(ylabel if ax is axes[0][0] else "", fontsize=9.5, labelpad=6)
             _style_ax(ax, grid=False)
             if not legend_handles:
                 legend_handles = [
                     mpatches.Patch(facecolor=class_colors["Not significant"], label="Not significant"),
-                    mpatches.Patch(facecolor=class_colors["Nominal only"], label="Nominal p < 0.05"),
+                    mpatches.Patch(facecolor=class_colors["Nominal only"], label="Nominal P < 0.05"),
                     mpatches.Patch(facecolor=class_colors[f"FDR < {FDR_THRESHOLD:g}"], label=f"FDR q < {FDR_THRESHOLD:g}"),
                 ]
         fig.legend(
@@ -2107,8 +2232,9 @@ def make_volcano_plots(tvh: pd.DataFrame, out_dir: Path):
             title="Association support",
             title_fontsize=9,
         )
-        fig.suptitle(f'Tumour vs control SNP association volcano plots ({suffix.replace("_", " ")})', fontsize=13, fontweight='bold', y=1.05)
-        _safe_tight_layout(fig, rect=[0.01, 0.02, 0.99, 0.90], pad=1.0, w_pad=2.4)
+        metric_label = "raw P value" if suffix == "raw_p" else "FDR q-value"
+        fig.suptitle(f'Tumour vs control SNP association volcano plots ({metric_label})', fontsize=13, fontweight='bold', y=1.05)
+        _safe_tight_layout(fig, rect=[0.025, 0.02, 0.99, 0.90], pad=1.0, w_pad=2.4)
         out = out_dir / f'17_SNP_Volcano_{suffix}.png'
         _save_figure(fig, out, pad_inches=0.22)
 
@@ -2120,18 +2246,18 @@ def make_heatmaps(breast_clin: pd.DataFrame, endo_clin: pd.DataFrame, out_dir: P
         "P_Unadj",
         out_dir / "17_SNP_Heatmap_Breast_raw_p.png",
         f"Breast clinical association heatmap ({suffix})",
-        cbar_label="-log10 raw p",
+        cbar_label="-log10(raw P value)",
         top_n=12,
         significant_only=significant_only,
         annotate=False,
-        metric_name="raw p",
+        metric_name="raw P value",
     )
     _plot_pivot_heatmap(
         breast_clin,
         "FDR_Unadj",
         out_dir / "17_SNP_Heatmap_Breast_FDR.png",
         f"Breast clinical association heatmap ({suffix})",
-        cbar_label="-log10 FDR",
+        cbar_label="-log10(FDR q-value)",
         top_n=12,
         significant_only=significant_only,
         annotate=False,
@@ -2142,18 +2268,18 @@ def make_heatmaps(breast_clin: pd.DataFrame, endo_clin: pd.DataFrame, out_dir: P
         "P_Unadj",
         out_dir / "17_SNP_Heatmap_Endometrial_raw_p.png",
         f"Endometrial clinical association heatmap ({suffix})",
-        cbar_label="-log10 raw p",
+        cbar_label="-log10(raw P value)",
         top_n=12,
         significant_only=significant_only,
         annotate=False,
-        metric_name="raw p",
+        metric_name="raw P value",
     )
     _plot_pivot_heatmap(
         endo_clin,
         "FDR_Unadj",
         out_dir / "17_SNP_Heatmap_Endometrial_FDR.png",
         f"Endometrial clinical association heatmap ({suffix})",
-        cbar_label="-log10 FDR",
+        cbar_label="-log10(FDR q-value)",
         top_n=12,
         significant_only=significant_only,
         annotate=False,
@@ -2167,7 +2293,7 @@ def make_main_text_heatmaps(breast_clin: pd.DataFrame, endo_clin: pd.DataFrame, 
         "FDR_Unadj",
         out_dir / "17_SNP_Heatmap_Breast_MainText.png",
         "Breast main-text clinical heatmap",
-        cbar_label="-log10 FDR",
+        cbar_label="-log10(FDR q-value)",
         top_n=8,
         significant_only=True,
         annotate=True,
@@ -2178,7 +2304,7 @@ def make_main_text_heatmaps(breast_clin: pd.DataFrame, endo_clin: pd.DataFrame, 
         "FDR_Unadj",
         out_dir / "17_SNP_Heatmap_Endometrial_MainText.png",
         "Endometrial main-text clinical heatmap",
-        cbar_label="-log10 FDR",
+        cbar_label="-log10(FDR q-value)",
         top_n=8,
         significant_only=True,
         annotate=True,
@@ -2229,25 +2355,25 @@ def make_distribution_plots(breast_clin: pd.DataFrame, endo_clin: pd.DataFrame, 
     for cohort, df in [("Breast", breast_clin), ("Endometrial", endo_clin)]:
         out = out_dir / f"17_Distribution_{cohort}.png"
         if df.empty or "P_Unadj" not in df.columns:
-            _save_placeholder_plot(out, f"{cohort} clinical p-value distribution", "No results available")
+            _save_placeholder_plot(out, f"{cohort} clinical P-value distribution", "No results available")
             continue
         vals = pd.to_numeric(df["P_Unadj"], errors="coerce").dropna()
         if vals.empty:
-            _save_placeholder_plot(out, f"{cohort} clinical p-value distribution", "No results available")
+            _save_placeholder_plot(out, f"{cohort} clinical P-value distribution", "No results available")
             continue
         fig, ax = plt.subplots(figsize=(8.5, 4.8))
         sns.histplot(-np.log10(vals.clip(lower=1e-300)), bins=20, color="#4C72B0", edgecolor="white", ax=ax)
-        ax.axvline(-np.log10(0.05), ls="--", lw=1.2, c="#D55E00", label="Nominal p=0.05")
-        ax.axvline(-np.log10(FDR_THRESHOLD), ls=":", lw=1.2, c="#009E73", label=f"FDR={FDR_THRESHOLD:g}")
-        ax.set_xlabel("-log10 raw p")
+        ax.axvline(-np.log10(0.05), ls="--", lw=1.2, c="#D55E00", label="Nominal P = 0.05")
+        ax.axvline(-np.log10(FDR_THRESHOLD), ls=":", lw=1.2, c="#009E73", label=f"FDR q = {FDR_THRESHOLD:g}")
+        ax.set_xlabel("-log10(raw P value)")
         ax.set_ylabel("Number of associations")
-        ax.set_title(f"{cohort} clinical association p-value distribution", fontweight="bold")
+        ax.set_title(f"{cohort} clinical association P-value distribution", fontweight="bold")
         sig_nom = int((pd.to_numeric(df["P_Unadj"], errors="coerce") < 0.05).sum())
         sig_fdr = int((pd.to_numeric(df["FDR_Unadj"], errors="coerce") < FDR_THRESHOLD).sum()) if "FDR_Unadj" in df.columns else 0
         ax.text(
             0.98,
             0.98,
-            f"Nominal: {sig_nom}\nFDR: {sig_fdr}",
+            f"Nominal: {sig_nom}\nFDR q: {sig_fdr}",
             transform=ax.transAxes,
             ha="right",
             va="top",
@@ -2501,7 +2627,7 @@ def make_km_plots(surv_res: pd.DataFrame, km_pages, out_dir: Path):
                 _style_ax(ax, grid=False)
                 ax.yaxis.grid(True, linestyle=":", color="#D5DBE3", alpha=0.9, linewidth=0.7)
                 ax.xaxis.grid(True, linestyle=":", color="#E4E7EC", alpha=0.75, linewidth=0.6)
-                legend = ax.legend(title="Group", frameon=True, loc="upper right", fontsize=8.5, title_fontsize=8.5)
+                legend = ax.legend(title="Stratification group", frameon=True, loc="upper right", fontsize=8.5, title_fontsize=8.5)
                 legend.get_frame().set_edgecolor("#D0D5DD")
                 legend.get_frame().set_facecolor("white")
                 legend.get_frame().set_alpha(0.95)
@@ -2895,7 +3021,7 @@ def make_risk_genotype_composition_plots(risk_res, merged, out_dir):
             ax.set_visible(False)
 
         fig.legend([plt.Rectangle((0, 0), 1, 1, facecolor=_GENO_PLOT_C[g], edgecolor="#4A4A4A", hatch=_GENO_PLOT_HATCH[g]) for g in GENO_ORDER],
-                   ["WT", "Het", "Hom"], title="Genotype state (WT / Het / Hom)",
+                   ["WT", "Het", "Hom"], title="Genotype state (WT / heterozygous / homozygous)",
                    loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.02))
         fig.suptitle(tagged_title(f"Cancer Risk Genotype Composition in Tumour and Pooled Control Samples: {cohort}", COMPARATIVE_TAG),
                      fontsize=12, fontweight="bold", y=1.04)
@@ -2943,19 +3069,19 @@ def build_significant_overview(summary: pd.DataFrame) -> pd.DataFrame:
                 context = (
                     f"{row.get('Analysis_Group', '')}: tumour {pd.to_numeric(row.get('Freq_Tumour_%'), errors='coerce'):.2f}% vs "
                     f"control {pd.to_numeric(row.get('Freq_Control_%'), errors='coerce'):.2f}% "
-                    f"(P={best_p:.3g}; FDR={best_fdr:.3g})"
+                    f"(P = {best_p:.3g}; FDR q = {best_fdr:.3g})"
                 )
             elif analysis_type == "Cancer_Risk":
                 best_p = _min_numeric_across(row, ["P_Adj_Age", "P_Adj_Trend", "P_Unadj", "P_Hom_vs_WT", "P_Het_vs_WT"])
                 best_fdr = _min_numeric_across(row, ["FDR_Adj_Age", "FDR_Adj_Trend", "FDR_Unadj", "FDR_Hom_vs_WT", "FDR_Het_vs_WT"])
                 cohort = str(row.get("Cohort", "study")).strip() or "study"
-                context = f"{cohort} cancer risk (best P={best_p:.3g}; best FDR={best_fdr:.3g})"
+                context = f"{cohort} cancer risk (best P = {best_p:.3g}; best FDR q = {best_fdr:.3g})"
             else:
                 best_p = _min_numeric_across(row, ["P_Unadj", "P_Adj_Age", "P_Adj_BMI", "P_Adj_AgeBMI"])
                 best_fdr = _min_numeric_across(row, ["FDR_Unadj", "FDR_Adj_Age", "FDR_Adj_BMI", "FDR_Adj_AgeBMI"])
                 cohort = str(row.get("Cohort", row.get("Analysis_Group", "study"))).strip() or "study"
                 label = str(row.get("Clin_Label", "clinical association")).strip() or "clinical association"
-                context = f"{cohort}: {label} (best P={best_p:.3g}; best FDR={best_fdr:.3g})"
+                context = f"{cohort}: {label} (best P = {best_p:.3g}; best FDR q = {best_fdr:.3g})"
 
             if pd.notna(best_p):
                 best_p_values.append(float(best_p))
@@ -2987,6 +3113,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="SNP association analysis for clinical and risk endpoints")
     p.add_argument("--gsdmb", default=str(DEFAULT_GSDMB))
     p.add_argument("--master", default=str(DEFAULT_MASTER))
+    p.add_argument("--forced_genotypes", default=str(DEFAULT_FORCED_GENOTYPE_MATRIX),
+                   help="Forced genotype matrix from stage 05b; used as the stage-17 genotype source")
     p.add_argument("--out_dir", default=str(DEFAULT_OUT))
     p.add_argument("--variant_whitelist", default=(str(DEFAULT_VARIANT_WHITELIST) if DEFAULT_VARIANT_WHITELIST else None),
                    help="Excel whitelist from script 11 defining the thesis SNP backbone")
@@ -3007,9 +3135,11 @@ def main():
     args    = parse_args()
     gsdmb   = Path(args.gsdmb)
     master  = Path(args.master)
+    forced_genotypes = Path(args.forced_genotypes)
     out_dir = Path(args.out_dir)
     validate_file_exists(gsdmb, "Script 17 GSDMB input")
     validate_file_exists(master, "Script 17 master input")
+    validate_file_exists(forced_genotypes, "Script 17 forced genotype input")
     variant_whitelist = None if args.variant_whitelist in {None, "", "None"} else Path(args.variant_whitelist)
     if variant_whitelist is not None:
         validate_file_exists(variant_whitelist, "Script 17 variant whitelist")
@@ -3027,7 +3157,7 @@ def main():
             "breast-normal":      Path(args.manifest_breast_normal),
         }
 
-    merged = load_and_merge(gsdmb, master, manifest_paths=manifest_paths, whitelist_path=variant_whitelist)
+    merged = load_and_merge(gsdmb, master, forced_genotype_path=forced_genotypes, manifest_paths=manifest_paths, whitelist_path=variant_whitelist)
     print_validation_summary(merged, "Sample", "Script 17 merged analysis input", ["Cohort", "Tissue"])
     warning_lookup = build_amplicon_warning_lookup(merged, variant_col="Variant_ID", chrom_col="CHROM", pos_col="POS")
     bmi_category_summary, bmi_data_availability = build_bmi_category_summaries(merged)
@@ -3172,6 +3302,10 @@ def main():
             "Section": "Design note",
             "Details": "This script follows the cleaned unpaired workflow. Historical source sheet labels do not imply matched tumour-normal modelling.",
         },
+        {
+            "Section": "Sample identity audit",
+            "Details": "Raw genotype columns are mapped to formal clinical snp_code values. Exact alias runs with the same snp_code and identical phased-genotype digest are collapsed to one analysis sample; non-identical repeats are kept with RUN suffixes.",
+        },
     ])
 
     workbook_index = pd.DataFrame([
@@ -3184,14 +3318,16 @@ def main():
         {"Order": 7, "Sheet": "endo_clinical_assoc", "Priority": "Primary", "Purpose": "Endometrial tumour clinical SNP associations"},
         {"Order": 8, "Sheet": "genotype_dose", "Priority": "Primary", "Purpose": "Genotype-dose follow-up for the main tumour cohorts"},
         {"Order": 9, "Sheet": "sample_manifest", "Priority": "Primary", "Purpose": "Manifest of sequenced samples entering the analysis"},
-        {"Order": 10, "Sheet": "breast_tx_summary", "Priority": "Secondary", "Purpose": "Breast treatment-stratified sample summary"},
-        {"Order": 11, "Sheet": "breast_tx_clinical", "Priority": "Secondary", "Purpose": "Breast treatment-stratified clinical SNP associations"},
-        {"Order": 12, "Sheet": "breast_tx_survival", "Priority": "Secondary", "Purpose": "Breast treatment-stratified survival outputs"},
-        {"Order": 13, "Sheet": "survival_cox", "Priority": "Secondary", "Purpose": "Secondary survival modelling outputs"},
-        {"Order": 14, "Sheet": "cancer_risk", "Priority": "Secondary", "Purpose": "Secondary case-control risk summaries"},
-        {"Order": 15, "Sheet": "bmi_category_summary", "Priority": "Secondary", "Purpose": "BMI category summary table"},
-        {"Order": 16, "Sheet": "bmi_by_tissue_summary", "Priority": "Secondary", "Purpose": "BMI category summary by tissue family"},
-        {"Order": 17, "Sheet": "bmi_data_availability", "Priority": "Secondary", "Purpose": "BMI availability and exclusions"},
+        {"Order": 10, "Sheet": "sample_identity_audit", "Priority": "Primary", "Purpose": "Raw genotype column to analysis-sample mapping audit"},
+        {"Order": 11, "Sheet": "sample_collapse_summary", "Priority": "Primary", "Purpose": "Raw alias groups collapsed into one analysis sample"},
+        {"Order": 12, "Sheet": "breast_tx_summary", "Priority": "Secondary", "Purpose": "Breast treatment-stratified sample summary"},
+        {"Order": 13, "Sheet": "breast_tx_clinical", "Priority": "Secondary", "Purpose": "Breast treatment-stratified clinical SNP associations"},
+        {"Order": 14, "Sheet": "breast_tx_survival", "Priority": "Secondary", "Purpose": "Breast treatment-stratified survival outputs"},
+        {"Order": 15, "Sheet": "survival_cox", "Priority": "Secondary", "Purpose": "Secondary survival modelling outputs"},
+        {"Order": 16, "Sheet": "cancer_risk", "Priority": "Secondary", "Purpose": "Secondary case-control risk summaries"},
+        {"Order": 17, "Sheet": "bmi_category_summary", "Priority": "Secondary", "Purpose": "BMI category summary table"},
+        {"Order": 18, "Sheet": "bmi_by_tissue_summary", "Priority": "Secondary", "Purpose": "BMI category summary by tissue family"},
+        {"Order": 19, "Sheet": "bmi_data_availability", "Priority": "Secondary", "Purpose": "BMI availability and exclusions"},
     ])
 
     at_a_glance = pd.DataFrame([
@@ -3218,6 +3354,48 @@ def main():
         if c in merged.columns
     ]].sort_values(["Cohort", "Tissue", "Sample"]).reset_index(drop=True)
 
+    audit_cols = [
+        "Sample_callset_raw",
+        "Sample",
+        "snp_code",
+        "analysis_sample_id",
+        "identity_root",
+        "group_order",
+        "exact_group_size",
+        "n_exact_groups_for_code",
+        "collapsed_exact_alias_group",
+        "in_phased_backbone",
+        "Cohort",
+        "Tissue",
+        "sheet",
+    ]
+    sample_identity_audit = (
+        merged.drop_duplicates("Sample_callset_raw")[
+            [c for c in audit_cols if c in merged.columns]
+        ]
+        .sort_values(["snp_code", "Sample", "Sample_callset_raw"])
+        .reset_index(drop=True)
+    )
+    if not sample_identity_audit.empty:
+        sample_collapse_summary = (
+            sample_identity_audit.groupby(["Sample", "snp_code"], dropna=False)
+            .agg(
+                Raw_Column_Count=("Sample_callset_raw", "count"),
+                Raw_Column_Names=("Sample_callset_raw", lambda x: " | ".join(x.astype(str))),
+                Exact_Alias_Collapse=("collapsed_exact_alias_group", "max"),
+                Exact_Group_Size=("exact_group_size", "max"),
+                Genotype_Groups_For_Code=("n_exact_groups_for_code", "max"),
+                Cohort=("Cohort", "first"),
+                Tissue=("Tissue", "first"),
+            )
+            .reset_index()
+            .query("Raw_Column_Count > 1")
+            .sort_values(["snp_code", "Sample"])
+            .reset_index(drop=True)
+        )
+    else:
+        sample_collapse_summary = pd.DataFrame()
+
     # Write Excel
     print("=== Writing output Excel ===")
     with pd.ExcelWriter(out_xlsx, engine="openpyxl") as xw:
@@ -3240,6 +3418,10 @@ def main():
         if not bmi_by_tissue_summary.empty: bmi_by_tissue_summary.to_excel(xw, sheet_name="bmi_by_tissue_summary", index=False)
         if not bmi_data_availability.empty: bmi_data_availability.to_excel(xw, sheet_name="bmi_data_availability", index=False)
         manifest.to_excel(xw,                            sheet_name="sample_manifest",        index=False)
+        if not sample_identity_audit.empty:
+            sample_identity_audit.to_excel(xw,             sheet_name="sample_identity_audit",  index=False)
+        if not sample_collapse_summary.empty:
+            sample_collapse_summary.to_excel(xw,           sheet_name="sample_collapse_summary", index=False)
     print(f"  Saved: {out_xlsx}\n")
 
     # Plots

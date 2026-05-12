@@ -401,7 +401,7 @@ def plot_qc_summary(titv: dict, df: pd.DataFrame,
         ax.text(0.5, 0.5, "No allelic fraction data\n(AF column missing or all homozygous)",
                 transform=ax.transAxes, ha="center", va="center", fontsize=11)
         ax.set_title("Allelic Balance", fontweight="bold")
-    ax.set_xlabel("Allele Fraction (AF)")
+    ax.set_xlabel("Alternate allele fraction")
     ax.set_ylabel("Count")
     ax.set_xlim(0, 1)
     ax.grid(axis="y", alpha=0.3)
@@ -422,8 +422,8 @@ def plot_qc_summary(titv: dict, df: pd.DataFrame,
                    linewidth=1.5, label=f"Acceptable (<{t_cv['acceptable']}%)")
         ax.axvline(t_cv["poor"],       color="#e74c3c", linestyle="--",
                    linewidth=1.5, label=f"Poor (<{t_cv['poor']}%)")
-        ax.set_xlabel("CV% of variant counts across samples")
-        ax.set_title("Variant Count Variability by Group",
+        ax.set_xlabel("Coefficient of variation in variant counts across samples (%)")
+        ax.set_title("Variant-count variability by group",
                      fontweight="bold", fontsize=11)
         ax.legend(loc="lower right", fontsize=7)
     else:

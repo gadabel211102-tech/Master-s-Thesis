@@ -225,7 +225,10 @@ META_COLS = [
 # qPCR isoform columns from script 20 Excel
 ISOFORM_COLS = ["G1", "G2", "G3", "G3b", "G4",
                 "pyroptotic_isoform_fraction", "non_pyroptotic_isoform_fraction",
-                "G4_vs_total", "G2_vs_total"]
+                "G4_vs_total", "G2_vs_total",
+                "exon6_containing_fraction", "exon6_lacking_fraction",
+                "exon6_balance_log2", "exon7_containing_fraction",
+                "exon7_lacking_fraction", "exon7_balance_log2"]
 
 # Clinical variables (reuse from script 17/20 definitions)
 CLINICAL_VARS_BREAST = {
@@ -274,13 +277,13 @@ def _sx(v) -> Optional[str]:
         (r"^DNA_(AT|EN|MN)_(\d+)",                 lambda m: f"SNP_{m.group(1).upper()}_{m.group(2)}"),
         (r"^DNA_(?:SNP_)?MT[-_]T_(\d+)",           lambda m: f"SNP_MT-T_{m.group(1)}"),
         (r"^MAMAH2_MT[-_]T_(\d+)",                lambda m: f"SNP_MT-T_{m.group(1)}"),
-        (r"^MAMAH2_MT[-_]N_(\d+)",                lambda m: f"SNP_MN_{m.group(1)}"),
-        (r"^RNA_SNP_(AT|EN|MN|MT-T|MT-N)[-_]?(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
-        (r"^SNP_RNA_(AT|EN|MN|MT-T|MT-N)_(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
-        (r"^SNP_(AT|EN|MN|MT-T|MT-N)_RNA_(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
+        (r"^MAMAH2_MT[-_]N_(\d+)",                lambda m: f"SNP_MT-T_{m.group(1)}"),
+        (r"^RNA_SNP_(AT|EN|MN|MT-T|MT-N)[-_]?(\d+)", lambda m: f"SNP_{'MT-T' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
+        (r"^SNP_RNA_(AT|EN|MN|MT-T|MT-N)_(\d+)", lambda m: f"SNP_{'MT-T' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
+        (r"^SNP_(AT|EN|MN|MT-T|MT-N)_RNA_(\d+)", lambda m: f"SNP_{'MT-T' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
         (r"^RNA_(AT|EN|MN)_(\d+)",                 lambda m: f"SNP_{m.group(1).upper()}_{m.group(2)}"),
         (r"^RNA_MT[-_]T_(\d+)",                    lambda m: f"SNP_MT-T_{m.group(1)}"),
-        (r"^RNA_MT[-_]N_(\d+)",                    lambda m: f"SNP_MN_{m.group(1)}"),
+        (r"^RNA_MT[-_]N_(\d+)",                    lambda m: f"SNP_MT-T_{m.group(1)}"),
     ]
     for pat, fmt in pattens:
         m = re.match(pat, t, re.I)
@@ -798,7 +801,9 @@ def load_isoform_data(expr_path: Path) -> pd.DataFrame:
     for c in ["G1", "G2", "G3", "G3b", "G4", "GSDMB"]:
         df[c] = pd.to_numeric(df.get(c), errors="coerce")
 
-    # Compute derived columns
+    # Compute derived columns. The legacy pyroptotic/non-pyroptotic columns are
+    # retained for backward compatibility; exon-defined variables are the
+    # biologically preferred interpretation layer.
     df["pyroptotic_isoform_fraction"] = df[["G3", "G3b", "G4"]].sum(
         axis=1, min_count=1)
     df["non_pyroptotic_isoform_fraction"] = df[["G1", "G2"]].sum(
@@ -809,6 +814,25 @@ def load_isoform_data(expr_path: Path) -> pd.DataFrame:
         df["isoform_total"] > 0, df["G4"] / df["isoform_total"], np.nan)
     df["G2_vs_total"] = np.where(
         df["isoform_total"] > 0, df["G2"] / df["isoform_total"], np.nan)
+    canonical_total = df[["G1", "G2", "G3", "G3b", "G4"]].sum(axis=1, min_count=1)
+    exon6_containing = df[["G3", "G3b", "G4"]].sum(axis=1, min_count=1)
+    exon6_lacking = df[["G1", "G2"]].sum(axis=1, min_count=1)
+    exon7_containing = df[["G1", "G3", "G3b"]].sum(axis=1, min_count=1)
+    exon7_lacking = df[["G2", "G4"]].sum(axis=1, min_count=1)
+    df["exon6_containing_fraction"] = np.where(
+        canonical_total > 0, exon6_containing / canonical_total, np.nan)
+    df["exon6_lacking_fraction"] = np.where(
+        canonical_total > 0, exon6_lacking / canonical_total, np.nan)
+    df["exon6_balance_log2"] = np.log2(
+        (pd.to_numeric(exon6_containing, errors="coerce") + 1e-6) /
+        (pd.to_numeric(exon6_lacking, errors="coerce") + 1e-6))
+    df["exon7_containing_fraction"] = np.where(
+        canonical_total > 0, exon7_containing / canonical_total, np.nan)
+    df["exon7_lacking_fraction"] = np.where(
+        canonical_total > 0, exon7_lacking / canonical_total, np.nan)
+    df["exon7_balance_log2"] = np.log2(
+        (pd.to_numeric(exon7_containing, errors="coerce") + 1e-6) /
+        (pd.to_numeric(exon7_lacking, errors="coerce") + 1e-6))
 
     # Derive snp_code from sample name columns
     for raw_col in ["CODIGO JC", "NOMBRE DE LA MUESTRA"]:
@@ -1131,8 +1155,8 @@ def assoc_isoform_vs_genes(
     """
     Spearman correlation between each qPCR isoform endpoint and each
     BAM-derived panel gene. This is the key biological analysis â€” does
-    the pyroptotic isoform fraction (G4_vs_total) correlate with
-    downstream immune gene expression?
+    exon-defined isoform balance and individual isoform fractions correlate
+    with downstream immune gene expression?
 
     Runs per cohort and globally.
     """
@@ -1392,7 +1416,7 @@ def plot_heatmap(df: pd.DataFrame, row_col: str, col_col: str,
     if _HAS_SNS:
         sns.heatmap(pivot, cmap="coolwarm", center=0,
                     linewidths=0.4, linecolor="white", ax=ax,
-                    cbar_kws={"label": "signed -logâ‚â‚€(p)"})
+                    cbar_kws={"label": "signed -log10(P value)"})
     else:
         im = ax.imshow(pivot.values, aspect="auto", cmap="coolwarm")
         ax.set_xticks(range(len(pivot.columns)))
@@ -1400,7 +1424,7 @@ def plot_heatmap(df: pd.DataFrame, row_col: str, col_col: str,
         ax.set_xticklabels(pivot.columns, rotation=40, ha="right", fontsize=8)
         ax.set_yticklabels(pivot.index, fontsize=8)
         fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02,
-                     label="signed -logâ‚â‚€(p)")
+                     label="signed -log10(P value)")
 
     ax.set_title(title, fontsize=12, fontweight="bold")
     plt.tight_layout()
@@ -1455,7 +1479,7 @@ def plot_gene_group_distributions(
                         hue="bam_group", hue_order=group_order,
                         palette=colors, ax=ax, fliersize=0,
                         width=0.7, linewidth=0.8)
-            ax.legend(title="Group", fontsize=7,
+            ax.legend(title="Cohort", fontsize=7,
                       title_fontsize=7, loc="upper right")
         else:
             # Fallback: one box per gene, all groups combined
@@ -1528,9 +1552,9 @@ def plot_chr17_locus(ratio: pd.DataFrame, out_dir: Path) -> None:
     ax.set_xticks(x)
     ax.set_xticklabels(locus_genes, rotation=45, ha="right", fontsize=9)
     ax.set_ylabel("Median normalised expression", fontsize=10)
-    ax.set_title("Chr17q12 locus: gene expression per cohort",
+    ax.set_title("Chr17q12 locus gene expression by cohort",
                  fontsize=12, fontweight="bold")
-    ax.legend(fontsize=8, loc="upper right")
+    ax.legend(fontsize=8, loc="upper right", title="Cohort")
     _style_ax(ax)
     plt.tight_layout()
     fig.savefig(out_dir / "20b_Chr17_Locus_Expression.png",
@@ -1570,7 +1594,7 @@ def plot_expression_heatmap(ratio: pd.DataFrame,
         sns.heatmap(mat, cmap="viridis", ax=ax,
                     xticklabels=gene_cols,
                     yticklabels=False,
-                    cbar_kws={"label": "log1p(normalised depth)"})
+                    cbar_kws={"label": "log1p(normalised expression)"})
         ax.set_xticklabels(gene_cols, rotation=45, ha="right", fontsize=7)
     else:
         im = ax.imshow(mat.values, aspect="auto", cmap="viridis")
@@ -1578,7 +1602,7 @@ def plot_expression_heatmap(ratio: pd.DataFrame,
         ax.set_xticklabels(gene_cols, rotation=45, ha="right", fontsize=7)
         ax.set_yticks([])
         fig.colorbar(im, ax=ax, fraction=0.02, pad=0.02,
-                     label="log1p(normalised depth)")
+                     label="log1p(normalised expression)")
 
     ax.set_title("Panel gene expression heatmap (all samples)",
                  fontsize=12, fontweight="bold")
@@ -1814,7 +1838,7 @@ def main() -> None:
         plot_heatmap(
             isoform_gene, "Isoform", "Gene", "P_Value",
             "qPCR isoform fraction vs BAM panel gene expression\n"
-            "(signed Spearman Ï, -logâ‚â‚€ scaled)",
+            "(signed Spearman rho, -log10(P value) scaled)",
             out_dir / "20b_Isoform_Immune_Heatmap.png",
         )
 
@@ -1851,12 +1875,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
 
 
 

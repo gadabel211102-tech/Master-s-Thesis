@@ -55,9 +55,23 @@ PATHS = {
 
 ISOFORM_COLS = [
     "G1", "G2", "G3", "G3b", "G4", "GSDMB",
+    "GSDMB1_expression", "GSDMB2_expression", "GSDMB3_expression", "GSDMB4_expression",
+    "exon6_positive_fraction", "exon6_positive_to_negative_log2",
+    "exon7_containing_fraction", "exon7_deficient_fraction", "exon7_containing_to_deficient_log2",
+    "GSDMB2_fraction", "GSDMB_to_ERBB2_ratio", "exon6_positive_GSDMB_to_ERBB2_ratio",
     "pyroptotic_isoform_fraction", "non_pyroptotic_isoform_fraction",
     "G4_vs_total", "G2_vs_total",
+    "exon6_containing_fraction", "exon6_lacking_fraction", "exon6_balance_log2",
+    "exon7_containing_fraction", "exon7_lacking_fraction", "exon7_balance_log2",
 ]
+ISOFORM_BASE_COLS = ("G1", "G2", "G3", "G3b", "G4")
+ISOFORM_PROFILE_VARS = tuple(f"excel_iso_ratio__{iso}_to_isoform_total" for iso in ISOFORM_BASE_COLS)
+EXCEL_LEGACY_ENDPOINTS = {
+    "pyroptotic_isoform_fraction", "non_pyroptotic_isoform_fraction",
+    "G4_vs_total", "G2_vs_total",
+    "exon6_containing_fraction", "exon6_lacking_fraction", "exon6_balance_log2",
+    "exon7_lacking_fraction", "exon7_balance_log2",
+}
 QC_COLS = [
     "RNA_QC_Analysis_Ready", "RNA_QC_Exploratory_Ready", "RNA_QC_Final_Status",
     "RNA_QC_Exclusion_Reason", "RNA_QC_Eligibility_Note",
@@ -107,13 +121,13 @@ def sx(v):
         (r"^DNA_(AT|EN|MN)_(\d+)", lambda m: f"SNP_{m.group(1).upper()}_{m.group(2)}"),
         (r"^DNA_(?:SNP_)?MT[-_]T_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
         (r"^MAMAH2_MT[-_]T_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
-        (r"^MAMAH2_MT[-_]N_(\d+)", lambda m: f"SNP_MN_{m.group(1)}"),
-        (r"^RNA_SNP_(AT|EN|MN|MT-T|MT-N)[-_]?(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
-        (r"^SNP_RNA_(AT|EN|MN|MT-T|MT-N)_(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
-        (r"^SNP_(AT|EN|MN|MT-T|MT-N)_RNA_(\d+)", lambda m: f"SNP_{'MN' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
+        (r"^MAMAH2_MT[-_]N_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
+        (r"^RNA_SNP_(AT|EN|MN|MT-T|MT-N)[-_]?(\d+)", lambda m: f"SNP_{'MT-T' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
+        (r"^SNP_RNA_(AT|EN|MN|MT-T|MT-N)_(\d+)", lambda m: f"SNP_{'MT-T' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
+        (r"^SNP_(AT|EN|MN|MT-T|MT-N)_RNA_(\d+)", lambda m: f"SNP_{'MT-T' if m.group(1).upper() == 'MT-N' else m.group(1).upper()}_{m.group(2)}"),
         (r"^RNA_(AT|EN|MN)_(\d+)", lambda m: f"SNP_{m.group(1).upper()}_{m.group(2)}"),
         (r"^RNA_MT[-_]T_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
-        (r"^RNA_MT[-_]N_(\d+)", lambda m: f"SNP_MN_{m.group(1)}"),
+        (r"^RNA_MT[-_]N_(\d+)", lambda m: f"SNP_MT-T_{m.group(1)}"),
     ]
     for pat, fmt in patterns:
         m = re.match(pat, t, re.I)
@@ -222,6 +236,14 @@ def categorise_excel_column(col):
     if col in ISOFORM_COLS:
         if col == "GSDMB":
             return "excel_total", f"excel_total__{clean_name(col)}", "overall_gene_expression"
+        if col in {"GSDMB1_expression", "GSDMB2_expression", "GSDMB3_expression", "GSDMB4_expression"}:
+            return "excel_isoform", f"excel_iso__{clean_name(col)}", "isoform_expression"
+        if col in {"exon6_positive_fraction", "exon7_containing_fraction", "exon7_deficient_fraction", "GSDMB2_fraction", "exon6_containing_fraction", "exon6_lacking_fraction", "G2_vs_total", "G4_vs_total", "pyroptotic_isoform_fraction", "non_pyroptotic_isoform_fraction"}:
+            return "excel_iso_ratio", f"excel_iso_ratio__{clean_name(col)}", "isoform_composition"
+        if col in {"exon6_positive_to_negative_log2", "exon7_containing_to_deficient_log2", "exon6_balance_log2", "exon7_balance_log2"}:
+            return "excel_iso_ratio", f"excel_iso_ratio__{clean_name(col)}", "isoform_log_ratio"
+        if col in {"GSDMB_to_ERBB2_ratio", "exon6_positive_GSDMB_to_ERBB2_ratio"}:
+            return "excel_erbb2_ratio", f"excel_erbb2_ratio__{clean_name(col)}", "erbb2_normalised_expression"
         return "excel_isoform", f"excel_iso__{clean_name(col)}", "isoform_expression"
     if col == "GSDMB EXPRESSION IN PANEL":
         return "excel_panel", f"excel_panel__{clean_name(col)}", "other_rna_quant"
@@ -234,6 +256,130 @@ def expression_nonmissing(df, cols):
     return df[cols].apply(pd.to_numeric, errors="coerce").notna().sum(axis=1)
 
 
+def _safe_log2_ratio(numerator, denominator, pseudocount=1e-6):
+    numerator = pd.to_numeric(numerator, errors="coerce")
+    denominator = pd.to_numeric(denominator, errors="coerce")
+    return np.log2((numerator + pseudocount) / (denominator + pseudocount))
+
+
+def add_isoform_ratio_features(collapsed, var_rows):
+    iso_cols = {iso: f"excel_iso__{clean_name(iso)}" for iso in ISOFORM_BASE_COLS}
+    available = {iso: col for iso, col in iso_cols.items() if col in collapsed.columns}
+    if len(available) < 2:
+        return collapsed, var_rows
+
+    iso_values = pd.DataFrame({
+        iso: pd.to_numeric(collapsed[col], errors="coerce")
+        for iso, col in available.items()
+    }, index=collapsed.index)
+    total = iso_values.sum(axis=1, min_count=1)
+    valid_total = total > 0
+    existing_vars = {row.get("Integrated_Var") for row in var_rows}
+
+    def record_var(new_col, label, source, level):
+        if new_col in existing_vars:
+            return
+        var_rows.append({
+            "Integrated_Var": new_col,
+            "Original_Var": label,
+            "RNA_Source": source,
+            "RNA_Level": level,
+            "Nonmissing_Collapsed": int(pd.to_numeric(collapsed[new_col], errors="coerce").notna().sum()),
+        })
+        existing_vars.add(new_col)
+
+    def add_numeric_feature(new_col, label, values, source, level):
+        if new_col not in collapsed.columns:
+            collapsed[new_col] = values
+        record_var(new_col, label, source, level)
+
+    iso_aliases = {
+        "GSDMB1_expression": iso_values["G1"] if "G1" in iso_values.columns else pd.Series(np.nan, index=collapsed.index),
+        "GSDMB2_expression": iso_values["G2"] if "G2" in iso_values.columns else pd.Series(np.nan, index=collapsed.index),
+        "GSDMB3_expression": iso_values[[c for c in ("G3", "G3b") if c in iso_values.columns]].sum(axis=1, min_count=1),
+        "GSDMB4_expression": iso_values["G4"] if "G4" in iso_values.columns else pd.Series(np.nan, index=collapsed.index),
+    }
+    for label, values in iso_aliases.items():
+        add_numeric_feature(
+            f"excel_iso__{label}",
+            label.replace("_", " "),
+            values,
+            "excel_isoform",
+            "isoform_expression",
+        )
+
+    for iso in ISOFORM_BASE_COLS:
+        if iso not in iso_values.columns:
+            continue
+        new_col = f"excel_iso_ratio__{iso}_to_isoform_total"
+        collapsed[new_col] = np.where(valid_total, iso_values[iso] / total, np.nan)
+
+    def add_log_ratio(new_col, label, numerator, denominator):
+        add_numeric_feature(new_col, label, _safe_log2_ratio(numerator, denominator), "excel_iso_ratio", "isoform_log_ratio")
+
+    pyro = iso_values[[c for c in ("G3", "G3b", "G4") if c in iso_values.columns]].sum(axis=1, min_count=1)
+    non_pyro = iso_values[[c for c in ("G1", "G2") if c in iso_values.columns]].sum(axis=1, min_count=1)
+    if pyro.notna().any():
+        add_numeric_feature(
+            "excel_iso_ratio__exon6_positive_fraction",
+            "(G3+G3b+G4) / sum(G1,G2,G3,G3b,G4)",
+            np.where(valid_total, pyro / total, np.nan),
+            "excel_iso_ratio",
+            "isoform_composition",
+        )
+        if "G2" in iso_values.columns:
+            add_numeric_feature(
+                "excel_iso_ratio__GSDMB2_fraction",
+                "GSDMB2 / sum(G1,G2,G3,G3b,G4)",
+                np.where(valid_total, iso_values["G2"] / total, np.nan),
+                "excel_iso_ratio",
+                "isoform_composition",
+            )
+    if pyro.notna().any() and non_pyro.notna().any():
+        add_log_ratio("excel_iso_ratio__exon6_positive_to_negative_log2", "log2((G3+G3b+G4)/(G1+G2))", pyro, non_pyro)
+    exon7_containing = iso_values[[c for c in ("G1", "G3", "G3b") if c in iso_values.columns]].sum(axis=1, min_count=1)
+    exon7_deficient = iso_values[[c for c in ("G2", "G4") if c in iso_values.columns]].sum(axis=1, min_count=1)
+    if exon7_containing.notna().any():
+        add_numeric_feature(
+            "excel_iso_ratio__exon7_containing_fraction",
+            "(G1+G3+G3b) / sum(G1,G2,G3,G3b,G4)",
+            np.where(valid_total, exon7_containing / total, np.nan),
+            "excel_iso_ratio",
+            "isoform_composition",
+        )
+    if exon7_deficient.notna().any():
+        add_numeric_feature(
+            "excel_iso_ratio__exon7_deficient_fraction",
+            "(G2+G4) / sum(G1,G2,G3,G3b,G4)",
+            np.where(valid_total, exon7_deficient / total, np.nan),
+            "excel_iso_ratio",
+            "isoform_composition",
+        )
+    if exon7_containing.notna().any() and exon7_deficient.notna().any():
+        add_log_ratio("excel_iso_ratio__exon7_containing_to_deficient_log2", "log2((G1+G3+G3b)/(G2+G4))", exon7_containing, exon7_deficient)
+    erbb2_col = "excel_panel__ERBB2" if "excel_panel__ERBB2" in collapsed.columns else None
+    gsdmb_col = "excel_total__GSDMB" if "excel_total__GSDMB" in collapsed.columns else None
+    if erbb2_col:
+        erbb2 = pd.to_numeric(collapsed[erbb2_col], errors="coerce")
+        if gsdmb_col:
+            add_numeric_feature(
+                "excel_erbb2_ratio__GSDMB_to_ERBB2_ratio",
+                "Total GSDMB / ERBB2",
+                np.where(erbb2 > 0, pd.to_numeric(collapsed[gsdmb_col], errors="coerce") / erbb2, np.nan),
+                "excel_erbb2_ratio",
+                "erbb2_normalised_expression",
+            )
+        if pyro.notna().any():
+            add_numeric_feature(
+                "excel_erbb2_ratio__exon6_positive_GSDMB_to_ERBB2_ratio",
+                "(G3+G3b+G4) / ERBB2",
+                np.where(erbb2 > 0, pyro / erbb2, np.nan),
+                "excel_erbb2_ratio",
+                "erbb2_normalised_expression",
+            )
+    return collapsed, var_rows
+
+
 def load_excel_na(stage20_path):
     # Stage 20 can contain repeated rows per sample. We collapse to one
     # best-supported row per `snp_code` while keeping provenance columns that
@@ -243,6 +389,8 @@ def load_excel_na(stage20_path):
     raw = raw[raw["snp_code"].notna() & (raw["snp_code"] != "") & (raw["snp_code"] != "nan")].copy()
     value_cols = []
     for col in raw.columns:
+        if col in EXCEL_LEGACY_ENDPOINTS:
+            continue
         if col in META_COLS or col.startswith(META_PREFIXES):
             continue
         if re.match(r"^rs\d+(_[A-Za-z]+)?$", str(col), re.I):
@@ -284,7 +432,8 @@ def load_excel_na(stage20_path):
             "Nonmissing_Collapsed": int(pd.to_numeric(collapsed[col], errors="coerce").notna().sum()),
         })
     collapsed = collapsed.rename(columns=rename_map)
-    vars_df = pd.DataFrame(var_rows).sort_values(["RNA_Source", "Integrated_Var"]).reset_index(drop=True)
+    collapsed, var_rows = add_isoform_ratio_features(collapsed, var_rows)
+    vars_df = pd.DataFrame(var_rows).drop_duplicates("Integrated_Var", keep="first").sort_values(["RNA_Source", "Integrated_Var"]).reset_index(drop=True)
     return collapsed, vars_df, raw
 
 
@@ -424,6 +573,7 @@ def empty_significant_mutation_table():
         columns=[
             "Exposure_ID", "Base_Exposure_ID", "Comparison", "Exposure_Label",
             "Exposure_Type", "Gene", "Consequence", "IMPACT",
+            "Component_Genes", "Component_Variants", "Component_Variant_Count",
             "Significant_Clinical_Vars", "Significant_Models", "Min_FDR",
             "N_Carriers_Cohort", "Carrier_Samples", "RNA_Testable",
             "RNA_Test_Note",
@@ -527,13 +677,16 @@ def load_significant_mutations(breast_path, endo_path, exposure_catalogue_path):
     expo = pd.read_csv(exposure_catalogue_path, sep="	")
     expo_cols = [c for c in [
         "Exposure_ID", "Exposure_Label", "Exposure_Type", "Gene", "Consequence",
-        "IMPACT", "Carrier_Samples",
+        "IMPACT", "Component_Genes", "Component_Variants", "Component_Variant_Count",
+        "Carrier_Samples",
     ] if c in expo.columns]
     assoc = assoc.merge(expo[expo_cols].drop_duplicates("Exposure_ID"), on="Exposure_ID", how="left", suffixes=("", "_catalogue"))
-    for col in ["Exposure_Label", "Exposure_Type", "Gene", "Consequence", "IMPACT", "Carrier_Samples"]:
+    for col in ["Exposure_Label", "Exposure_Type", "Gene", "Consequence", "IMPACT", "Component_Genes", "Component_Variants", "Component_Variant_Count", "Carrier_Samples"]:
         cat_col = f"{col}_catalogue"
         if cat_col in assoc.columns:
             assoc[col] = assoc[col].fillna(assoc[cat_col])
+        if col not in assoc.columns:
+            assoc[col] = np.nan
 
     assoc["Base_Exposure_ID"] = assoc["Exposure_ID"].astype(str)
     assoc["Exposure_ID"] = assoc["Comparison"].astype(str) + "::" + assoc["Base_Exposure_ID"].astype(str)
@@ -545,6 +698,9 @@ def load_significant_mutations(breast_path, endo_path, exposure_catalogue_path):
             Gene=("Gene", first_valid),
             Consequence=("Consequence", first_valid),
             IMPACT=("IMPACT", first_valid),
+            Component_Genes=("Component_Genes", first_valid),
+            Component_Variants=("Component_Variants", first_valid),
+            Component_Variant_Count=("Component_Variant_Count", "max"),
             Significant_Clinical_Vars=("Clinical_Var", lambda x: "; ".join(sorted({s(v) for v in x if s(v)}))),
             Significant_Models=("Significant_Models", lambda x: "; ".join(sorted({part.strip() for v in x for part in s(v).split(";") if part.strip()}))),
             Min_FDR=("Min_FDR", "min"),
@@ -726,6 +882,9 @@ def build_significant_mutation_dosage(sig_mut_df, sample_codes):
                 "Comparison": mut.get("Comparison", np.nan),
                 "Exposure_Type": mut.get("Exposure_Type", np.nan),
                 "Gene": mut.get("Gene", np.nan),
+                "Component_Genes": mut.get("Component_Genes", np.nan),
+                "Component_Variants": mut.get("Component_Variants", np.nan),
+                "Component_Variant_Count": mut.get("Component_Variant_Count", np.nan),
                 "Dosage": 1.0 if code in carrier_codes else 0.0,
             })
         note = (
@@ -815,7 +974,7 @@ def regression_rows(na_df, dosage_df, exposures_df, exposure_type, var_catalog):
                     "Median_Carrier_Minus_Noncarrier": carrier.median() - noncarrier.median() if len(carrier) and len(noncarrier) else np.nan,
                     "Effect_Direction": "Higher_with_dosage" if slope > 0 else "Lower_with_dosage",
                 }
-                for key in ["Source_Groups", "LD_Block_ID", "Min_FDR", "Min_P", "Region", "Haplotype_ID", "Comparison", "Global_Freq", "Overlapping_Significant_SNPs", "Consistency_Summary", "Base_Exposure_ID", "Exposure_Label", "Gene", "Consequence", "IMPACT", "Significant_Clinical_Vars", "Significant_Models"]:
+                for key in ["Source_Groups", "LD_Block_ID", "Min_FDR", "Min_P", "Region", "Haplotype_ID", "Comparison", "Global_Freq", "Overlapping_Significant_SNPs", "Consistency_Summary", "Base_Exposure_ID", "Exposure_Label", "Gene", "Consequence", "IMPACT", "Component_Genes", "Component_Variants", "Component_Variant_Count", "Significant_Clinical_Vars", "Significant_Models"]:
                     if key in meta:
                         row[key] = meta[key]
                 rows.append(row)
@@ -823,6 +982,141 @@ def regression_rows(na_df, dosage_df, exposures_df, exposure_type, var_catalog):
     if result.empty:
         return result
     return add_fdr(result, "P_Value", ["Exposure_Type", id_col, "Context", "RNA_Source"])
+
+
+def _clr_profile_frame(df, profile_cols):
+    work = df[["Dosage"] + list(profile_cols)].copy()
+    for col in work.columns:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    work = work.dropna()
+    if work.empty:
+        return np.empty((0, len(profile_cols))), work
+    valid = (work[list(profile_cols)] >= 0).all(axis=1) & (work[list(profile_cols)].sum(axis=1) > 0)
+    work = work[valid].copy()
+    if work.empty:
+        return np.empty((0, len(profile_cols))), work
+    props = work[list(profile_cols)].div(work[list(profile_cols)].sum(axis=1), axis=0)
+    logs = np.log(props.to_numpy(dtype=float) + 1e-6)
+    clr = logs - logs.mean(axis=1, keepdims=True)
+    return clr, work
+
+
+def _profile_pseudo_f(clr, groups):
+    groups = pd.Series(groups).reset_index(drop=True)
+    if clr.shape[0] < MIN_N:
+        return np.nan, np.nan, np.nan, np.nan
+    levels = [level for level in sorted(groups.dropna().unique()) if (groups == level).sum() > 0]
+    if len(levels) < 2 or clr.shape[0] <= len(levels):
+        return np.nan, np.nan, np.nan, np.nan
+    centroid = clr.mean(axis=0)
+    total_ss = float(((clr - centroid) ** 2).sum())
+    within_ss = 0.0
+    for level in levels:
+        x = clr[(groups == level).to_numpy()]
+        within_ss += float(((x - x.mean(axis=0)) ** 2).sum())
+    between_ss = max(total_ss - within_ss, 0.0)
+    df_between = len(levels) - 1
+    df_within = clr.shape[0] - len(levels)
+    if df_between <= 0 or df_within <= 0 or within_ss <= 0:
+        return np.nan, between_ss, within_ss, total_ss
+    pseudo_f = (between_ss / df_between) / (within_ss / df_within)
+    return float(pseudo_f), between_ss, within_ss, total_ss
+
+
+def _permutation_profile_p(clr, groups, n_perm=499, rng=None):
+    rng = rng or np.random.default_rng(42)
+    observed, between_ss, within_ss, total_ss = _profile_pseudo_f(clr, groups)
+    if not np.isfinite(observed):
+        return observed, np.nan, between_ss, within_ss, total_ss
+    group_values = pd.Series(groups).to_numpy()
+    hits = 0
+    for _ in range(n_perm):
+        permuted = rng.permutation(group_values)
+        perm_f, _, _, _ = _profile_pseudo_f(clr, permuted)
+        if np.isfinite(perm_f) and perm_f >= observed:
+            hits += 1
+    p_value = (hits + 1) / (n_perm + 1)
+    return observed, float(p_value), between_ss, within_ss, total_ss
+
+
+def isoform_profile_rows(na_df, dosage_df, exposures_df, exposure_type, n_perm=499):
+    profile_cols = [col for col in ISOFORM_PROFILE_VARS if col in na_df.columns]
+    if len(profile_cols) < 3:
+        return pd.DataFrame()
+    rows = []
+    exposure_meta = exposures_df.copy()
+    if exposure_type == "SNP":
+        id_col = "SNP_ID"
+        if exposure_meta.empty or id_col not in exposure_meta.columns or id_col not in dosage_df.columns:
+            return pd.DataFrame()
+        cohort_map = exposure_meta.set_index(id_col)["Source_Groups"].to_dict()
+        meta_map = exposure_meta.set_index(id_col).to_dict(orient="index")
+    else:
+        id_col = "Exposure_ID"
+        if exposure_meta.empty or id_col not in exposure_meta.columns or id_col not in dosage_df.columns:
+            return pd.DataFrame()
+        cohort_map = {r["Exposure_ID"]: r["Comparison"] for _, r in exposure_meta.iterrows()}
+        meta_map = exposure_meta.set_index(id_col).to_dict(orient="index")
+
+    rng = np.random.default_rng(42)
+    for exposure_id, g in dosage_df.groupby(id_col, dropna=False):
+        contexts = context_for_sources(cohort_map.get(exposure_id, "")) if exposure_type == "SNP" else [simplify_comparison(cohort_map.get(exposure_id, "All_Primary"))]
+        for context in contexts:
+            base = subset_for_context(na_df, context)
+            merge_cols = [c for c in ["analysis_sample_id", "snp_code", "Dosage"] if c in g.columns]
+            dedup_keys = [c for c in ["analysis_sample_id"] if c in merge_cols]
+            merged = base.merge(g[merge_cols].drop_duplicates(dedup_keys if dedup_keys else None), on="snp_code", how="inner")
+            if merged.empty:
+                continue
+            clr, work = _clr_profile_frame(merged, profile_cols)
+            if work.empty:
+                continue
+            carrier_count = int((work["Dosage"] > 0).sum())
+            dose_group_sizes = work.groupby("Dosage", dropna=True).size()
+            if len(work) < MIN_N or work["Dosage"].nunique() < 2 or carrier_count < MIN_CARRIERS or int((dose_group_sizes >= MIN_CARRIERS).sum()) < 2:
+                continue
+            pseudo_f, p_value, between_ss, within_ss, total_ss = _permutation_profile_p(clr, work["Dosage"], n_perm=n_perm, rng=rng)
+            if not np.isfinite(p_value):
+                continue
+            slopes = {}
+            for col in profile_cols:
+                iso = col.replace("excel_iso_ratio__", "").replace("_to_isoform_total", "")
+                y = pd.to_numeric(work[col], errors="coerce")
+                x = pd.to_numeric(work["Dosage"], errors="coerce")
+                t = pd.concat([x, y], axis=1).dropna()
+                if len(t) >= MIN_N and t.iloc[:, 0].nunique() >= 2 and t.iloc[:, 1].nunique() >= 2:
+                    slopes[iso] = float(stats.linregress(t.iloc[:, 0], t.iloc[:, 1]).slope)
+            ordered = sorted(slopes.items(), key=lambda item: abs(item[1]), reverse=True)
+            meta = meta_map.get(exposure_id, {})
+            row = {
+                "Exposure_Type": exposure_type,
+                id_col: exposure_id,
+                "Context": context,
+                "Profile_Test": "PERMANOVA_Aitchison_CLR_by_dosage",
+                "N": len(work),
+                "Carrier_Count": carrier_count,
+                "N_Dose0": int((work["Dosage"] == 0).sum()),
+                "N_Dose1": int((work["Dosage"] == 1).sum()),
+                "N_Dose2": int((work["Dosage"] == 2).sum()),
+                "Pseudo_F": pseudo_f,
+                "P_Value": p_value,
+                "Between_SS": between_ss,
+                "Within_SS": within_ss,
+                "Total_SS": total_ss,
+                "Top_Isoform_Shift": ordered[0][0] if ordered else np.nan,
+                "Top_Isoform_Slope": ordered[0][1] if ordered else np.nan,
+                "Positive_Isoform_Shifts": "; ".join(f"{iso}:{slope:.4g}" for iso, slope in ordered if slope > 0),
+                "Negative_Isoform_Shifts": "; ".join(f"{iso}:{slope:.4g}" for iso, slope in ordered if slope < 0),
+                "Profile_Variables": "; ".join(profile_cols),
+            }
+            for key in ["Source_Groups", "LD_Block_ID", "Min_FDR", "Min_P", "Region", "Haplotype_ID", "Comparison", "Global_Freq", "Overlapping_Significant_SNPs", "Consistency_Summary", "Base_Exposure_ID", "Exposure_Label", "Gene", "Consequence", "IMPACT", "Component_Genes", "Component_Variants", "Component_Variant_Count", "Significant_Clinical_Vars", "Significant_Models"]:
+                if key in meta:
+                    row[key] = meta[key]
+            rows.append(row)
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    return add_fdr(result, "P_Value", ["Exposure_Type", "Context"])
 
 
 def plot_heatmap(df, row_col, out_path, title):
@@ -841,14 +1135,22 @@ def plot_heatmap(df, row_col, out_path, title):
     fig_h = max(4, 0.4 * len(piv.index) + 2)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     if sns is not None:
-        sns.heatmap(piv, cmap="coolwarm", center=0, linewidths=0.4, linecolor="white", ax=ax)
+        sns.heatmap(
+            piv,
+            cmap="coolwarm",
+            center=0,
+            linewidths=0.4,
+            linecolor="white",
+            ax=ax,
+            cbar_kws={"label": "signed -log10(P value)"},
+        )
     else:
         im = ax.imshow(piv.values, aspect="auto", cmap="coolwarm")
         ax.set_xticks(range(len(piv.columns)))
         ax.set_xticklabels(piv.columns, rotation=40, ha="right", fontsize=8)
         ax.set_yticks(range(len(piv.index)))
         ax.set_yticklabels(piv.index, fontsize=8)
-        fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+        fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02, label="signed -log10(P value)")
     ax.set_title(title, fontsize=12, fontweight="bold")
     ax.set_xlabel("")
     ax.set_ylabel("")
@@ -876,6 +1178,7 @@ def summarise_hits(snp_assoc, mutation_assoc, hap_assoc):
         "Summary_Status", "Exposure_Type", "SNP_ID", "Exposure_ID", "Context", "RNA_Var", "RNA_Source", "RNA_Level",
         "P_Value", "FDR", "Slope", "R", "N", "Carrier_Count", "Effect_Direction",
         "Source_Groups", "Base_Exposure_ID", "Exposure_Label", "Gene", "Significant_Clinical_Vars", "Significant_Models",
+        "Component_Genes", "Component_Variants", "Component_Variant_Count",
         "Region", "Haplotype_ID", "Comparison", "Overlapping_Significant_SNPs",
     ] if c in out.columns]
     return out[keep].sort_values(["Summary_Status", "P_Value", "N"], ascending=[True, True, False]).reset_index(drop=True)
@@ -883,14 +1186,21 @@ def summarise_hits(snp_assoc, mutation_assoc, hap_assoc):
 
 def build_gsdmb_isoform_answer(snp_assoc, mutation_assoc, hap_assoc):
     rows = []
+    requested_levels = {
+        "overall_gene_expression",
+        "isoform_expression",
+        "isoform_composition",
+        "isoform_log_ratio",
+        "erbb2_normalised_expression",
+    }
     for exposure_type, df, id_col in [("SNP", snp_assoc, "SNP_ID"), ("Mutation", mutation_assoc, "Exposure_ID"), ("Haplotype", hap_assoc, "Exposure_ID")]:
         if df.empty:
             continue
-        work = df[df["RNA_Level"].astype(str).eq("isoform_expression")].copy()
+        work = df[df["RNA_Level"].astype(str).isin(requested_levels)].copy()
         if work.empty:
             continue
         work["Exposure_Label_Final"] = work[id_col].astype(str)
-        work["RNA_Label"] = work["RNA_Var"].astype(str).str.replace(r"^[^_]+__", "", regex=True)
+        work["RNA_Label"] = work["RNA_Var"].astype(str).str.replace(r"^[^_]+__", "", regex=True).str.replace("_", " ", regex=False)
         work["Summary_Status"] = np.where(
             work["FDR_Sig"].fillna(False),
             "FDR_significant",
@@ -905,6 +1215,7 @@ def build_gsdmb_isoform_answer(snp_assoc, mutation_assoc, hap_assoc):
             "P_Value", "FDR", "Slope", "R", "N", "Carrier_Count", "N_Dose0", "N_Dose1", "N_Dose2",
             "Effect_Direction", "Interpretation", "Region", "Haplotype_ID", "Comparison",
             "Base_Exposure_ID", "Exposure_Label", "Gene", "Significant_Clinical_Vars", "Significant_Models",
+            "Component_Genes", "Component_Variants", "Component_Variant_Count",
         ] if c in work.columns]
         rows.append(work[keep])
     if not rows:
@@ -947,7 +1258,7 @@ def build_gsdmb_isoform_summary(gsdmb_isoform_answer):
             note = f"{len(exposure_list)} linked SNPs share this isoform-association pattern."
         elif len(exposure_list) > 1:
             note = f"{len(exposure_list)} exposures share this isoform-association pattern."
-        rows.append({
+        row = {
             "Summary Status": keys[0],
             "Exposure Type": keys[1],
             "Context": keys[2],
@@ -967,7 +1278,14 @@ def build_gsdmb_isoform_summary(gsdmb_isoform_answer):
             "Exposure List": "; ".join(exposure_list),
             "Interpretation": keys[14],
             "Summary Note": note,
-        })
+        }
+        if "Component_Genes" in sub.columns:
+            row["Component Genes"] = "; ".join(sorted({part.strip() for value in sub["Component_Genes"].dropna().astype(str) for part in value.split(";") if part.strip()}))
+        if "Component_Variants" in sub.columns:
+            row["Component Variants"] = "; ".join(sorted({part.strip() for value in sub["Component_Variants"].dropna().astype(str) for part in value.split(";") if part.strip()}))
+        if "Component_Variant_Count" in sub.columns:
+            row["Component Variant Count"] = pd.to_numeric(sub["Component_Variant_Count"], errors="coerce").max()
+        rows.append(row)
     order = {"FDR_significant": 0, "Nominal_only": 1, "Top_ranked_context": 2}
     out = pd.DataFrame(rows)
     out["__order"] = out["Summary Status"].map(order).fillna(9)
@@ -1386,6 +1704,9 @@ def main():
     snp_assoc = regression_rows(primary_na, snp_dosage, sig_snps_summary, "SNP", na_catalog)
     mutation_assoc = regression_rows(primary_na, mutation_dosage, sig_mutations_summary, "Mutation", na_catalog)
     hap_assoc = regression_rows(primary_na, hap_dosage, sig_haps, "Haplotype", na_catalog)
+    snp_isoform_profile_assoc = isoform_profile_rows(primary_na, snp_dosage, sig_snps_summary, "SNP")
+    mutation_isoform_profile_assoc = isoform_profile_rows(primary_na, mutation_dosage, sig_mutations_summary, "Mutation")
+    hap_isoform_profile_assoc = isoform_profile_rows(primary_na, hap_dosage, sig_haps, "Haplotype")
     immune_summary = build_immune_response_summary(na)
     bootstrap_stability_summary = pd.concat([
         build_bootstrap_stability_summary(primary_na, snp_dosage, snp_assoc, "SNP_ID", "SNP", top_n=15, n_boot=200),
@@ -1409,6 +1730,7 @@ def main():
                 "Stage 23 links cleaned RNA data to current significant SNP, mutation, and haplotype signals.",
                 "Excel-derived variables preserve isoform and panel-expression provenance with explicit prefixes.",
                 "BAM-derived variables use stage-20b ratio-normalised panel expression with bam_ratio__ prefixes.",
+                "Mutation and rare-variant burden rows retain Component_Genes, Component_Variants, and Component_Variant_Count from stage 17b.",
                 "If stage 22 has not been run, significant haplotypes are recovered directly from the stage-15 association workbook so stage 23 remains part of the core pipeline.",
                 "Associations are restricted to primary tumour samples passing the exploratory RNA QC gate, while the manifest still preserves which rows were strict-ready versus exploratory-only.",
                 "Use the GSDMB Isoform Summary sheet for the collapsed supervisor-facing answer, and gsdmb_isoform_answer for the fully expanded row-level output.",
@@ -1416,6 +1738,8 @@ def main():
                 "Immune-response scoring is derived from the panel-gene layer using the available immune markers; mediation and bootstrap summaries use age and BMI as the only covariates.",
                 "Excel RNA values are treated as source-normalised assay outputs and preserved in their original workbook units; no extra repo-level rescaling is applied to those columns.",
                 "Excel-vs-BAM comparison sheets therefore report cross-platform concordance unless directly compatible units are explicitly known for the paired variables.",
+                "The primary RNA endpoint set is total GSDMB, GSDMB1-4 expression, exon-6-positive fraction/balance, exon-7-containing and exon-7-deficient fraction/balance, GSDMB2 fraction, total GSDMB/ERBB2, exon-6-positive GSDMB/ERBB2, isoform-profile correlations with measured genes, and their SNP/haplotype/clinical associations. GSDMB5 is documented but not tested unless a measured G5/GSDMB5 column is available.",
+                "Isoform-profile association sheets use a permutation test on Aitchison CLR-transformed isoform proportions to ask whether an exposure shifts several isoforms jointly.",
                 "FDR is applied within each exposure x context x RNA source family.",
             ]
         }).to_excel(writer, sheet_name="README", index=False)
@@ -1433,6 +1757,9 @@ def main():
         (snp_assoc if not snp_assoc.empty else pd.DataFrame({"Note": ["No significant-SNP RNA tests met the minimum thresholds."]})).to_excel(writer, sheet_name="snp_rna_assoc", index=False)
         (mutation_assoc if not mutation_assoc.empty else pd.DataFrame({"Note": ["No significant-mutation RNA tests met the minimum thresholds."]})).to_excel(writer, sheet_name="mutation_rna_assoc", index=False)
         (hap_assoc if not hap_assoc.empty else pd.DataFrame({"Note": ["No significant-haplotype RNA tests met the minimum thresholds."]})).to_excel(writer, sheet_name="haplotype_rna_assoc", index=False)
+        (snp_isoform_profile_assoc if not snp_isoform_profile_assoc.empty else pd.DataFrame({"Note": ["No significant-SNP isoform-profile tests met the minimum thresholds."]})).to_excel(writer, sheet_name="snp_isoform_profile", index=False)
+        (mutation_isoform_profile_assoc if not mutation_isoform_profile_assoc.empty else pd.DataFrame({"Note": ["No significant-mutation isoform-profile tests met the minimum thresholds."]})).to_excel(writer, sheet_name="mutation_isoform_profile", index=False)
+        (hap_isoform_profile_assoc if not hap_isoform_profile_assoc.empty else pd.DataFrame({"Note": ["No significant-haplotype isoform-profile tests met the minimum thresholds."]})).to_excel(writer, sheet_name="haplotype_isoform_profile", index=False)
         immune_summary.to_excel(writer, sheet_name="immune_response_summary", index=False)
         (bootstrap_stability_summary if not bootstrap_stability_summary.empty else pd.DataFrame({"Note": ["No bootstrap stability rows could be estimated."]})).to_excel(writer, sheet_name="bootstrap_stability_summary", index=False)
         (mediation_summary if not mediation_summary.empty else pd.DataFrame({"Note": ["No mediation rows could be estimated."]})).to_excel(writer, sheet_name="mediation_summary", index=False)
@@ -1462,6 +1789,9 @@ def main():
     print(f"SNP vs RNA tests                : {len(snp_assoc)}")
     print(f"Mutation vs RNA tests           : {len(mutation_assoc)}")
     print(f"Haplotype vs RNA tests          : {len(hap_assoc)}")
+    print(f"SNP isoform-profile tests       : {len(snp_isoform_profile_assoc)}")
+    print(f"Mutation isoform-profile tests  : {len(mutation_isoform_profile_assoc)}")
+    print(f"Haplotype isoform-profile tests : {len(hap_isoform_profile_assoc)}")
     print(f"Therapy-response rows           : {len(therapy_response_assoc)}")
     print(f"Immune markers used             : {len(immune_genes)}")
     print(f"Immune-score summary rows       : {len(immune_summary)}")

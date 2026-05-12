@@ -683,7 +683,7 @@ def plot_block_overlap_heatmap(overlap_df: pd.DataFrame, out_dir: Path) -> None:
             cbar_kws={"label": "Jaccard overlap"},
             ax=ax,
         )
-        ax.set_title(f"LD Block Overlap: {population} ({threshold_label})", loc="left", weight="bold")
+        ax.set_title(f"LD-block overlap: {population} ({threshold_label})", loc="left", weight="bold")
         ax.set_xlabel("1000 Genomes block")
         ax.set_ylabel("Study block")
         ax.set_xticklabels(
@@ -742,11 +742,14 @@ def plot_concordance_summary(summary_df: pd.DataFrame, out_dir: Path) -> None:
             label = str(row.Region).replace("LD_Block_", "")
             point = (float(row.Shared_Frequency_Mass), float(row.Jensen_Shannon_Distance), label)
             right_points.append(point)
-        ax.set_title(f"Haplotype Concordance: {population}", loc="left", weight="bold")
+        ax.set_title(f"Haplotype concordance: {population}", loc="left", weight="bold")
         ax.set_xlabel("Shared haplotype-frequency mass")
         ax.set_ylabel("Jensen-Shannon distance")
         ax.set_xlim(-0.02, 1.02)
         ax.set_ylim(-0.02, 1.02)
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.set_title("LD threshold")
         add_margin_labels(ax, left_points, side="left", max_labels=6)
         add_margin_labels(ax, right_points, side="right", max_labels=6)
         fig.tight_layout(rect=[0.06, 0, 0.94, 1])

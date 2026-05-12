@@ -118,7 +118,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def discover_filtered_vcfs(project_root: Path) -> list[Path]:
-    vcf_paths = sorted(project_root.glob("**/variants.filtered.vcf.gz"))
+    vcf_paths = sorted(
+        path for path in project_root.glob("**/variants.filtered.vcf.gz")
+        if "duplicates" not in {part.lower() for part in path.parts}
+    )
     if not vcf_paths:
         raise FileNotFoundError(f"No variants.filtered.vcf.gz files were found under {project_root}")
     return vcf_paths
@@ -153,15 +156,37 @@ def parse_sample_context(vcf_path: Path) -> dict[str, object]:
         cohort = parts[-4] if len(parts) >= 4 else "Unknown"
     cohort = standardize_cohort_labels(pd.Series([cohort])).iloc[0].capitalize()
     tissue = standardize_tissue_labels(pd.Series([tissue])).iloc[0]
+    tissue = {"normal": "Healthy", "healthy": "Healthy", "tumour": "Tumour", "tumor": "Tumour"}.get(str(tissue).strip().lower(), tissue)
     bam_path = parse_bam_from_tvc_log(sample_dir / "logs" / "tvc.cmd.log")
     return {
         "sample": sample,
+        "raw_sample": sample,
         "cohort": cohort,
         "tissue": tissue,
         "vcf_path": vcf_path,
         "sample_dir": sample_dir,
         "bam_path": bam_path,
     }
+
+
+def folder_context_sample_name(record: dict[str, object]) -> str:
+    """Return a unique sample label that preserves folder cohort/tissue context."""
+    return f"{record['raw_sample']}__{record['cohort']}_{record['tissue']}"
+
+
+def disambiguate_duplicate_sample_names(sample_records: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Make duplicate raw basenames unique using the curated folder context."""
+    counts = Counter(str(record["raw_sample"]) for record in sample_records)
+    out: list[dict[str, object]] = []
+    for record in sample_records:
+        record = dict(record)
+        if counts[str(record["raw_sample"])] > 1:
+            record["sample"] = folder_context_sample_name(record)
+            record["folder_context_disambiguated"] = True
+        else:
+            record["folder_context_disambiguated"] = False
+        out.append(record)
+    return out
 
 
 def query_vcf_sites(vcf_path: Path) -> list[dict[str, object]]:
@@ -368,7 +393,12 @@ def force_genotype_sample(
     ensure_directory(sample_log.parent)
     ensure_directory(sample_table_path.parent)
     if sample_table_path.exists():
-        return pd.read_csv(sample_table_path, sep="	")
+        cached = pd.read_csv(sample_table_path, sep="	")
+        if "Raw_Sample" not in cached.columns:
+            cached.insert(1, "Raw_Sample", record.get("raw_sample", sample))
+        if "Folder_Context_Disambiguated" not in cached.columns:
+            cached.insert(2, "Folder_Context_Disambiguated", bool(record.get("folder_context_disambiguated", False)))
+        return cached
 
     mpileup_cmd = [
         "bcftools",
@@ -416,6 +446,8 @@ def force_genotype_sample(
 
     merged = locus_catalogue.merge(sample_calls, on=["CHROM", "POS", "REF", "Locus_Key"], how="left")
     merged["Sample"] = sample
+    merged["Raw_Sample"] = record.get("raw_sample", sample)
+    merged["Folder_Context_Disambiguated"] = bool(record.get("folder_context_disambiguated", False))
     merged["Cohort"] = record["cohort"]
     merged["Tissue"] = record["tissue"]
     merged["Observed_ALT_Call"] = merged["Observed_ALT_Call"].fillna("")
@@ -437,6 +469,8 @@ def force_genotype_sample(
 
     column_order = [
         "Sample",
+        "Raw_Sample",
+        "Folder_Context_Disambiguated",
         "Cohort",
         "Tissue",
         "CHROM",
@@ -497,7 +531,7 @@ def summarise_loci(long_df: pd.DataFrame, locus_catalogue: pd.DataFrame) -> pd.D
 
 def summarise_samples(long_df: pd.DataFrame) -> pd.DataFrame:
     sample_summary = (
-        long_df.groupby(["Sample", "Cohort", "Tissue"], as_index=False)
+        long_df.groupby(["Sample", "Raw_Sample", "Folder_Context_Disambiguated", "Cohort", "Tissue"], as_index=False)
         .agg(
             N_Loci=("Locus_Key", "nunique"),
             N_WT=("Genotype_Status", lambda s: int((s.astype(str) == "WT").sum())),
@@ -626,6 +660,7 @@ def main() -> None:
     log(f"Scanning filtered targeted VCFs under {project_root}")
     vcf_paths = discover_filtered_vcfs(project_root)
     sample_records = [parse_sample_context(vcf_path) for vcf_path in vcf_paths]
+    sample_records = disambiguate_duplicate_sample_names(sample_records)
     sample_records = sorted(sample_records, key=lambda record: (str(record["cohort"]), str(record["tissue"]), str(record["sample"])))
     log(f"Recovered {len(sample_records)} filtered VCFs / sample BAM pairs")
 

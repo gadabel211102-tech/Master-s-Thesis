@@ -95,7 +95,7 @@ def _plot_top_hits(ax, df: pd.DataFrame, title: str, label_fn, colour: str) -> N
     ax.barh(ypos, scores, color=colour, alpha=0.82, edgecolor=edge, linewidth=1.3)
     ax.set_yticks(ypos)
     ax.set_yticklabels(labels, fontsize=8)
-    ax.set_xlabel("-log10(p)", fontsize=8.5)
+    ax.set_xlabel("-log10(P value)", fontsize=8.5)
     ax.set_title(title, fontsize=10, fontweight="bold")
     ax.grid(axis="x", linestyle=":", alpha=0.25)
     for y, score, (_, row) in zip(ypos, scores, top.iterrows()):
@@ -177,7 +177,7 @@ def make_panel_gene_significant_summary(summary_df: pd.DataFrame, out_path: Path
     count_vals = list(count_map.values())
     count_cols = ["#4C78A8", "#F58518", "#54A24B"]
     ax_counts.bar(count_labels, count_vals, color=count_cols, alpha=0.88)
-    ax_counts.set_title("Genes with >=1 FDR-significant hit", fontsize=10, fontweight="bold")
+    ax_counts.set_title("Genes with at least one FDR-significant hit", fontsize=10, fontweight="bold")
     ax_counts.set_ylabel("Genes", fontsize=9)
     ax_counts.tick_params(axis="x", labelrotation=10, labelsize=8)
     for i, v in enumerate(count_vals):
@@ -198,7 +198,7 @@ def make_panel_gene_significant_summary(summary_df: pd.DataFrame, out_path: Path
         labels.append(f"{row['Gene']} | {target}")
     ax_bar.set_yticks(ypos)
     ax_bar.set_yticklabels(labels, fontsize=8.5)
-    ax_bar.set_xlabel("-log10(best p-value)", fontsize=10)
+    ax_bar.set_xlabel("-log10(best P value)", fontsize=10)
     ax_bar.set_title("Top FDR-significant panel genes", fontsize=11, fontweight="bold")
     ax_bar.grid(axis="x", linestyle=":", alpha=0.25)
     for spine in ["top", "right"]:
@@ -482,6 +482,5 @@ def export_panel_gene_reports(merged: pd.DataFrame, primary: pd.DataFrame, genes
     manifest_df = pd.DataFrame(manifest_rows).sort_values("Gene")
     make_panel_gene_significant_summary(manifest_df, figure_dir / "20_PanelGene_Significant_Summary.png")
     return manifest_df
-
 
 

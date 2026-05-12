@@ -377,7 +377,7 @@ def draw_frequency_figure(df: pd.DataFrame, label_column: str, reference_column:
     ax.set_yticks(y_positions)
     ax.set_yticklabels(plot_df[label_column].tolist(), fontsize=9)
     ax.set_xlim(-0.02, 1.02)
-    ax.set_xlabel("Frequency")
+    ax.set_xlabel("Carrier frequency")
     ax.set_title(title, loc="left", fontsize=16, weight="bold")
     fig.text(0.125, 0.955, subtitle, ha="left", va="top", fontsize=10)
     if footnote:

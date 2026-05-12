@@ -113,7 +113,7 @@ def create_stat_visuals(df_to_plot, title_suffix, filename, use_log=False, as_pe
     ax1.set_title(f'Consequence Profile: {title_suffix}', fontsize=16, fontweight='bold')
     if use_log and not as_percentage:
         ax1.set_yscale('log')
-    ax1.set_ylabel('Within-group percentage (%)' if as_percentage else ('Count (Log Scale)' if use_log else 'Count'))
+    ax1.set_ylabel('Within-group share (%)' if as_percentage else ('Count (log scale)' if use_log else 'Count'))
     handles1, labels1 = ax1.get_legend_handles_labels()
     ax1.legend(handles1, [_wrap_label(label, width=20, max_lines=2) for label in labels1],
                bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=8, title='Consequence', ncol=2)
@@ -123,7 +123,7 @@ def create_stat_visuals(df_to_plot, title_suffix, filename, use_log=False, as_pe
     ax2.set_title(f'Impact Profile: {title_suffix}', fontsize=16, fontweight='bold')
     if use_log and not as_percentage:
         ax2.set_yscale('log')
-    ax2.set_ylabel('Within-group percentage (%)' if as_percentage else ('Count (Log Scale)' if use_log else 'Count'))
+    ax2.set_ylabel('Within-group share (%)' if as_percentage else ('Count (log scale)' if use_log else 'Count'))
     handles2, labels2 = ax2.get_legend_handles_labels()
     ax2.legend(handles2, [_wrap_label(label, width=16, max_lines=2) for label in labels2],
                bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=8, title='Impact', ncol=2)
@@ -142,7 +142,7 @@ def create_stat_visuals(df_to_plot, title_suffix, filename, use_log=False, as_pe
                         fontsize=7, fontweight='bold', color='white' if h > 10 else 'black')
 
     fig.suptitle(
-        f"Variant Composition: {'Within-Group %' if as_percentage else 'Counts'}",
+        f"Variant composition: {'within-group share' if as_percentage else 'counts'}",
         fontsize=15, fontweight='bold', y=0.98
     )
     fig.text(0.5, 0.01,

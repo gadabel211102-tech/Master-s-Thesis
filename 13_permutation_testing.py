@@ -474,14 +474,14 @@ def generate_comparison_plots(results_df):
         )
 
     max_val = max(ax1.get_xlim()[1], ax1.get_ylim()[1])
-    ax1.plot([0, max_val], [0, max_val], "k--", alpha=0.3, label="x=y")
+    ax1.plot([0, max_val], [0, max_val], "k--", alpha=0.3, label="x = y")
     sig_line = -np.log10(0.05)
-    ax1.axhline(sig_line, color="red", linestyle=":", alpha=0.5, label="p=0.05")
+    ax1.axhline(sig_line, color="red", linestyle=":", alpha=0.5, label="P = 0.05")
     ax1.axvline(sig_line, color="red", linestyle=":", alpha=0.5)
 
-    ax1.set_xlabel("Fisher's Exact Test (-log10 raw p)", fontweight="bold")
-    ax1.set_ylabel("Permutation Test (-log10 raw p)", fontweight="bold")
-    ax1.set_title("Raw p-value Concordance", fontweight="bold", fontsize=12)
+    ax1.set_xlabel("Fisher exact test (-log10 raw P value)", fontweight="bold")
+    ax1.set_ylabel("Permutation test (-log10 raw P value)", fontweight="bold")
+    ax1.set_title("Raw P-value concordance", fontweight="bold", fontsize=12)
     ax1.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=8)
     ax1.grid(True, alpha=0.3)
 
@@ -498,10 +498,10 @@ def generate_comparison_plots(results_df):
             color=colors.get(cohort, "#95a5a6")
         )
 
-    ax2.axhline(sig_line, color="red", linestyle=":", alpha=0.5, label="p=0.05")
-    ax2.set_xlabel("Effect Size (Cohen's h)", fontweight="bold")
-    ax2.set_ylabel("Permutation Test (-log10 raw p)", fontweight="bold")
-    ax2.set_title("Effect Size vs Raw Significance", fontweight="bold", fontsize=12)
+    ax2.axhline(sig_line, color="red", linestyle=":", alpha=0.5, label="P = 0.05")
+    ax2.set_xlabel("Effect size (Cohen's h)", fontweight="bold")
+    ax2.set_ylabel("Permutation test (-log10 raw P value)", fontweight="bold")
+    ax2.set_title("Effect size versus raw significance", fontweight="bold", fontsize=12)
     ax2.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=8)
     ax2.grid(True, alpha=0.3)
 
@@ -520,9 +520,9 @@ def generate_comparison_plots(results_df):
         )
 
     ax3.axvline(0, color="black", linestyle="--", alpha=0.5, label="No difference")
-    ax3.set_xlabel("Frequency Difference (Tumour - Control %)", fontweight="bold")
+    ax3.set_xlabel("Carrier-frequency difference (tumour minus control, percentage points)", fontweight="bold")
     ax3.set_ylabel("Density", fontweight="bold")
-    ax3.set_title("Tumour-Control Frequency Shift", fontweight="bold", fontsize=12)
+    ax3.set_title("Tumour-control carrier-frequency shift", fontweight="bold", fontsize=12)
     ax3.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=8)
     ax3.grid(True, alpha=0.3, axis="y")
 
@@ -556,7 +556,7 @@ def generate_comparison_plots(results_df):
     )
     ax4.set_xlabel("Cohort", fontweight="bold")
     ax4.set_ylabel("Percentage of SNPs", fontweight="bold")
-    ax4.set_title("FDR Concordance by Test", fontweight="bold", fontsize=12)
+    ax4.set_title("FDR concordance by test", fontweight="bold", fontsize=12)
     ax4.legend(title="Significance", bbox_to_anchor=(1.05, 1), loc="upper left")
     plt.setp(ax4.xaxis.get_majorticklabels(), rotation=0)
     ax4.set_ylim(0, 100)

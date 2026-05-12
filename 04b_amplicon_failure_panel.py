@@ -39,19 +39,19 @@ def main() -> None:
         fail_depth = samtools_depth(row['fail_bam'], region)
         pass_depth = samtools_depth(row['pass_bam'], region)
 
-        ax.plot(fail_depth['pos'], fail_depth['depth'], color='#c0392b', lw=1.6, label='Fail')
-        ax.plot(pass_depth['pos'], pass_depth['depth'], color='#1f77b4', lw=1.6, label='Pass')
+        ax.plot(fail_depth['pos'], fail_depth['depth'], color='#c0392b', lw=1.6, label='Failed sample')
+        ax.plot(pass_depth['pos'], pass_depth['depth'], color='#1f77b4', lw=1.6, label='Passed sample')
         ax.axvspan(start, end, color='#f1c40f', alpha=0.25)
         ax.set_xlim(start-PADDING, end+PADDING)
         ax.set_title(f"{row['flagged_label']} | {row['global_fail_pct']:.1f}% fail", fontsize=12, weight='bold')
         ax.text(0.02, 0.96, f"{row['worst_cohort'].replace('_', ' ')}\nfailed sample zero amplicons: {int(row['fail_zero_amplicons_total'])}", transform=ax.transAxes, va='top', fontsize=9, bbox=dict(boxstyle='round,pad=0.25', fc='white', ec='#d0d7de', alpha=0.9))
         ax.grid(alpha=0.18)
-        ax.set_xlabel('chr17 position')
-        ax.set_ylabel('Per-base depth')
+        ax.set_xlabel('Chromosome 17 position')
+        ax.set_ylabel('Per-base read depth')
 
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='upper center', ncol=2, frameon=False, bbox_to_anchor=(0.5, 1.01))
-    fig.suptitle('Six worst flagged amplicons: representative failed vs passed DNA BAM depth', fontsize=18, weight='bold')
+    fig.suptitle('Six worst flagged amplicons: representative failed versus passed DNA BAM depth', fontsize=18, weight='bold')
     fig.savefig(OUT, dpi=220, bbox_inches='tight')
 
 

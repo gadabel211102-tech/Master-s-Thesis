@@ -549,7 +549,7 @@ def plot_snp_genotype_heatmap(genotype_df: pd.DataFrame, output_path: str) -> No
             fmt=".1f",
             annot_kws={"fontsize": 7},
             cbar=ax is axes.flat[-1],
-            cbar_kws={"label": "-log10 p"} if ax is axes.flat[-1] else None,
+            cbar_kws={"label": "-log10(P value)"} if ax is axes.flat[-1] else None,
         )
         ax.set_title(f"{group} genotype enrichment", fontweight="bold")
         ax.set_xlabel("")

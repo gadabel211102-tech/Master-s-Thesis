@@ -1394,13 +1394,13 @@ def plot_dosage_genotype_heatmap(
         center=0,
         linewidths=0.6,
         linecolor="white",
-        cbar_kws={"label": "Tumour minus healthy percentage points"},
+        cbar_kws={"label": "Tumour minus healthy (percentage points)"},
         ax=ax,
     )
-    ax.set_title("Dosage and Genotype Separation for Primary Haplotypes and Significant SNPs")
+    ax.set_title("Dosage and genotype separation for primary haplotypes and significant SNPs")
     ax.set_xlabel("Genotype class")
     ax.set_ylabel("")
-    ax.set_xticklabels(["WT", "Het", "Hom"], rotation=0)
+    ax.set_xticklabels(["WT", "Het", "Hom ALT"], rotation=0)
     fig.tight_layout()
     fig.savefig(out_path, dpi=250, bbox_inches="tight")
     plt.close(fig)
