@@ -40,7 +40,7 @@ install_haplotype_r_dependencies.R	./install_haplotype_r_dependencies.R	UTILITY_
 24_external_cross_validation.py	./24_external_cross_validation.py	EXPLORATORY_VALIDATION	Runs external breast and endometrial validation against female-only 1000 Genomes reference samples.	no	no
 25_rs11078928_rs869402_haplotype_focus.py	./25_rs11078928_rs869402_haplotype_focus.py	EXPLORATORY_VALIDATION	Performs a focused follow-up analysis on the rs11078928 and rs869402 haplotypic context.	no	no
 26_snp_functional_interpretation.py	./26_snp_functional_interpretation.py	EXPLORATORY_VALIDATION	Adds a SNP biological interpretation layer combining annotations, RNA context, and optional external support.	no	no
-28_sample_similarity_audit.py	./28_sample_similarity_audit.py	UTILITY_REPORTING	Audits sample concordance, aliasing, and identity separation across the study set.	no	no
+27_sample_similarity_audit.py	./28_sample_similarity_audit.py	UTILITY_REPORTING	Audits sample concordance, aliasing, and identity separation across the study set.	no	no
 association_runtime.py	./association_runtime.py	UTILITY_REPORTING	Shared runtime defaults used by the association and RNA scripts to keep paths and thresholds aligned.	yes	no
 objective2_gene_report_exports.py	./objective2_gene_report_exports.py	UTILITY_REPORTING	Shared export helpers used by the core objective-2 RNA workflow.	yes	no
 objective2_rna_qc_utils.py	./objective2_rna_qc_utils.py	UTILITY_REPORTING	Shared RNA QC and matching helpers used by stages 19b and 20.	yes	no
