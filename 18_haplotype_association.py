@@ -143,6 +143,138 @@ def _sig_label(p):
     return "ns"
 
 
+def _haplotype_km_page_is_significant(page: Dict) -> bool:
+    p_cox = pd.to_numeric(page.get("P_Cox", np.nan), errors="coerce")
+    p_logrank = pd.to_numeric(page.get("P_LogRank", np.nan), errors="coerce")
+    fdr_cox = pd.to_numeric(page.get("FDR_Cox", np.nan), errors="coerce")
+    return bool(
+        page.get("Nominal_Sig", False)
+        or (pd.notna(p_logrank) and p_logrank < 0.05)
+        or (pd.notna(fdr_cox) and fdr_cox < FDR_THRESHOLD)
+    )
+
+
+def _render_adjusted_haplotype_survival_page(page: Dict):
+    cph = page.get("Cox_Model")
+    covariates = list(page.get("Cox_Covariates") or [])
+    cox_frame = page.get("Cox_Frame")
+    if cph is None or "carrier" not in covariates or cox_frame is None or cox_frame.empty:
+        return None
+
+    fig, ax = plt.subplots(figsize=(6.2, 4.2))
+    reference_profile = {}
+    for covariate in covariates:
+        if covariate == "carrier":
+            continue
+        values = pd.to_numeric(cox_frame[covariate], errors="coerce") if covariate in cox_frame.columns else pd.Series(dtype=float)
+        mean_value = values.dropna().mean() if not values.empty else 0.0
+        reference_profile[covariate] = 0.0 if pd.isna(mean_value) else float(mean_value)
+
+    predict_rows = pd.DataFrame(
+        [
+            {"carrier": 0, **reference_profile},
+            {"carrier": 1, **reference_profile},
+        ],
+        columns=covariates,
+    )
+    survival_functions = cph.predict_survival_function(predict_rows)
+    group_counts = {
+        0: int(pd.to_numeric(page["Frame"]["Carrier"], errors="coerce").eq(0).sum()),
+        1: int(pd.to_numeric(page["Frame"]["Carrier"], errors="coerce").eq(1).sum()),
+    }
+
+    plotted = False
+    for idx, carrier_value in enumerate([0, 1]):
+        if survival_functions.shape[1] <= idx:
+            continue
+        label = "Wild-type" if carrier_value == 0 else "Carrier"
+        color = HAPLOTYPE_STATUS_COLORS["Wild-type"] if carrier_value == 0 else HAPLOTYPE_STATUS_COLORS["Heterozygous"]
+        surv = survival_functions.iloc[:, idx]
+        ax.step(
+            surv.index,
+            surv.values,
+            where="post",
+            linewidth=2.3,
+            color=color,
+            label=f"{label} (n={group_counts[carrier_value]})",
+        )
+        plotted = True
+
+    if not plotted:
+        plt.close(fig)
+        return None
+
+    p_cox = pd.to_numeric(page.get("P_Cox", np.nan), errors="coerce")
+    p_logrank = pd.to_numeric(page.get("P_LogRank", np.nan), errors="coerce")
+    adjustment = page.get("Cox_Adjustment", "Adjusted")
+    title = (
+        f"Cox-adjusted survival of {page['Endpoint']} according to {page['Haplotype_ID']}\n"
+        f"{page['Cohort']} | {adjustment}"
+    )
+    if pd.notna(p_cox):
+        title += f" | Cox p={p_cox:.4f}"
+    ax.set_title(title, fontsize=9)
+    ax.set_xlabel(f"{page['Endpoint']} (months)")
+    ax.set_ylabel("Predicted survival probability")
+    ax.legend(fontsize=8, title="Haplotype group")
+    _style_ax(ax)
+    note_lines = [
+        str(page.get("Cox_Adjustment_Note", "")).strip(),
+        "Curves are Cox-model predictions at mean covariate values.",
+    ]
+    if pd.notna(p_logrank):
+        note_lines.append(f"Raw log-rank p = {p_logrank:.4f}")
+    ax.text(
+        0.02,
+        0.02,
+        "\n".join([line for line in note_lines if line]),
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=7.6,
+        bbox=dict(boxstyle="round,pad=0.24", fc="white", ec="#cccccc", alpha=0.92),
+    )
+    plt.tight_layout()
+    return fig
+
+
+def _render_haplotype_km_page(page: Dict):
+    if page.get("Cox_Model") is not None and page.get("Cox_Adjustment") not in {None, "", "Unadjusted"}:
+        fig = _render_adjusted_haplotype_survival_page(page)
+        if fig is not None:
+            return fig
+    frame = page.get("Frame")
+    if frame is None or frame.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(6, 4))
+    plotted = False
+    for grp_val, grp_label, col in [
+        (0, "Wild-type", HAPLOTYPE_STATUS_COLORS["Wild-type"]),
+        (1, "Carrier", HAPLOTYPE_STATUS_COLORS["Heterozygous"]),
+    ]:
+        mask = pd.to_numeric(frame["Carrier"], errors="coerce") == grp_val
+        if mask.sum() < 2:
+            continue
+        kmf = KaplanMeierFitter()
+        kmf.fit(frame.loc[mask, "T"], frame.loc[mask, "E"], label=f"{grp_label} (n={int(mask.sum())})")
+        kmf.plot_survival_function(ax=ax, ci_show=True, color=col)
+        plotted = True
+    if not plotted:
+        plt.close(fig)
+        return None
+    ax.set_title(
+        f"Kaplan-Meier analysis of {page['Endpoint']} according to {page['Haplotype_ID']} genotype grouping\n"
+        f"{page['Cohort']} | Log-rank p={page['P_LogRank']:.4f}",
+        fontsize=9,
+    )
+    ax.set_xlabel(f"{page['Endpoint']} (months)")
+    ax.set_ylabel("Survival probability")
+    ax.legend(fontsize=8, title="Haplotype group")
+    _style_ax(ax)
+    plt.tight_layout()
+    return fig
+
+
 def _short_label(value, max_len=34):
     if pd.isna(value):
         return ""
@@ -1344,10 +1476,12 @@ def survival_analysis(merged: pd.DataFrame) -> Tuple[pd.DataFrame, List]:
                 hr     = np.nan
                 hr_lo  = np.nan
                 hr_hi  = np.nan
+                cph_model = None
                 if len(cox_df) >= 6 and cox_df["carrier"].nunique() > 1:
                     try:
                         cph = CoxPHFitter()
                         cph.fit(cox_df[["T", "E"] + cov], duration_col="T", event_col="E")
+                        cph_model = cph
                         p_cox  = cph.summary.loc["carrier", "p"]
                         hr     = cph.summary.loc["carrier", "exp(coef)"]
                         hr_lo  = cph.summary.loc["carrier", "exp(coef) lower 95%"]
@@ -1373,28 +1507,23 @@ def survival_analysis(merged: pd.DataFrame) -> Tuple[pd.DataFrame, List]:
                     "P_Cox":         p_cox,
                 })
 
-                # KM plot
-                fig, ax = plt.subplots(figsize=(6, 4))
-                for grp_val, grp_label, col in [(0, "Wild-type", HAPLOTYPE_STATUS_COLORS["Wild-type"]),
-                                                 (1, "Carrier",     HAPLOTYPE_STATUS_COLORS["Heterozygous"])]:
-                    mask = carrier == grp_val
-                    if mask.sum() < 2:
-                        continue
-                    kmf = KaplanMeierFitter()
-                    kmf.fit(T[mask], E[mask],
-                            label=f"{grp_label} (n={mask.sum()})")
-                    kmf.plot_survival_function(ax=ax, ci_show=True, color=col)
-                ax.set_title(
-                    f"Kaplan-Meier analysis of {endpoint} according to {hap_id} genotype grouping\n"
-                    f"{cohort_label} | Log-rank p={lr_p:.4f}",
-                    fontsize=9,
-                )
-                ax.set_xlabel(f"{endpoint} (months)")
-                ax.set_ylabel("Survival probability")
-                ax.legend(fontsize=8, title="Haplotype group")
-                _style_ax(ax)
-                plt.tight_layout()
-                km_pages.append(fig)
+                km_pages.append({
+                    "Cohort": cohort_label,
+                    "Endpoint": endpoint,
+                    "Haplotype_ID": hap_id,
+                    "Haplotype": hap_str,
+                    "Cox_Adjustment": cox_adjustment,
+                    "Cox_Adjustment_Note": cox_adjustment_note,
+                    "Cox_Covariates": cov.copy(),
+                    "Cox_Frame": cox_df.copy(),
+                    "Cox_Model": cph_model,
+                    "Frame": pd.DataFrame({"T": T.astype(float), "E": E.astype(float), "Carrier": carrier.astype(int)}),
+                    "P_LogRank": float(lr_p),
+                    "P_Cox": p_cox,
+                    "N_Total": len(valid),
+                    "N_Carriers": int(n_c),
+                    "N_NonCarriers": int(n_nc),
+                })
 
     res = pd.DataFrame(rows)
     if not res.empty:
@@ -1404,6 +1533,25 @@ def survival_analysis(merged: pd.DataFrame) -> Tuple[pd.DataFrame, List]:
             fdr_parts.append(grp)
         res = pd.concat(fdr_parts, ignore_index=True)
         res["Nominal_Sig"] = res["P_Cox"] < 0.05
+        page_meta = {
+            (row["Cohort"], row["Endpoint"], row["Haplotype_ID"]): {
+                "P_Cox": row.get("P_Cox", np.nan),
+                "FDR_Cox": row.get("FDR_Cox", np.nan),
+                "Nominal_Sig": bool(row.get("Nominal_Sig", False)),
+            }
+            for _, row in res.iterrows()
+        }
+        for page in km_pages:
+            page.update(page_meta.get((page["Cohort"], page["Endpoint"], page["Haplotype_ID"]), {}))
+        km_pages.sort(
+            key=lambda page: (
+                page.get("Cohort", ""),
+                page.get("Endpoint", ""),
+                0 if _haplotype_km_page_is_significant(page) else 1,
+                pd.to_numeric(page.get("P_Cox", np.inf), errors="coerce") if pd.notna(pd.to_numeric(page.get("P_Cox", np.nan), errors="coerce")) else np.inf,
+                page.get("Haplotype_ID", ""),
+            )
+        )
         n_nom = res["Nominal_Sig"].sum()
         print(f"  {len(res)} tests | {n_nom} nominal (Cox)\n")
     else:
@@ -2052,10 +2200,15 @@ def make_km_pdf(km_pages: List, out_path: Path):
     if not km_pages:
         return
     with pdf_backend.PdfPages(out_path) as pdf:
-        for fig in km_pages:
+        page_count = 0
+        for page in km_pages:
+            fig = _render_haplotype_km_page(page)
+            if fig is None:
+                continue
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
-    print(f"  Saved: {out_path}  ({len(km_pages)} pages)")
+            page_count += 1
+    print(f"  Saved: {out_path}  ({page_count} pages)")
 
 
 # ── MAIN ─────────────────────────────────────────────────────────────────────
@@ -2739,6 +2892,7 @@ def main():
     for stale in out_dir.glob("18_*.pdf"):
         _archive_root_output(stale)
     _archive_root_output(out_dir / "significant_only_figures")
+    _archive_root_output(supplementary_dir / "survival_curves_all")
 
     make_volcano(tvh, supplementary_dir)
 
@@ -2824,7 +2978,16 @@ def main():
 
     # Secondary outputs
     make_risk_forest(risk_res, supplementary_dir / "18_Haplo_Forest_CancerRisk.png")
-    make_km_pdf(all_km_pages, supplementary_dir / "GSDMB_Haplotype_KM_Curves_Endometrial.pdf")
+    survival_dir = supplementary_dir / "survival_curves_all"
+    survival_dir.mkdir(parents=True, exist_ok=True)
+    significant_survival_dir = survival_dir / "significant_only"
+    significant_survival_dir.mkdir(parents=True, exist_ok=True)
+    make_km_pdf(all_km_pages, survival_dir / "GSDMB_Haplotype_KM_Curves_All.pdf")
+    sig_km_pages = [page for page in all_km_pages if _haplotype_km_page_is_significant(page)]
+    if sig_km_pages:
+        make_km_pdf(sig_km_pages, significant_survival_dir / "GSDMB_Haplotype_KM_Curves_Significant_Only.pdf")
+    else:
+        print(f"  No significant haplotype survival pages; skipped {significant_survival_dir / 'GSDMB_Haplotype_KM_Curves_Significant_Only.pdf'}")
 
     print()
     print("=" * 60)

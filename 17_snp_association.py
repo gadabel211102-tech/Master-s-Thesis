@@ -2035,8 +2035,12 @@ def survival_analysis(merged: pd.DataFrame):
 
     km_pages = []
     for (cohort, endpoint, model_slug), sub in out.groupby(["Cohort", "Endpoint", "Model_Slug"], dropna=False):
-        chosen = sub.sort_values(["FDR_Sig_Cox_Additive", "Nominal_Sig_Cox_Additive", "P_Cox_Additive"], ascending=[False, False, True]).head(3)
-        for _, row in chosen.iterrows():
+        ordered = sub.sort_values(
+            ["FDR_Sig_Cox_Additive", "Nominal_Sig_Cox_Additive", "P_Cox_Additive", "Variant_ID"],
+            ascending=[False, False, True, True],
+            kind="stable",
+        )
+        for _, row in ordered.iterrows():
             frame = km_store.get((cohort, endpoint, row["Variant_ID"], model_slug))
             if frame is None or frame.empty:
                 continue
@@ -2051,7 +2055,12 @@ def survival_analysis(merged: pd.DataFrame):
                 "P_Cox_Additive": row.get("P_Cox_Additive", np.nan),
                 "FDR_Cox_Additive": row.get("FDR_Cox_Additive", np.nan),
                 "P_LogRank": row.get("P_LogRank", np.nan),
+                "FDR_LogRank": row.get("FDR_LogRank", np.nan),
                 "HR_Cox_Additive": row.get("HR_Cox_Additive", np.nan),
+                "Nominal_Sig_Cox_Additive": bool(row.get("Nominal_Sig_Cox_Additive", False)),
+                "FDR_Sig_Cox_Additive": bool(row.get("FDR_Sig_Cox_Additive", False)),
+                "Nominal_Sig_LogRank": bool(row.get("Nominal_Sig_LogRank", False)),
+                "FDR_Sig_LogRank": bool(row.get("FDR_Sig_LogRank", False)),
             })
 
     return out, km_pages
@@ -2146,95 +2155,151 @@ def _save_placeholder_plot(out_path: Path, title: str, subtitle: str = ''):
 def make_volcano_plots(tvh: pd.DataFrame, out_dir: Path):
     if tvh.empty:
         return
+    group_specs = [
+        ("Breast", "Breast tumour vs pooled healthy controls"),
+        ("Endometrium", "Endometrial tumour vs pooled healthy controls"),
+    ]
+    key_variants = {
+        "rs870829",
+        "rs907092",
+        "rs2941522",
+        "rs11078928",
+        "rs2305479",
+        "rs2305480",
+        "rs117097909",
+        "rs62067034",
+    }
+    gene_palette = {
+        "GSDMB": "#D55E00",
+        "IKZF3": "#CC79A7",
+        "ORMDL3": "#009E73",
+        "GSDMA": "#E69F00",
+        "PGAP3": "#56B4E9",
+        "ZPBP2": "#6A4C93",
+        "Other": "#C7CED8",
+    }
+
+    def _volcano_gene_group(value: object) -> str:
+        text = str(value).strip().upper()
+        if text in {"GSDMB", "IKZF3", "ORMDL3", "GSDMA", "PGAP3", "ZPBP2"}:
+            return text
+        return "Other"
+
     for suffix, p_col, threshold, ylabel in [
         ("raw_p", "P_Value", 0.05, "-log10 raw P value"),
         ("FDR", "FDR_P_Value", FDR_THRESHOLD, "-log10(FDR q-value)"),
     ]:
-        fig, axes = plt.subplots(1, 3, figsize=(17.8, 6.2), squeeze=False, gridspec_kw={"wspace": 0.18})
-        legend_handles = []
-        for ax, grp in zip(axes[0], ["Breast", "Endometrium", "Global"]):
-            sub = tvh[tvh['Analysis_Group'] == grp].copy()
+        plot_frames = {}
+        for grp, _ in group_specs:
+            sub = tvh[tvh["Analysis_Group"] == grp].copy()
             if sub.empty:
-                ax.set_visible(False)
                 continue
-            sub = sub[pd.to_numeric(sub[p_col], errors='coerce').notna()].copy()
-            sub['x'] = np.log2(pd.to_numeric(sub['Odds_Ratio'], errors='coerce').replace(0, np.nan))
-            sub['y'] = _neglog10(sub[p_col])
-            sub['Display_Label'] = sub.apply(_variant_display_label, axis=1)
+            sub = sub[pd.to_numeric(sub[p_col], errors="coerce").notna()].copy()
+            sub["Odds_Ratio"] = pd.to_numeric(sub["Odds_Ratio"], errors="coerce")
+            sub["x"] = np.log2(sub["Odds_Ratio"].replace(0, np.nan))
+            sub["x"] = sub["x"].replace([np.inf, -np.inf], np.nan)
+            sub["y"] = _neglog10(sub[p_col])
             sub["P_Value"] = pd.to_numeric(sub.get("P_Value"), errors="coerce")
             sub["FDR_P_Value"] = pd.to_numeric(sub.get("FDR_P_Value"), errors="coerce")
-            sub["Sig_Class"] = "Not significant"
-            sub.loc[sub["P_Value"] < 0.05, "Sig_Class"] = "Nominal only"
-            sub.loc[sub["FDR_P_Value"] < FDR_THRESHOLD, "Sig_Class"] = f"FDR < {FDR_THRESHOLD:g}"
-            sub["Sig_Class"] = pd.Categorical(sub["Sig_Class"], categories=_VOLCANO_CLASS_ORDER, ordered=True)
-            family = _cohort_family(grp)
-            class_colors = {
-                "Not significant": "#C9CED6",
-                "Nominal only": family["light"],
-                f"FDR < {FDR_THRESHOLD:g}": family["dark"],
-            }
-            for sig_class in _VOLCANO_CLASS_ORDER:
-                layer = sub[sub["Sig_Class"] == sig_class]
+            sub["rsID"] = sub.get("rsID", sub.get("Variant_ID", "")).astype(str)
+            sub["Gene_Group"] = sub.get("Gene", pd.Series(index=sub.index)).map(_volcano_gene_group)
+            sub["Point_Size"] = np.where(sub["FDR_P_Value"] < FDR_THRESHOLD, 92, 58)
+            sub["Edge_Color"] = np.where(sub["FDR_P_Value"] < FDR_THRESHOLD, "#2A3441", "white")
+            sub["Line_Width"] = np.where(sub["FDR_P_Value"] < FDR_THRESHOLD, 1.0, 0.55)
+            sub = sub[sub["x"].notna() & sub["y"].notna()].copy()
+            if not sub.empty:
+                plot_frames[grp] = sub
+
+        if not plot_frames:
+            continue
+
+        fig, axes = plt.subplots(
+            1,
+            2,
+            figsize=(15.5, 6.8),
+            squeeze=False,
+            sharey=True,
+            gridspec_kw={"wspace": 0.20},
+        )
+        legend_order = ["GSDMB", "GSDMA", "IKZF3", "Other", "ORMDL3", "ZPBP2", "PGAP3"]
+        legend_handles = []
+        for ax, (grp, title) in zip(axes[0], group_specs):
+            sub = plot_frames.get(grp)
+            if sub is None or sub.empty:
+                ax.set_visible(False)
+                continue
+            for gene_group in legend_order:
+                layer = sub[sub["Gene_Group"] == gene_group]
                 if layer.empty:
                     continue
-                sns.scatterplot(
-                    data=layer,
-                    x="x",
-                    y="y",
-                    s=52 if sig_class != "Not significant" else 34,
-                    color=class_colors[sig_class],
-                    edgecolor="white",
-                    linewidth=0.45,
-                    alpha=0.9 if sig_class != "Not significant" else 0.65,
-                    ax=ax,
-                    legend=False,
+                ax.scatter(
+                    layer["x"],
+                    layer["y"],
+                    s=layer["Point_Size"],
+                    c=gene_palette.get(gene_group, "#C7CED8"),
+                    edgecolors=layer["Edge_Color"],
+                    linewidths=layer["Line_Width"],
+                    alpha=0.9,
+                    label=gene_group,
                 )
-            ax.axhline(_neglog10(pd.Series([threshold])).iloc[0], ls='--', lw=1.05, c=family["dark"], alpha=0.85)
-            ax.axvline(0, ls=':', lw=1, c='#7B8290', alpha=0.85)
-            label_pool = sub[sub["Sig_Class"] != "Not significant"].copy()
-            if label_pool.empty:
-                label_pool = sub.nsmallest(min(6, len(sub)), p_col).copy()
-            label_pool = label_pool.sort_values(["FDR_P_Value", "P_Value", "y"], na_position="last").head(8)
-            left_pts = [(r["x"], r["y"], r["Display_Label"]) for _, r in label_pool[label_pool["x"] < 0].iterrows()]
-            right_pts = [(r["x"], r["y"], r["Display_Label"]) for _, r in label_pool[label_pool["x"] >= 0].iterrows()]
-            _add_margin_labels(ax, left_pts, side="left", max_labels=4, fontsize=7.2)
-            _add_margin_labels(ax, right_pts, side="right", max_labels=4, fontsize=7.2)
-            x_abs = np.nanmax(np.abs(sub["x"])) if sub["x"].notna().any() else 1
-            ax.set_xlim(-max(1.1, x_abs * 1.18), max(1.1, x_abs * 1.18))
-            ax.set_ylim(0, max(1.6, float(sub["y"].max()) * 1.12))
+
+            p_line = _neglog10(pd.Series([threshold])).iloc[0]
+            ax.axhline(p_line, ls="--", lw=1.1, c="#7A8696", alpha=0.95)
+            ax.axvline(0, ls=":", lw=1.05, c="#A8B1BD", alpha=0.95)
+            x_abs = float(np.nanmax(np.abs(sub["x"]))) if sub["x"].notna().any() else 1.0
+            ax.set_xlim(-max(1.25, x_abs * 1.12), max(1.25, x_abs * 1.12))
             ax.text(
-                0.02,
-                0.98,
-                f"n = {len(sub)} tests\nNominal: {(sub['P_Value'] < 0.05).sum()} | FDR q: {(sub['FDR_P_Value'] < FDR_THRESHOLD).sum()}",
-                transform=ax.transAxes,
-                ha="left",
-                va="top",
-                fontsize=8,
-                bbox=dict(boxstyle="round,pad=0.28", fc="white", ec="#D0D5DD", alpha=0.96),
+                ax.get_xlim()[1],
+                p_line + 0.05,
+                "p = 0.05" if suffix == "raw_p" else f"q = {FDR_THRESHOLD:g}",
+                ha="right",
+                va="bottom",
+                fontsize=8.6,
+                color="#556173",
             )
-            ax.set_title(f'{grp} tumour vs pooled control', fontsize=10.5, fontweight='bold', loc="left", pad=10)
-            ax.set_xlabel('log2 odds ratio (tumour / control)')
+
+            label_candidates = set(key_variants)
+            label_candidates.update(sub.nsmallest(6, "P_Value")["rsID"].astype(str).tolist())
+            for _, row in sub[sub["rsID"].isin(label_candidates)].iterrows():
+                ax.annotate(
+                    str(row["rsID"]),
+                    (row["x"], row["y"]),
+                    xytext=(4, 5),
+                    textcoords="offset points",
+                    fontsize=8.5,
+                    color="#334155",
+                )
+            ax.set_title(title, fontsize=10.5, fontweight='bold', loc="left", pad=10)
+            ax.set_xlabel('log2 carrier odds ratio')
             ax.set_ylabel(ylabel if ax is axes[0][0] else "", fontsize=9.5, labelpad=6)
-            _style_ax(ax, grid=False)
+            ax.spines[["top", "right"]].set_visible(False)
+            ax.grid(axis="y", linestyle=":", linewidth=0.7, color="#D6DDE6")
+            ax.grid(axis="x", linestyle=":", linewidth=0.7, color="#D6DDE6")
             if not legend_handles:
                 legend_handles = [
-                    mpatches.Patch(facecolor=class_colors["Not significant"], label="Not significant"),
-                    mpatches.Patch(facecolor=class_colors["Nominal only"], label="Nominal P < 0.05"),
-                    mpatches.Patch(facecolor=class_colors[f"FDR < {FDR_THRESHOLD:g}"], label=f"FDR q < {FDR_THRESHOLD:g}"),
+                    plt.Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        linestyle="",
+                        markersize=8,
+                        markerfacecolor=gene_palette[label],
+                        markeredgecolor="#334155" if label != "Other" else "#FFFFFF",
+                        label=label,
+                    )
+                    for label in legend_order
                 ]
         fig.legend(
             handles=legend_handles,
-            loc="upper center",
-            ncol=3,
+            loc="lower center",
+            ncol=4,
             frameon=False,
-            bbox_to_anchor=(0.5, 1.01),
+            bbox_to_anchor=(0.5, -0.03),
             fontsize=9,
-            title="Association support",
-            title_fontsize=9,
         )
         metric_label = "raw P value" if suffix == "raw_p" else "FDR q-value"
-        fig.suptitle(f'Tumour vs control SNP association volcano plots ({metric_label})', fontsize=13, fontweight='bold', y=1.05)
-        _safe_tight_layout(fig, rect=[0.025, 0.02, 0.99, 0.90], pad=1.0, w_pad=2.4)
+        fig.suptitle(f'Tumour vs control SNP association volcano plots ({metric_label})', fontsize=13, fontweight='bold', y=0.98)
+        _safe_tight_layout(fig, rect=[0.02, 0.06, 0.99, 0.93], pad=1.0, w_pad=2.5)
         out = out_dir / f'17_SNP_Volcano_{suffix}.png'
         _save_figure(fig, out, pad_inches=0.22)
 
@@ -2519,6 +2584,10 @@ def make_bmi_category_plot(bmi_summary: pd.DataFrame, bmi_availability: pd.DataF
 def make_km_plots(surv_res: pd.DataFrame, km_pages, out_dir: Path):
     if surv_res.empty or not km_pages or not _HAS_LIFELINES:
         return
+    survival_dir = out_dir / "survival_curves_all"
+    significant_dir = survival_dir / "significant_only"
+    survival_dir.mkdir(parents=True, exist_ok=True)
+    significant_dir.mkdir(parents=True, exist_ok=True)
     pages_by_model = {}
     for page in km_pages:
         pages_by_model.setdefault(page.get("Model_Slug", "genotype_only"), []).append(page)
@@ -2545,18 +2614,29 @@ def make_km_plots(surv_res: pd.DataFrame, km_pages, out_dir: Path):
     }
     carrier_colors = {"WT": "#BDBDBD", "Carrier": "#0072B2"}
 
-    for model_slug, pages in pages_by_model.items():
-        out_name = "17_KM_Curves_Survival.pdf" if model_slug == "genotype_only" else f"17_KM_Curves_Survival_{model_slug}.pdf"
-        out_path = out_dir / out_name
+    def _page_is_significant(page: dict) -> bool:
+        return any(
+            bool(page.get(flag, False))
+            for flag in [
+                "Nominal_Sig_Cox_Additive",
+                "FDR_Sig_Cox_Additive",
+                "Nominal_Sig_LogRank",
+                "FDR_Sig_LogRank",
+            ]
+        )
+
+    def _write_km_pdf(pages_subset, out_path: Path):
+        if not pages_subset:
+            return False
         with pdf_backend.PdfPages(out_path) as pdf:
-            for page in pages:
+            for page in pages_subset:
                 frame = page["Frame"].copy()
                 if frame.empty:
                     continue
                 fig, ax = plt.subplots(figsize=(9.6, 6.8))
                 plotted = False
                 max_time = 0.0
-                plot_mode = plot_modes.get(model_slug, "genotype")
+                plot_mode = plot_modes.get(page.get("Model_Slug", "genotype_only"), "genotype")
                 if plot_mode == "carrier":
                     state_col = "Carrier_State"
                     states = ["WT", "Carrier"]
@@ -2602,6 +2682,7 @@ def make_km_plots(surv_res: pd.DataFrame, km_pages, out_dir: Path):
                 ax.set_xlabel("Time (months)")
                 ax.set_ylabel("Survival probability")
                 variant_text = _variant_display_label(pd.Series(page), max_len=80, include_gene=True)
+                model_slug = page.get("Model_Slug", "genotype_only")
                 model_label = model_titles.get(model_slug, page.get("Model", model_slug))
                 title = f"{page['Cohort']} {page['Endpoint']} survival by {variant_text} ({model_label})".strip()
                 ax.set_title(_wrap_label(title, 54, max_lines=2), fontsize=11.5, fontweight="bold", loc="left", pad=12)
@@ -2635,6 +2716,16 @@ def make_km_plots(surv_res: pd.DataFrame, km_pages, out_dir: Path):
                 pdf.savefig(fig, bbox_inches="tight", pad_inches=0.18)
                 plt.close(fig)
         print(f"  Saved: {out_path}")
+        return True
+
+    for model_slug, pages in pages_by_model.items():
+        out_name = "17_KM_Curves_Survival.pdf" if model_slug == "genotype_only" else f"17_KM_Curves_Survival_{model_slug}.pdf"
+        out_path = survival_dir / out_name
+        _write_km_pdf(pages, out_path)
+        sig_pages = [page for page in pages if _page_is_significant(page)]
+        sig_path = significant_dir / out_name
+        if not _write_km_pdf(sig_pages, sig_path):
+            print(f"  No significant survival pages for {model_slug}; skipped {sig_path}")
 
 
 def make_summary_panel(tvh: pd.DataFrame, breast_clin: pd.DataFrame, endo_clin: pd.DataFrame, surv_res: pd.DataFrame, out_dir: Path):
@@ -3463,6 +3554,7 @@ def main():
         _archive_root_output(stale)
     _archive_root_output(out_dir / "GSDMB_SNP_Association_Summary_Panel.png")
     _archive_root_output(out_dir / "significant_only_figures")
+    _archive_root_output(supplementary_dir / "survival_curves_all")
     make_volcano_plots(tvh, supplementary_dir)
     make_heatmaps(breast_clin, endo_clin, supplementary_dir, significant_only=False)
     make_heatmaps(breast_clin, endo_clin, significant_dir, significant_only=True)
