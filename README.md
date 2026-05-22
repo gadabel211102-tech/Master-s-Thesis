@@ -1,18 +1,8 @@
 # Reproducible Cancer Genomics Workflow for `GSDMB` and `17q12-q21`
 
-This repository contains the analysis code for a Master's thesis on the
+This repository contains the analysis code for my Master's thesis on the
 clinical significance of polymorphic variation around `GSDMB` and the
 `17q12-q21` region in breast and endometrial cancer.
-
-It is designed as a public-facing, code-only scientific repository that shows
-an end-to-end targeted cancer genomics workflow, including:
-
-- sequencing QC and sample-level technical checks
-- variant calling and functional annotation
-- common SNP enrichment and association testing
-- haplotype phasing and haplotype association analysis
-- RNA QC, isoform analysis, and downstream RNA integration
-- reproducibility notes, workflow classification, and interpretation guardrails
 
 ## What this repository demonstrates
 
@@ -33,8 +23,6 @@ This public repository does not include raw or participant-level study data.
 - Public-facing configuration should be based on
   `pipeline_config.example.toml`, not local machine-specific overrides
 
-The aim is to make the code structure, workflow logic, and reproducibility
-approach visible without exposing restricted research inputs.
 
 ## Study design at a glance
 
@@ -47,29 +35,7 @@ The active project is built around an explicitly unpaired study design:
 - RNA integration is a downstream objective built on the DNA and haplotype
   backbone
 
-## Repository snapshot
 
-- `run_full_pipeline.sh`: main launcher for the documented rerun profiles
-- numbered `.py`, `.sh`, and `.R` scripts: thesis workflow stages retained with
-  stable historical numbering
-- `docs/notes/`: pipeline, reproducibility, methods-alignment, and repository
-  guidance
-- `script_classification_table.tsv`: concise machine-readable stage
-  classification
-- `pipeline_config.example.toml`: safe public template for configuration
-
-## Pipeline logic at a glance
-
-There are three different orders in this repository, and they should not be confused.
-
-1. Computational execution order
-   Scripts that must run first because later stages depend on their outputs.
-2. Thesis or story order
-   The cleanest order for Methods, Results, and figure presentation.
-3. Naming or numbering order
-   The historical numbered filenames kept for stability and manuscript cross-reference.
-
-The numbered filenames are being kept as they are. The final clean-up is achieved by regrouping and documenting them properly rather than renumbering everything at the end.
 
 ## Canonical computational core
 
@@ -94,18 +60,7 @@ The default launcher now runs the smallest coherent thesis core:
 17. `20b_panel_gene_expression.py`
 18. `23_rna_integration.py`
 
-Two points matter here:
 
-- `05b_force_genotype_union_sites.py` is a true dependency, even though it is more of a technical backbone step than a headline thesis result.
-- `17b_rare_variant_association.py` is not part of the canonical rerun. It remains a secondary follow-up analysis.
-
-Current analysis conventions:
-
-- Stage 17 uses the forced genotype matrix as the SNP source of truth, so WT/non-carrier samples are included instead of relying only on variant-positive rows.
-- Raw forced-genotype columns are mapped to formal clinical `snp_code` values and then to analysis sample IDs. Exact aliases collapse only when their phased-genotype digest is identical; non-identical repeats are kept as separate `__RUNN` entries.
-- The Stage 17 workbook includes `sample_identity_audit` and `sample_collapse_summary` tabs to document this raw-to-analysis mapping.
-- Current DNA accounting: 232 post-QC DNA BAMs/forced-genotype columns enter the genotype backbone and resolve to 215 Stage 17 analysis sample IDs after exact duplicate collapse. Breast tumours drive the difference: 91 breast tumour BAMs map to 60 formal clinical codes; 31 codes have duplicate BAMs, 17 exact pairs are collapsed, and 14 discordant pairs remain as run-level `__RUNN` entries.
-- RNA isoform endpoints treat `G3b` with `G3` for exon-defined categories.
 
 ## Recommended thesis story
 
@@ -122,7 +77,6 @@ For the thesis text, the work is best described in this order:
 9. RNA or expression integration
 10. Supplementary sensitivity, interpretation, and dashboard layers
 
-That story order is cleaner than the raw script numbering and should be used in the thesis narrative.
 
 ## Repository grouping
 
@@ -215,28 +169,6 @@ Equivalent explicit form:
 ./run_full_pipeline.sh --profile exploratory --from 13 --to 26
 ```
 
-## Main output locations
-
-Core outputs are written under `analysis_results/`, especially:
-
-- `analysis_results/07_annotated_variants`
-- `analysis_results/11_common_snps`
-- `analysis_results/12_snp_enrichment`
-- `analysis_results/15_haplotype_phasing`
-- `analysis_results/15_haplotype_statistics`
-- `analysis_results/17_snp_clinical_associations`
-- `analysis_results/18_haplotype_clinical_associations`
-- `analysis_results/19b_objective2_rna_qc`
-- `analysis_results/20_isoform_expression_associations`
-- `analysis_results/20b_panel_gene_expression`
-- `analysis_results/23_rna_integration`
-
-## Important interpretation guardrails
-
-- Do not describe the breast analysis as matched tumour-normal unless you are explicitly referring to an old prototype script that is no longer part of the active pipeline.
-- Do not describe stage `12` and stage `17` as the same thing. Stage `12` is the main common-SNP tumour-versus-healthy enrichment layer; stage `17` is the broader follow-up association suite.
-- Do not present permutation testing, dashboard outputs, technical audits, or rare-variant follow-up as if they were part of the primary discovery chain.
-- Use association language, not causal language.
 
 ## Key documentation
 
@@ -248,11 +180,3 @@ Core outputs are written under `analysis_results/`, especially:
 - [docs/notes/GITHUB_REPOSITORY_GUIDE.md](docs/notes/GITHUB_REPOSITORY_GUIDE.md): what belongs in a public-facing repository
 - [script_classification_table.tsv](script_classification_table.tsv): concise machine-readable classification of scripts
 
-## Public repository note
-
-For GitHub, examiner-facing sharing, or professional portfolio use:
-
-- keep `pipeline_config.example.toml` as the public template
-- do not track local machine-specific configuration overrides
-- do not track local third-party runtimes or bundled jars unless there is a
-  clear redistribution reason
