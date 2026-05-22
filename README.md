@@ -179,7 +179,7 @@ The repository is now best understood in five groups.
 
 ### Utility, audit, and assembly helpers
 
-These scripts are useful to keep in the GitHub repository, but they are not part of the canonical rerun launched by `run_full_pipeline.sh`.
+These scripts are useful, but they are not part of the canonical rerun launched by `run_full_pipeline.sh`.
 
 - `08b_bed_vs_detected_excel.py`
 - `27_sample_similarity_audit.py`
